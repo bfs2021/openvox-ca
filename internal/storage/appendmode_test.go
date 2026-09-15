@@ -31,13 +31,16 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// AppendLine creates the file it appends to, and the mode it is created with is
-// a published guarantee: docs/configuration.md gives public data as 0644 and
-// docs/migrating-from-puppet-server.md walks an operator through editing the
-// inventory by hand. O_CREATE's mode argument is masked by the umask, so before
-// this the guarantee held only for whoever ran with 0022 -- and the systemd unit
-// is exactly the place someone would tighten it. AtomicWriteFile already defeats
-// the umask deliberately for the same reason; this is the other half.
+// AppendLine creates the file it appends to, and O_CREATE's mode argument is
+// masked by the umask, so the mode it landed on was the operator's rather than
+// ours. AtomicWriteFile defeats the umask deliberately; these are the same
+// operation on the same blobs, and this is the other half.
+//
+// No caller is exposed by the difference today -- AppendInventory, the only
+// non-test caller, passes BlobPrivate, and no realistic umask moves 0600. What
+// these specs pin is that a BlobPublic caller gets the mode the kind names
+// rather than the one the umask leaves, and that an existing file's mode is
+// still not ours to touch.
 var _ = Describe("AppendLine file modes", func() {
 	var dir string
 	var b *FilesystemBackend
@@ -95,6 +98,24 @@ var _ = Describe("AppendLine file modes", func() {
 		info, err := os.Stat(p)
 		Expect(err).NotTo(HaveOccurred(), "stat the inventory")
 		Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o640)), "the mode the operator set")
+	})
+
+	// O_EXCL fails on a dangling symlink as well as on a file, so the fallback
+	// has to keep O_CREATE: without it, appending through a link planted for a
+	// path that does not exist yet -- which the plain O_APPEND|O_CREATE this
+	// replaced handled -- fails ENOENT and the CA cannot write its inventory.
+	It("appends through a symlink planted before the file exists", func() {
+		p := inventoryPath()
+		Expect(os.MkdirAll(filepath.Dir(p), DirPerm)).To(Succeed(), "make the parent")
+		target := filepath.Join(GinkgoT().TempDir(), "inventory.txt")
+		Expect(os.Symlink(target, p)).To(Succeed(), "point the inventory at a file that is not there yet")
+
+		Expect(b.AppendLine(context.Background(), KeyInventory, []byte("0001 na nb /CN=a\n"), BlobPublic)).
+			To(Succeed(), "AppendLine through the dangling link")
+
+		data, err := os.ReadFile(target)
+		Expect(err).NotTo(HaveOccurred(), "the target was created through the link")
+		Expect(string(data)).To(Equal("0001 na nb /CN=a\n"), "the line went through the link")
 	})
 
 	// Appending to an existing file must still append rather than truncate or

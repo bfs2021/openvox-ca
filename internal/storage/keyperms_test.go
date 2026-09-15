@@ -220,6 +220,25 @@ var _ = Describe("CheckKeyPermissions", func() {
 		Expect(NewWithBackend(ov, "").CheckKeyPermissions()).To(BeEmpty(), "a correct key behind a link")
 	})
 
+	// A dangling link is the third outcome, and the one with teeth: a Kubernetes
+	// Secret volume swings its "..data" symlink during a rotation, so a link
+	// whose target is momentarily absent is a state a running deployment passes
+	// through. Losing this return drops the path into the unjudgeable arm, which
+	// refuses to start and is not covered by the opt-out -- a CA that was serving
+	// a minute earlier would refuse on a routine rotation, with nothing in the
+	// suite failing to say so.
+	It("says nothing about a dangling symlink where a key is expected", func() {
+		dir := GinkgoT().TempDir()
+		link := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
+		Expect(os.Symlink(filepath.Join(dir, "gone_key.pem"), link)).To(Succeed(), "a link to nothing")
+
+		ov, err := NewOverlayBackend(NewFilesystemBackend(dir), map[string]string{KeyCAKey: link})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+
+		Expect(NewWithBackend(ov, "").CheckKeyPermissions()).To(BeEmpty(),
+			"nothing to judge, and nothing was written through it either")
+	})
+
 	// The other fail-closed arm: a backend-declared file whose own Lstat fails,
 	// as opposed to the private-key directory whose ReadDir fails. That is the arm
 	// covering the database, its sidecars and a pinned ca_key_file -- everything

@@ -147,17 +147,44 @@ var _ = Describe("key-material permissions at startup", func() {
 		err := refuseOnKeyPermissions([]storage.KeyPermWarning{spaced}, false)
 
 		Expect(err).To(HaveOccurred(), "world-accessible key material")
-		Expect(err.Error()).To(ContainSubstring(`chmod o-rwx '/var/lib/puppet-ca/ca b.db'`),
+		Expect(err.Error()).To(ContainSubstring(`chmod o-rwx -- '/var/lib/puppet-ca/ca b.db'`),
 			"the remedy must be one shell word")
 	})
 
+	// The embedded-quote escape, which is the only part of shellQuote that can be
+	// wrong: the wrap is obvious, and a wrong escape is worse than no quoting at
+	// all, because an unterminated quoted string leaves the operator's shell at a
+	// continuation prompt rather than erroring. Reachable by the same route a
+	// space is -- the DSN parser decodes escapes, so file:ca%27b.db is ca'b.db.
+	It("escapes an embedded single quote rather than ending the quoted string", func() {
+		quoted := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca'b.db", Mode: os.FileMode(0o644)}
+
+		err := refuseOnKeyPermissions([]storage.KeyPermWarning{quoted}, false)
+
+		Expect(err).To(HaveOccurred(), "world-accessible key material")
+		Expect(err.Error()).To(ContainSubstring(`chmod o-rwx -- '/var/lib/puppet-ca/ca'\''b.db'`),
+			"close the quote, escape the quote, reopen it")
+	})
+
 	// And an ordinary path is left alone, so the common case does not grow quotes
-	// it does not need.
+	// it does not need. The "--" is there whatever the path, since a path may also
+	// begin with a dash and quoting does not stop chmod reading it as options.
 	It("does not quote a path that needs no quoting", func() {
 		err := refuseOnKeyPermissions([]storage.KeyPermWarning{worldReadable}, false)
 
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("chmod o-rwx "+worldReadable.Path), "unquoted")
+		Expect(err.Error()).To(ContainSubstring("chmod o-rwx -- "+worldReadable.Path), "unquoted")
+	})
+
+	// A path beginning with a dash is what the "--" is for: shell-quoting makes it
+	// one word, and chmod still reads that word as options.
+	It("ends chmod's options so a path beginning with a dash reaches it", func() {
+		dashed := storage.KeyPermWarning{Path: "-ca.db", Mode: os.FileMode(0o644)}
+
+		err := refuseOnKeyPermissions([]storage.KeyPermWarning{dashed}, false)
+
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("chmod o-rwx -- -ca.db"), "the separator")
 	})
 
 	// A path whose permissions could not be read is refused too, and separately:
@@ -186,6 +213,41 @@ var _ = Describe("key-material permissions at startup", func() {
 			err := refuseOnKeyPermissions([]storage.KeyPermWarning{unreadable}, true)
 
 			Expect(err).To(HaveOccurred(), "the opt-out is about world access, not about not knowing")
+		})
+
+		// Every unjudgeable path, for the reason the world-accessible branch
+		// names every one of its own: the causes are independent -- a private/
+		// directory on one mount, a database directory on another -- so naming
+		// the first would have the operator fix it, restart, and be refused by
+		// the second.
+		It("names every unjudgeable path, not just the first", func() {
+			second := storage.KeyPermWarning{
+				Path:       "/srv/sqlite/ca.db",
+				Unreadable: true,
+				Err:        errors.New("no such file or directory"),
+			}
+
+			err := refuseOnKeyPermissions([]storage.KeyPermWarning{unreadable, second}, false)
+
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(unreadable.Path), "the first path")
+			Expect(err.Error()).To(ContainSubstring("permission denied"), "its error")
+			Expect(err.Error()).To(ContainSubstring(second.Path), "the second path")
+			Expect(err.Error()).To(ContainSubstring("no such file or directory"), "its error")
+		})
+
+		// logKeyPermissions carries the same case. Today nothing reaches it --
+		// the refusal above returns first, whatever the opt-out says -- so this
+		// pins the intent rather than a live path: if the refusal is ever
+		// narrowed, the finding must still be reported rather than dropped.
+		It("reports an unjudgeable path if one ever reaches the logger", func() {
+			buf := captureWarnings()
+
+			logKeyPermissions([]storage.KeyPermWarning{unreadable}, false)
+
+			Expect(buf.String()).To(ContainSubstring("Could not check the permissions"), "the report")
+			Expect(buf.String()).To(ContainSubstring(unreadable.Path), "the path")
+			Expect(buf.String()).To(ContainSubstring("permission denied"), "the error")
 		})
 	})
 
@@ -267,7 +329,7 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 			"the refusal must come before the launcher forks; a hang here means it does not")
 		Expect(err).To(MatchError(ContainSubstring("refusing to start")),
 			"world-readable key material must be refused at the top level")
-		Expect(err).To(MatchError(ContainSubstring("chmod o-rwx")), "the remedy")
+		Expect(err).To(MatchError(ContainSubstring("chmod o-rwx -- ")), "the remedy")
 	})
 
 	It("refuses under --daemon instead of reporting success", func() {

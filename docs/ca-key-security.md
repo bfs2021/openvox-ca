@@ -200,10 +200,10 @@ not land under your configured `cadir`. The passphrase resolver is given a base
 directory by the backend, and only the filesystem backend supplies one, so on
 the others the file is written to `private/.ca_key_passphrase` relative to the
 process working directory — whatever `cadir` is set to, and it is still set,
-since per-subject keys live there. This is tracked as issue #375. Set an
-explicit passphrase source rather
-than relying on the generated one; the path is logged when the passphrase is
-first generated, and not on later starts.
+since per-subject keys live there. This is tracked as
+[#375](https://github.com/voxpupuli/openvox-ca/issues/375). Set an explicit
+passphrase source rather than relying on the generated one; the path is logged
+when the passphrase is first generated, and not on later starts.
 
 ### How it works
 

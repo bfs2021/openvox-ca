@@ -1114,17 +1114,26 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 }
 
 // CheckKeyPermissions reports files holding key material whose permissions are
-// more permissive than expected (0600). Two sources: the local private-key
-// directory, which for the filesystem backend also contains the CA key, and any
-// files the backend itself declares through KeyFileLister — the SQLite database
-// and its sidecars, which hold the CA key as a blob.
+// more permissive than expected (0600). Three sources: every file in the local
+// private-key directory, which for the filesystem backend also contains the CA
+// key; any files the backend itself declares through KeyFileLister — the SQLite
+// database and its sidecars, which hold the CA key as a blob; and any extra
+// paths the caller names, for secrets it configures that the store knows
+// nothing about.
+//
+// The private-key directory is judged whole rather than by filename. It is the
+// directory the CA keeps its secrets in, so its contents are secret by
+// construction: as well as the per-subject "<subject>_key.pem" keys it holds
+// the inventory-integrity HMAC key and, under encrypt_ca_key, the
+// auto-generated CA key passphrase — neither of which ends in "_key.pem". A
+// suffix test exempted both from a refusal whose whole subject is key material.
 //
 // This reports; it does not correct. Nothing in openvox-ca changes the mode of a
 // file it did not create, so a finding here is a condition the operator has to
 // resolve, and the caller decides whether it is fatal. Use
 // KeyPermWarning.WorldAccessible to tell the two severities apart: group access
 // is expected under a Kubernetes fsGroup, world access is not expected anywhere.
-func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
+func (s *StorageService) CheckKeyPermissions(extra ...string) []KeyPermWarning {
 	var warnings []KeyPermWarning
 
 	unreadable := func(path string, err error) {
@@ -1184,7 +1193,7 @@ func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 			unreadable(s.localPrivateKeyDir, err)
 		default:
 			for _, e := range entries {
-				if e.IsDir() || !strings.HasSuffix(e.Name(), "_key.pem") {
+				if e.IsDir() {
 					continue
 				}
 				check(filepath.Join(s.localPrivateKeyDir, e.Name()))
@@ -1194,6 +1203,15 @@ func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 
 	if l, ok := s.backend.(KeyFileLister); ok {
 		for _, p := range l.KeyFilePaths() {
+			check(p)
+		}
+	}
+
+	// Caller-supplied paths last: a secret named in the server's configuration
+	// rather than written by the store, such as an operator-supplied
+	// ca_key_passphrase_file. Nothing here knows those paths exist.
+	for _, p := range extra {
+		if p != "" {
 			check(p)
 		}
 	}

@@ -165,12 +165,16 @@ func refuseOnKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow boo
 		}
 	}
 
+	// Every unjudgeable path, for the reason the world-accessible branch below
+	// gives for its own list: the causes here are independent -- a private/
+	// directory the CA cannot read on one mount, a database directory it cannot
+	// search on another -- so naming one would have the operator fix it, restart,
+	// and be refused again by the next.
 	if len(unreadable) > 0 {
-		w := unreadable[0]
-		return fmt.Errorf("the permissions of %s, which holds CA key material, could not be read (%v); "+
-			"refusing to start -- check that it exists and that the user running openvox-ca can "+
-			"reach it through every parent directory",
-			w.Path, w.Err)
+		return fmt.Errorf("the permissions of CA key material could not be read (%s); "+
+			"refusing to start -- check that each path exists and that the user running "+
+			"openvox-ca can reach it through every parent directory",
+			keyPermErrors(unreadable))
 	}
 
 	if len(worldAccessible) == 0 || insecureAllow {
@@ -181,7 +185,7 @@ func refuseOnKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow boo
 	// four files whose modes move together, so naming one would have the operator
 	// fix it, restart, and be refused again by the next.
 	return fmt.Errorf("CA key material is world-accessible and readable by every local account (%s); "+
-		"refusing to start -- fix with: chmod o-rwx %s, or set "+
+		"refusing to start -- fix with: chmod o-rwx -- %s, or set "+
 		"insecure_allow_world_readable_keys to start anyway. A key that has been "+
 		"world-readable should be treated as exposed and rotated",
 		keyPermPaths(worldAccessible), strings.Join(keyPermPathList(worldAccessible), " "))
@@ -225,7 +229,7 @@ func logKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) {
 			"EVERY LOCAL ACCOUNT CAN READ THESE FILES. TREAT THE CA PRIVATE KEY AS COMPROMISED "+
 			"AND ROTATE IT.",
 			"paths", keyPermPaths(worldAccessible),
-			"remedy", "chmod o-rwx "+strings.Join(keyPermPathList(worldAccessible), " "))
+			"remedy", "chmod o-rwx -- "+strings.Join(keyPermPathList(worldAccessible), " "))
 	}
 }
 
@@ -237,6 +241,16 @@ func keyPermPaths(warnings []storage.KeyPermWarning) string {
 		parts = append(parts, fmt.Sprintf("%s (mode %s)", w.Path, w.Mode))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// keyPermErrors renders the unjudgeable findings: each path with the error that
+// stopped us reading its mode, since the error is the whole diagnosis.
+func keyPermErrors(warnings []storage.KeyPermWarning) string {
+	parts := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		parts = append(parts, fmt.Sprintf("%s: %v", w.Path, w.Err))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // keyPermPathList renders the paths shell-quoted, for pasting into the suggested
@@ -257,8 +271,14 @@ func keyPermPathList(warnings []storage.KeyPermWarning) []string {
 // shellQuote wraps s so a POSIX shell sees exactly one word. Single quotes take
 // everything literally; an embedded single quote is closed, escaped and
 // reopened, which is the only sequence that works inside them.
+//
+// The test is an allowlist of characters that are ordinary in every shell,
+// rather than a list of metacharacters to escape from. A denylist fails open:
+// the one metacharacter nobody thought of reaches the operator's shell
+// unquoted, and this string is written to be pasted into one.
 func shellQuote(s string) string {
-	if !strings.ContainsAny(s, " \t\n\"'\\$`&;|<>()*?[]#~!") {
+	const shellSafe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/:@%+=-"
+	if s != "" && strings.Trim(s, shellSafe) == "" {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

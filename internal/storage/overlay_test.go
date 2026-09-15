@@ -199,10 +199,22 @@ var _ = Describe("OverlayBackendKeyFileLister", func() {
 		ov, err := NewOverlayBackend(base, map[string]string{KeyCAKey: keyPath})
 		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
 
-		paths := ov.KeyFilePaths()
-		Expect(paths).To(ContainElement(keyPath), "the pinned ca_key_file")
-		Expect(paths).To(ContainElement(ContainSubstring("ca.db")), "the base's database")
-		Expect(paths).To(ContainElement(ContainSubstring("ca.db-wal")), "the base's -wal sidecar")
+		// Exact paths, not substrings: "ca.db" is a substring of "ca.db-wal", so a
+		// ContainSubstring assertion for the database is satisfied by the sidecar
+		// and the database itself could be dropped with nothing failing. The
+		// sidecars are asserted individually because each holds key material in
+		// its own right -- -journal most of all, since journal_mode is a DSN
+		// default an operator can override back to a rollback journal.
+		resolved, err := filepath.EvalSymlinks(dbPath)
+		Expect(err).NotTo(HaveOccurred(), "resolve the fixture path, as the backend does")
+
+		Expect(ov.KeyFilePaths()).To(ConsistOf(
+			keyPath,
+			resolved,
+			resolved+"-wal",
+			resolved+"-shm",
+			resolved+"-journal",
+		), "the pinned ca_key_file and all four of the base's files")
 	})
 
 	It("reports the pinned CA key when the base has no key files of its own", func() {

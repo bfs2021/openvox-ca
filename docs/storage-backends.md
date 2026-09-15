@@ -227,20 +227,30 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 > [storage internals](development/storage-internals.md).
 
 (The directory also holds small internal integrity files; leave them in place.)
-File permissions are fixed: `0600` for anything under `private/` and for the
-lock files under `locks/`, `0644` for everything else. The blob modes are set on
-each file as it is created and your umask cannot widen them; the lock files and
-the directories are created at these modes and a tighter umask narrows them
-further.
+File permissions are fixed: `0600` for anything under `private/`, for the
+inventory and for the lock files under `locks/`, `0644` for everything else. The
+blob modes are set on each file as it is created and your umask cannot widen
+them; the lock files and the directories are created at these modes and a
+tighter umask narrows them further.
 
 `openvox-ca` never changes the mode of a file it did not create, so anything
-already on disk is left as you have it — but it does check `*_key.pem` under
-`private/` at startup. A key readable by every local account makes it **refuse to
-start**, naming the file and the `chmod` that fixes it; one readable only by its
-group is reported at `Info` and does not stop the CA, since that is the mode the
-store is created with. `insecure_allow_world_readable_keys`
-downgrades the refusal to a loud warning if you need the CA running in order to
-fix the thing it is refusing over.
+already on disk is left as you have it — but it does check its key material at
+startup. That is every file under `private/` — the CA key, the per-subject
+`*_key.pem` keys, the inventory-integrity key and the generated passphrase
+alike, because that directory holds secrets by construction — plus a
+`ca_key_passphrase_file` you point it at. A file readable by every local account
+makes it **refuse to start**, naming the file and the `chmod` that fixes it; one
+readable only by its group is reported at `Info` and does not stop the CA, since
+that is the mode the store is created with.
+`insecure_allow_world_readable_keys` downgrades the refusal to a loud warning if
+you need the CA running in order to fix the thing it is refusing over.
+
+There is a second refusal, and the opt-out does not cover it: a path holding key
+material whose permissions could not be read **at all**. The CA names the path
+and the underlying error and stops. The usual cause is a parent directory the CA
+user cannot search. It is separate because it is a different condition with a
+different remedy — `chmod o-rwx` clears nothing here — and the opt-out says "I
+have weighed this risk", which nobody can have done for a mode nobody knows.
 
 `locks/` holds lock files, not CA state — named after a hash of the lock rather
 than anything readable. They are how a second process on the same host is kept
@@ -629,6 +639,13 @@ sql_migration_timeout_sec: 600           # whole schema-migration run (default 6
 locking, a busy timeout) unless you set them yourself, so writers wait rather
 than failing under contention.
 
+A `file:` DSN is read as a URI, so its `%HH` escapes are decoded: `file:ca%20b.db`
+names a database called `ca b.db`, and a path containing a literal `%` has to be
+written `%25`. A DSN whose escapes cannot be read is refused at startup
+(`reading the database path out of sqlite dsn ...`) rather than left unprotected
+— openvox-ca has to know which file the driver will open in order to create it
+safely and to check its permissions later.
+
 ```text
 --storage-backend sqlite
 --sql-dsn         file:/var/lib/puppet-ca/ca.db
@@ -668,7 +685,7 @@ local account:
 ```text
 CA key material is world-accessible and readable by every local account
 (/var/lib/puppet-ca/ca.db (mode -rw-r--r--), /var/lib/puppet-ca/ca.db-wal (mode
--rw-r--r--)); refusing to start -- fix with: chmod o-rwx /var/lib/puppet-ca/ca.db
+-rw-r--r--)); refusing to start -- fix with: chmod o-rwx -- /var/lib/puppet-ca/ca.db
 /var/lib/puppet-ca/ca.db-wal, or set insecure_allow_world_readable_keys to start
 anyway. A key that has been world-readable should be treated as exposed and
 rotated
@@ -698,6 +715,14 @@ database exists — in that case the database is created at the link's target, n
 at the link. Everything derived from the DSN — the sidecar names, and the
 `.<database>.locks/` directory — comes from the resolved path, so two processes
 reaching one database by different spellings still lock against each other.
+
+That is a change of location for an existing store whose DSN traverses a symlink
+— including a symlinked parent, such as a bind mount or a relocated
+`/var/lib`. Earlier versions locked beside the DSN spelling; this one locks
+beside the target, so a process on each version does **not** exclude the other.
+Upgrade the server and `openvox-ca-ctl` together, and once nothing on the old
+version remains you can remove the `.<database>.locks/` directory left beside
+the link.
 
 Because creation follows the link, the directory holding the DSN path must not
 be writable by untrusted users: whoever can plant a symlink there chooses where

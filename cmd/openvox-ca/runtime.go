@@ -257,6 +257,11 @@ func preflightInstanceLock(ctx context.Context, cfg *serverConfig) error {
 //
 // The store is opened and closed again; the children open it for themselves.
 //
+// ca_key_passphrase_file is handed in because nothing in the store knows it
+// exists: it is a secret the operator names in the server's configuration, and
+// it unlocks the encrypted CA key, so world access to it is the same finding as
+// world access to the key.
+//
 // The findings come back with the error so the caller can log them once a logger
 // exists. Nothing is logged here: at this point in startup the default handler is
 // still Go's own, so a record emitted now would miss a configured logfile.
@@ -267,7 +272,7 @@ func preflightKeyPermissions(ctx context.Context, cfg *serverConfig) ([]storage.
 	}
 	defer func() { _ = rt.Close() }()
 
-	warnings := rt.Store.CheckKeyPermissions()
+	warnings := rt.Store.CheckKeyPermissions(cfg.CAKeyPassphraseFile)
 	return warnings, refuseOnKeyPermissions(warnings, cfg.InsecureAllowWorldReadableKeys)
 }
 

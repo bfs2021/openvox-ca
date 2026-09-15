@@ -2334,10 +2334,13 @@ store the same logical state elsewhere.
 | CRL file | `0600` |
 | Pending-supersession list | `0600` |
 | Lock files under `locks/` | `0600` |
-| Public data (certs, CSRs, inventory) | `0644` |
+| Public data (certs, CSRs) | `0644` |
+| Inventory | `0600` |
 
-Blob modes — the private keys, the CRL, the supersession list and the public
-data — are set on each file as it is created and your umask cannot widen them.
+Blob modes — the private keys, the CRL, the supersession list, the inventory
+and the public data — are set on each file as it is created and your umask
+cannot widen them. The inventory is `0600` because it names every certificate
+the CA has issued; the migration guide has you edit it as the CA user.
 Directories and the lock files under `locks/` are created at the modes above and
 a tighter umask narrows them further.
 

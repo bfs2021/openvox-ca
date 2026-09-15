@@ -282,6 +282,42 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		Expect(info.Mode()&os.ModeSymlink).NotTo(BeZero(), "the intermediate link was not replaced by a file")
 	})
 
+	// A relative target, which is the ordinary spelling of the configuration the
+	// dangling-link loop exists for ("ln -s ../data/ca.db"). Every other link in
+	// these specs is built from a filepath.Join and so is absolute, which means
+	// os.Readlink returns an absolute path and the join against the link's own
+	// directory is never executed. If that join were wrong, the sidecar names,
+	// the lock directory and the paths the permission check judges would all
+	// point somewhere the driver never opens, while the driver created the real
+	// database elsewhere at the umask -- issue #351 by another route, with
+	// nothing failing.
+	It("resolves a dangling symlink whose target is relative", func() {
+		// Resolved up front, because macOS reaches TempDir through /var -> private/var
+		// and the backend resolves the parent too: comparing against the
+		// unresolved spelling would fail for a reason that is not the subject.
+		dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred(), "resolve the fixture directory")
+		Expect(os.Mkdir(filepath.Join(dir, "data"), 0o750)).To(Succeed(), "the target's directory")
+		link := filepath.Join(dir, "link.db")
+		Expect(os.Symlink(filepath.Join("data", "real.db"), link)).To(Succeed(), "link -> data/real.db")
+
+		b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + link})
+		Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+		DeferCleanup(func() { _ = b.Close() })
+		Expect(b.EnsureReady(context.Background())).To(Succeed(), "EnsureReady")
+
+		realDB := filepath.Join(dir, "data", "real.db")
+		Expect(realDB).To(BeAnExistingFile(), "the database was created at the relative target")
+		Expect(worldBits(realDB)).To(BeZero(), "world bits on the created target")
+
+		// And everything derived from the DSN followed it there, rather than
+		// staying beside the link.
+		Expect(b.KeyFilePaths()).To(ContainElement(realDB+"-wal"), "the sidecar names follow the target")
+		lockDir, ok := sqliteLockDir("file:" + link)
+		Expect(ok).To(BeTrue(), "lock directory for the link spelling")
+		Expect(filepath.Dir(lockDir)).To(Equal(filepath.Join(dir, "data")), "beside the target")
+	})
+
 	// A cycle is what the hop bound exists for. Without it the resolution loop
 	// spins for ever and startup hangs with no diagnostic, which is worse than
 	// the open's own rejection. Reaching the assertion at all is the result.
