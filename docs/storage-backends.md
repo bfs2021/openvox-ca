@@ -694,9 +694,15 @@ warning. It exists so a world-readable store cannot lock you out of the CA you
 need running in order to fix it, and it is named for what it is.
 
 A DSN that is a symlink is resolved and works, including one planted before the
-database exists. Everything derived from the DSN — the sidecar names, and the
+database exists — in that case the database is created at the link's target, not
+at the link. Everything derived from the DSN — the sidecar names, and the
 `.<database>.locks/` directory — comes from the resolved path, so two processes
 reaching one database by different spellings still lock against each other.
+
+Because creation follows the link, the directory holding the DSN path must not
+be writable by untrusted users: whoever can plant a symlink there chooses where
+the database is created. That is the same precondition the sidecars need, for
+the same reason.
 
 The directory holding the database is yours, and `openvox-ca` never changes its
 mode. Anything that copies the database — a backup, a volume snapshot, a restored

@@ -125,6 +125,41 @@ var _ = Describe("key-material permissions at startup", func() {
 		Expect(buf.String()).To(ContainSubstring(worldReadable.Path), "the file named")
 	})
 
+	// The opt-out warns about every world-accessible file, not just the first.
+	// Only the refusal path had a multi-finding spec, so the loop that is supposed
+	// to iterate was never proven to get past element one.
+	It("shouts about every world-accessible file, not just the first", func() {
+		buf := captureWarnings()
+		second := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca.db-shm", Mode: os.FileMode(0o644)}
+
+		logKeyPermissions([]storage.KeyPermWarning{worldReadable, second}, true)
+
+		Expect(buf.String()).To(ContainSubstring(worldReadable.Path), "the first file")
+		Expect(buf.String()).To(ContainSubstring(second.Path), "the second file")
+	})
+
+	// The percent-decoding this change adds makes a space-containing database
+	// name reachable, so the remedy has to survive one. Unquoted, "chmod o-rwx
+	// /var/lib/ca b.db" is a command against two files that do not exist.
+	It("quotes a path with a space so the suggested chmod is runnable", func() {
+		spaced := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca b.db", Mode: os.FileMode(0o644)}
+
+		err := refuseOnKeyPermissions([]storage.KeyPermWarning{spaced}, false)
+
+		Expect(err).To(HaveOccurred(), "world-accessible key material")
+		Expect(err.Error()).To(ContainSubstring(`chmod o-rwx '/var/lib/puppet-ca/ca b.db'`),
+			"the remedy must be one shell word")
+	})
+
+	// And an ordinary path is left alone, so the common case does not grow quotes
+	// it does not need.
+	It("does not quote a path that needs no quoting", func() {
+		err := refuseOnKeyPermissions([]storage.KeyPermWarning{worldReadable}, false)
+
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("chmod o-rwx "+worldReadable.Path), "unquoted")
+	})
+
 	// A path whose permissions could not be read is refused too, and separately:
 	// "world-accessible, chmod o-rwx" would be a false statement and a remedy
 	// that cannot clear it. The opt-out deliberately does not cover it -- nobody

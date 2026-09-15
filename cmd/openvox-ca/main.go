@@ -239,13 +239,29 @@ func keyPermPaths(warnings []storage.KeyPermWarning) string {
 	return strings.Join(parts, ", ")
 }
 
-// keyPermPathList renders the bare paths, for pasting into the suggested chmod.
+// keyPermPathList renders the paths shell-quoted, for pasting into the suggested
+// chmod.
+//
+// Quoted because this change is itself what makes a space-containing path
+// reachable: the SQLite DSN parser decodes percent-escapes, so "file:ca%20b.db"
+// is a database called "ca b.db", and an unquoted remedy for it would be a
+// command that chmods two files that do not exist.
 func keyPermPathList(warnings []storage.KeyPermWarning) []string {
 	paths := make([]string, 0, len(warnings))
 	for _, w := range warnings {
-		paths = append(paths, w.Path)
+		paths = append(paths, shellQuote(w.Path))
 	}
 	return paths
+}
+
+// shellQuote wraps s so a POSIX shell sees exactly one word. Single quotes take
+// everything literally; an embedded single quote is closed, escaped and
+// reopened, which is the only sequence that works inside them.
+func shellQuote(s string) string {
+	if !strings.ContainsAny(s, " \t\n\"'\\$`&;|<>()*?[]#~!") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // buildBackendSpec derives a storage.BackendSpec from the server config. The
