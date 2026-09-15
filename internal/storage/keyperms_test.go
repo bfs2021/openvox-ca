@@ -179,7 +179,70 @@ var _ = Describe("CheckKeyPermissions", func() {
 
 		w := findFor(svc.CheckKeyPermissions(), keyDir)
 		Expect(w).NotTo(BeNil(), "a finding for the unreadable directory")
+		Expect(w.Unreadable).To(BeTrue(), "recorded as unjudgeable, not as a mode")
+		Expect(w.Err).To(HaveOccurred(), "the reason, for the operator to act on")
 		Expect(w.WorldAccessible()).To(BeTrue(), "an unjudgeable path fails closed")
+	})
+
+	// A Kubernetes Secret volume projects every entry as a symlink into a
+	// timestamped directory, and certificate tooling keeps a stable name pointing
+	// at a rotating one. Judging the link rather than its target would skip both:
+	// a symlink's own mode is 0777 and says nothing about the file behind it.
+	It("judges a symlinked key by the mode of its target", func() {
+		dir := GinkgoT().TempDir()
+		target := filepath.Join(dir, "real_key.pem")
+		Expect(os.WriteFile(target, nil, 0o600)).To(Succeed(), "seed the real key")
+		Expect(os.Chmod(target, 0o644)).To(Succeed(), "world-readable, whatever the umask")
+
+		link := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
+		Expect(os.Symlink(target, link)).To(Succeed(), "project it as a link, as a Secret mount does")
+
+		ov, err := NewOverlayBackend(NewFilesystemBackend(dir), map[string]string{KeyCAKey: link})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+
+		w := findFor(NewWithBackend(ov, "").CheckKeyPermissions(), link)
+		Expect(w).NotTo(BeNil(), "a finding for the symlinked key")
+		Expect(w.WorldAccessible()).To(BeTrue(), "the target is world-readable")
+	})
+
+	It("says nothing about a symlinked key whose target is not world-accessible", func() {
+		dir := GinkgoT().TempDir()
+		target := filepath.Join(dir, "real_key.pem")
+		Expect(os.WriteFile(target, nil, 0o600)).To(Succeed(), "seed the real key")
+		Expect(os.Chmod(target, 0o600)).To(Succeed(), "owner only")
+
+		link := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
+		Expect(os.Symlink(target, link)).To(Succeed(), "project it as a link")
+
+		ov, err := NewOverlayBackend(NewFilesystemBackend(dir), map[string]string{KeyCAKey: link})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+
+		Expect(NewWithBackend(ov, "").CheckKeyPermissions()).To(BeEmpty(), "a correct key behind a link")
+	})
+
+	// The other fail-closed arm: a backend-declared file whose own Lstat fails,
+	// as opposed to the private-key directory whose ReadDir fails. That is the arm
+	// covering the database, its sidecars and a pinned ca_key_file -- everything
+	// KeyFileLister exists for.
+	It("reports a backend key file it cannot reach as unjudgeable", func() {
+		if os.Geteuid() == 0 {
+			Skip("root can search a directory whatever its mode")
+		}
+		parent := filepath.Join(GinkgoT().TempDir(), "data")
+		Expect(os.Mkdir(parent, 0o700)).To(Succeed(), "make the data directory")
+		keyPath := filepath.Join(parent, "ca_key.pem")
+		Expect(os.WriteFile(keyPath, nil, 0o600)).To(Succeed(), "seed the key")
+		Expect(os.Chmod(parent, 0o000)).To(Succeed(), "make it unsearchable")
+		DeferCleanup(func() { _ = os.Chmod(parent, 0o700) })
+
+		ov, err := NewOverlayBackend(NewFilesystemBackend(GinkgoT().TempDir()),
+			map[string]string{KeyCAKey: keyPath})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+
+		w := findFor(NewWithBackend(ov, "").CheckKeyPermissions(), keyPath)
+		Expect(w).NotTo(BeNil(), "a finding for the unreachable key file")
+		Expect(w.Unreadable).To(BeTrue(), "recorded as unjudgeable")
+		Expect(w.WorldAccessible()).To(BeTrue(), "fails closed")
 	})
 
 	// An in-memory database has no files, and a backend that declares none must

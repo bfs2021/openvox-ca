@@ -133,68 +133,100 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 	return nil, nil
 }
 
-// reportKeyPermissions acts on what StorageService.CheckKeyPermissions found.
+// refuseOnKeyPermissions decides whether the CA may start, given what
+// StorageService.CheckKeyPermissions found. It logs nothing: it runs in the
+// parent before the role dispatch and before the fork, which is before any
+// logger is installed, so anything it emitted would bypass a configured
+// logfile. The returned error reaches the operator through cobra, on the
+// terminal, which is where a refusal belongs.
 //
 // World access is refused. A CA private key that every local account can read
-// is one to treat as exposed, and starting anyway would serve from it while
-// saying so only in a log line nobody reads. The message names the file and the
-// command that fixes it, following the autosign executable check below.
+// is one to treat as exposed, and starting anyway would serve from it. A path
+// whose permissions could not be read at all is refused too, and separately: it
+// is not the same condition and does not have the same remedy.
 //
-// Group access warns instead. It is what a Kubernetes fsGroup ORs back into the
-// volume at every mount, and on an arbitrary-uid platform such as OpenShift it
-// is how the CA reaches a store a previous pod created under a different uid.
-// Refusing it would break working deployments to protect against the pod's own
-// group. Where the group does have other members it is a real exposure, which
-// is why it is still said out loud.
+// Group access never refuses. It is the mode the store is created with, so a
+// correct deployment has it -- under a Kubernetes fsGroup, and on a plain
+// systemd install where the umask leaves it. logKeyPermissions reports it once
+// the logger exists.
 //
-// insecureAllow turns the refusal into a warning, the way the no-TLS opt-out
-// does for plain HTTP on a non-loopback address. It shouts, because an operator
-// who reaches for it should be in no doubt what they have turned off.
-func reportKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) error {
-	var worldAccessible, groupAccessible []storage.KeyPermWarning
+// insecureAllow turns the world-access refusal into a warning, the way the
+// no-TLS opt-out does for plain HTTP on a non-loopback address. It does not
+// cover an unreadable path: that is not a risk the operator can have weighed,
+// because nobody knows what the mode is.
+func refuseOnKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) error {
+	var worldAccessible, unreadable []storage.KeyPermWarning
 	for _, w := range warnings {
-		if w.WorldAccessible() {
+		switch {
+		case w.Unreadable:
+			unreadable = append(unreadable, w)
+		case w.WorldAccessible():
 			worldAccessible = append(worldAccessible, w)
-			continue
 		}
-		groupAccessible = append(groupAccessible, w)
 	}
 
-	// Group access is reported once, at Info, listing the files rather than one
-	// record each. It is the expected state and not a finding: openvox-ca creates
-	// its own store group-accessible by design, so under the usual 0022 umask a
-	// correct SQLite deployment has a 0640 database and three 0640 sidecars. A
-	// warning on every start of a correct deployment is one nobody reads, and
-	// attributing it to a cause -- a Kubernetes fsGroup, say -- would be wrong on
-	// the systemd installs where no fsGroup exists and the mode is simply ours.
-	if len(groupAccessible) > 0 {
-		slog.Info("Key material is accessible to its group, which is the default",
-			"paths", keyPermPaths(groupAccessible),
-			"note", "a real exposure only if that group has members other than the CA")
+	if len(unreadable) > 0 {
+		w := unreadable[0]
+		return fmt.Errorf("the permissions of %s, which holds CA key material, could not be read (%v); "+
+			"refusing to start -- check that it exists and that the user running openvox-ca can "+
+			"reach it through every parent directory",
+			w.Path, w.Err)
 	}
 
-	if len(worldAccessible) == 0 {
+	if len(worldAccessible) == 0 || insecureAllow {
 		return nil
 	}
 
 	// Every world-accessible path, not just the first. SQLite keeps the key in
 	// four files whose modes move together, so naming one would have the operator
 	// fix it, restart, and be refused again by the next.
-	paths := keyPermPaths(worldAccessible)
-	if !insecureAllow {
-		return fmt.Errorf("CA key material is world-accessible and readable by every local account (%s); "+
-			"refusing to start -- fix with: chmod o-rwx %s, or set "+
-			"insecure_allow_world_readable_keys to start anyway. A key that has been "+
-			"world-readable should be treated as exposed and rotated",
-			paths, strings.Join(keyPermPathList(worldAccessible), " "))
+	return fmt.Errorf("CA key material is world-accessible and readable by every local account (%s); "+
+		"refusing to start -- fix with: chmod o-rwx %s, or set "+
+		"insecure_allow_world_readable_keys to start anyway. A key that has been "+
+		"world-readable should be treated as exposed and rotated",
+		keyPermPaths(worldAccessible), strings.Join(keyPermPathList(worldAccessible), " "))
+}
+
+// logKeyPermissions reports what the check found, once a logger is installed so
+// the records reach a configured logfile in its format. Called on the path that
+// has one; the refusal above is what runs earlier, where printing is the point
+// rather than logging.
+func logKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) {
+	var worldAccessible, groupAccessible []storage.KeyPermWarning
+	for _, w := range warnings {
+		switch {
+		case w.Unreadable:
+			slog.Warn("Could not check the permissions of a file holding key material",
+				"path", w.Path, "error", w.Err)
+		case w.WorldAccessible():
+			worldAccessible = append(worldAccessible, w)
+		default:
+			groupAccessible = append(groupAccessible, w)
+		}
 	}
 
-	slog.Warn("INSECURE: KEY MATERIAL IS WORLD-ACCESSIBLE AND THE CA WAS TOLD TO START ANYWAY. "+
-		"EVERY LOCAL ACCOUNT CAN READ THESE FILES. TREAT THE CA PRIVATE KEY AS COMPROMISED "+
-		"AND ROTATE IT.",
-		"paths", paths,
-		"remedy", "chmod o-rwx "+strings.Join(keyPermPathList(worldAccessible), " "))
-	return nil
+	// Group access is reported once, at Info, listing the files rather than one
+	// record each. It is the expected state and not a finding: openvox-ca creates
+	// its own store group-accessible by design, so under the usual 0022 umask a
+	// correct SQLite deployment has a 0640 database and 0640 sidecars. A warning
+	// on every start of a correct deployment is one nobody reads, and blaming a
+	// cause -- a Kubernetes fsGroup, say -- would be wrong on the systemd installs
+	// where no fsGroup exists and the mode is simply ours.
+	if len(groupAccessible) > 0 {
+		slog.Info("Key material is accessible to its group, which is the default",
+			"paths", keyPermPaths(groupAccessible),
+			"note", "a real exposure only if that group has members other than the CA")
+	}
+
+	// Only reachable with the opt-out set; without it the refusal already stopped
+	// startup.
+	if len(worldAccessible) > 0 && insecureAllow {
+		slog.Warn("INSECURE: KEY MATERIAL IS WORLD-ACCESSIBLE AND THE CA WAS TOLD TO START ANYWAY. "+
+			"EVERY LOCAL ACCOUNT CAN READ THESE FILES. TREAT THE CA PRIVATE KEY AS COMPROMISED "+
+			"AND ROTATE IT.",
+			"paths", keyPermPaths(worldAccessible),
+			"remedy", "chmod o-rwx "+strings.Join(keyPermPathList(worldAccessible), " "))
+	}
 }
 
 // keyPermPaths renders findings for an operator: each path with the mode that
@@ -699,7 +731,7 @@ func newRootCmd() *cobra.Command {
 				}
 				// Same reasoning for key-material permissions: a refusal raised
 				// past the fork is discarded with the child's stderr.
-				if err := preflightKeyPermissions(ctx, cfg); err != nil {
+				if _, err := preflightKeyPermissions(ctx, cfg); err != nil {
 					return err
 				}
 
@@ -771,17 +803,19 @@ func newRootCmd() *cobra.Command {
 			}
 
 			// --- Key material must not be readable by every local account ---
-			// Here rather than after CA.Init, and in the parent rather than in a
-			// child, because on the default topology it is the signer child that
-			// bootstraps the CA: a later check would write a fresh private key
-			// into an already world-accessible store and refuse afterwards.
-			// Whichever child opens the store next inherits a store this has
-			// already passed judgement on.
+			// Before CA.Init, because on the default topology it is the signer
+			// child that bootstraps the CA: a later check would write a fresh
+			// private key into an already world-accessible store and refuse
+			// afterwards.
+			//
+			// For every role, not only the launcher. A role process started by
+			// hand is a topology the documentation describes, and it is the one
+			// that holds the key; inheriting the parent's verdict across an
+			// execve is not something a child can do, so each checks for itself.
 			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-			if role == "" {
-				if err := preflightKeyPermissions(ctx, cfg); err != nil {
-					return err
-				}
+			keyPermWarnings, err := preflightKeyPermissions(ctx, cfg)
+			if err != nil {
+				return err
 			}
 
 			// Signer mode: load key, serve signing requests on socketpair, exit.
@@ -802,6 +836,10 @@ func newRootCmd() *cobra.Command {
 					return err
 				}
 				defer closeLog()
+				// Now that a logger exists, say what the preflight found. The
+				// refusal has already happened above, on the terminal; this is
+				// the part that belongs in the operator's logfile.
+				logKeyPermissions(keyPermWarnings, cfg.InsecureAllowWorldReadableKeys)
 				return runLauncher(cfg, notifier, hupCh)
 			}
 
@@ -817,6 +855,7 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			defer closeLog()
+			logKeyPermissions(keyPermWarnings, cfg.InsecureAllowWorldReadableKeys)
 
 			slog.Info("Starting Puppet CA",
 				"cadir", absCADir,

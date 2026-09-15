@@ -256,13 +256,19 @@ func preflightInstanceLock(ctx context.Context, cfg *serverConfig) error {
 //     same remedy.
 //
 // The store is opened and closed again; the children open it for themselves.
-func preflightKeyPermissions(ctx context.Context, cfg *serverConfig) error {
+//
+// The findings come back with the error so the caller can log them once a logger
+// exists. Nothing is logged here: at this point in startup the default handler is
+// still Go's own, so a record emitted now would miss a configured logfile.
+func preflightKeyPermissions(ctx context.Context, cfg *serverConfig) ([]storage.KeyPermWarning, error) {
 	rt, err := resolveRuntime(ctx, cfg, false)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = rt.Close() }()
-	return reportKeyPermissions(rt.Store.CheckKeyPermissions(), cfg.InsecureAllowWorldReadableKeys)
+
+	warnings := rt.Store.CheckKeyPermissions()
+	return warnings, refuseOnKeyPermissions(warnings, cfg.InsecureAllowWorldReadableKeys)
 }
 
 // holdInstanceLock takes the store's instance lock and ties its release to rt,

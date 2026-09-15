@@ -1127,10 +1127,14 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 	var warnings []KeyPermWarning
 
+	unreadable := func(path string, err error) {
+		// The mode could not be established, which is not the same fact as "the
+		// mode is fine". Recorded as a finding so the caller refuses rather than
+		// serving key material nobody checked.
+		warnings = append(warnings, KeyPermWarning{Path: path, Unreadable: true, Err: err})
+	}
+
 	check := func(path string) {
-		// Lstat, so a symlink is judged as itself rather than as its target: the
-		// sidecar names are derived from the DSN rather than chosen, and a
-		// dangling or redirected link there is not something to follow.
 		info, err := os.Lstat(path)
 		if errors.Is(err, fs.ErrNotExist) {
 			// Most of these paths are optional -- the sidecars exist only while
@@ -1138,14 +1142,31 @@ func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 			return
 		}
 		if err != nil {
-			// Anything else means the mode could not be judged, which is not the
-			// same fact as "the mode is fine". Reporting it as a finding makes
-			// the caller refuse rather than serve key material nobody checked.
-			slog.Warn("Could not check the permissions of a file holding key material",
-				"path", path, "error", err)
-			warnings = append(warnings, KeyPermWarning{Path: path, Mode: keyPermUnknown})
+			unreadable(path, err)
 			return
 		}
+
+		// A symlink is followed, and the target is what gets judged. The mode
+		// that matters is the one on the file the CA will actually read, and a
+		// key reached through a link is the normal shape in more than one
+		// deployment: a Kubernetes Secret volume projects every entry as a
+		// symlink into a timestamped directory, and certificate tooling keeps a
+		// stable name pointing at a rotating one. Judging the link itself would
+		// silently skip all of them -- a symlink's own mode is 0777 on Linux and
+		// means nothing.
+		if info.Mode()&os.ModeSymlink != 0 {
+			info, err = os.Stat(path)
+			if errors.Is(err, fs.ErrNotExist) {
+				// A dangling link where key material is expected: nothing to
+				// judge, and nothing has been written through it either.
+				return
+			}
+			if err != nil {
+				unreadable(path, err)
+				return
+			}
+		}
+
 		if !info.Mode().IsRegular() {
 			return
 		}
@@ -1160,9 +1181,7 @@ func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 		case errors.Is(err, fs.ErrNotExist):
 			// No private/ yet: a first bootstrap, nothing to judge.
 		case err != nil:
-			slog.Warn("Could not read the private key directory to check its permissions",
-				"path", s.localPrivateKeyDir, "error", err)
-			warnings = append(warnings, KeyPermWarning{Path: s.localPrivateKeyDir, Mode: keyPermUnknown})
+			unreadable(s.localPrivateKeyDir, err)
 		default:
 			for _, e := range entries {
 				if e.IsDir() || !strings.HasSuffix(e.Name(), "_key.pem") {

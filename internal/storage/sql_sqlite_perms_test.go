@@ -189,7 +189,10 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		dir := filepath.Join(GinkgoT().TempDir(), "adirectory")
 		Expect(os.Mkdir(dir, 0o755)).To(Succeed(), "seed a directory where a database is named")
 
-		_, _ = NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dir})
+		b, _ := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dir})
+		if b != nil {
+			DeferCleanup(func() { _ = b.Close() })
+		}
 
 		Expect(permOf(dir)).To(Equal(os.FileMode(0o755)), "directory mode left alone")
 	})
@@ -277,6 +280,24 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		info, err := os.Lstat(middle)
 		Expect(err).NotTo(HaveOccurred(), "lstat the intermediate link")
 		Expect(info.Mode()&os.ModeSymlink).NotTo(BeZero(), "the intermediate link was not replaced by a file")
+	})
+
+	// A cycle is what the hop bound exists for. Without it the resolution loop
+	// spins for ever and startup hangs with no diagnostic, which is worse than
+	// the open's own rejection. Reaching the assertion at all is the result.
+	It("gives up on a symlink cycle rather than spinning", func() {
+		dir := GinkgoT().TempDir()
+		a := filepath.Join(dir, "a.db")
+		bLink := filepath.Join(dir, "b.db")
+		Expect(os.Symlink(bLink, a)).To(Succeed(), "a -> b")
+		Expect(os.Symlink(a, bLink)).To(Succeed(), "b -> a")
+
+		back, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + a})
+		if back != nil {
+			DeferCleanup(func() { _ = back.Close() })
+		}
+		// Either outcome is acceptable -- the point is that it returned.
+		_ = err
 	})
 
 	// Everything derived from the DSN has to come from the same resolved path. The

@@ -237,8 +237,8 @@ further.
 already on disk is left as you have it — but it does check `*_key.pem` under
 `private/` at startup. A key readable by every local account makes it **refuse to
 start**, naming the file and the `chmod` that fixes it; one readable only by its
-group is reported as a warning and does not stop the CA, since that is what a
-Kubernetes `fsGroup` leaves behind. `insecure_allow_world_readable_keys`
+group is reported at `Info` and does not stop the CA, since that is the mode the
+store is created with. `insecure_allow_world_readable_keys`
 downgrades the refusal to a loud warning if you need the CA running in order to
 fix the thing it is refusing over.
 
