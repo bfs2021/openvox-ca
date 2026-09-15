@@ -1113,34 +1113,50 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 	return AtomicWriteFile(s.PrivateKeyPath(subject), pemData, FilePermPrivate)
 }
 
-// CheckKeyPermissions reports private key files whose permissions are more
-// permissive than expected (0600). Scans the local private-key directory,
-// which for the filesystem backend also contains the CA key.
+// CheckKeyPermissions reports files holding key material whose permissions are
+// more permissive than expected (0600). Two sources: the local private-key
+// directory, which for the filesystem backend also contains the CA key, and any
+// files the backend itself declares through KeyFileLister — the SQLite database
+// and its sidecars, which hold the CA key as a blob.
+//
+// This reports; it does not correct. Nothing in openvox-ca changes the mode of a
+// file it did not create, so a finding here is a condition the operator has to
+// resolve, and the caller decides whether it is fatal. Use
+// KeyPermWarning.WorldAccessible to tell the two severities apart: group access
+// is expected under a Kubernetes fsGroup, world access is not expected anywhere.
 func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
-	if s.localPrivateKeyDir == "" {
-		return nil
-	}
-	entries, err := os.ReadDir(s.localPrivateKeyDir)
-	if err != nil {
-		return nil
-	}
 	var warnings []KeyPermWarning
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), "_key.pem") {
-			continue
+
+	check := func(path string) {
+		// Lstat, so a symlink is judged as itself rather than as its target: the
+		// sidecar names are derived from the DSN rather than chosen, and a
+		// dangling or redirected link there is not something to follow.
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		perm := info.Mode().Perm()
-		if perm&^os.FileMode(FilePermPrivate) != 0 {
-			warnings = append(warnings, KeyPermWarning{
-				Path: filepath.Join(s.localPrivateKeyDir, e.Name()),
-				Mode: perm,
-			})
+		if perm := info.Mode().Perm(); perm&^os.FileMode(FilePermPrivate) != 0 {
+			warnings = append(warnings, KeyPermWarning{Path: path, Mode: perm})
 		}
 	}
+
+	if s.localPrivateKeyDir != "" {
+		if entries, err := os.ReadDir(s.localPrivateKeyDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), "_key.pem") {
+					continue
+				}
+				check(filepath.Join(s.localPrivateKeyDir, e.Name()))
+			}
+		}
+	}
+
+	if l, ok := s.backend.(KeyFileLister); ok {
+		for _, p := range l.KeyFilePaths() {
+			check(p)
+		}
+	}
+
 	return warnings
 }
 

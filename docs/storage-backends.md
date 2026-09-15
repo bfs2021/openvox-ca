@@ -228,9 +228,17 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 
 (The directory also holds small internal integrity files; leave them in place.)
 File permissions are fixed: `0600` for anything under `private/` and for the
-lock files under `locks/`, `0644` for everything else. `openvox-ca` warns at startup about any `*_key.pem` in
-`private/` whose permissions are looser than `0600` and leaves them for you to
-fix.
+lock files under `locks/`, `0644` for everything else. Those modes are set when
+each file is created and do not depend on your umask.
+
+`openvox-ca` never changes the mode of a file it did not create, so anything
+already on disk is left as you have it — but it does check `*_key.pem` under
+`private/` at startup. A key readable by every local account makes it **refuse to
+start**, naming the file and the `chmod` that fixes it; one readable only by its
+group is reported as a warning and does not stop the CA, since that is what a
+Kubernetes `fsGroup` leaves behind. `insecure_allow_world_readable_keys`
+downgrades the refusal to a loud warning if you need the CA running in order to
+fix the thing it is refusing over.
 
 `locks/` holds lock files, not CA state — named after a hash of the lock rather
 than anything readable. They are how a second process on the same host is kept
@@ -627,7 +635,58 @@ than failing under contention.
 **Operational notes.** The database file *is* the CA — back it up (with its WAL
 sidecar) the way you would a cadir tree. The CA private key lives in the
 database by default; enable `encrypt_ca_key` or pin it to a local file with
-`ca_key_file`. `openvox-ca-ctl setup` / `import` work on the local filesystem
+`ca_key_file`.
+
+Because the key is in there, `openvox-ca` creates the database without any
+access for users outside its owner and group, and the sidecars SQLite maintains
+beside it (`-wal`, `-shm`, `-journal`) inherit that: SQLite takes their mode from
+the database when it creates them. The sidecars matter as much as the database —
+a committed page sits in the WAL until a checkpoint moves it, so which file holds
+the key at a given moment is a matter of checkpoint timing.
+
+Your umask still applies and can narrow it further: `0022` gives `0640`, `0077`
+gives `0600`. What it cannot do is widen it, so the database is never created
+world-readable however the process is launched.
+
+Group access is deliberately allowed. Under Kubernetes the kubelet ORs group
+access back into the volume at every mount when `fsGroup` is set, which the chart
+sets by default, and on a platform that assigns an arbitrary uid per namespace —
+OpenShift — group access is how the CA reaches a database a previous pod created
+under a different uid. Removing it would break those deployments to protect
+against the pod's own group, which is not a third party.
+
+**`openvox-ca` never changes the mode of a file it did not create.** Not the
+database, not the sidecars, not the directory holding them. A store whose
+permissions are wrong is yours to fix, and the server tells you rather than
+quietly narrowing it.
+
+What it does instead is refuse to start when key material is readable by every
+local account:
+
+```text
+/var/lib/puppet-ca/ca.db holds CA key material and is world-accessible (mode
+-rw-r--r--); refusing to start -- fix with: chmod o-rwx /var/lib/puppet-ca/ca.db
+```
+
+A key every local account could read is one to treat as exposed, so the fix is
+`chmod o-rwx` **and** deciding whether to rotate the CA key. Group access is
+reported as a warning and does not stop the CA: expected under an `fsGroup`, and
+worth a look where the group has other members.
+
+Setting `insecure_allow_world_readable_keys` downgrades the refusal to a loud
+warning. It exists so a world-readable store cannot lock you out of the CA you
+need running in order to fix it, and it is named for what it is.
+
+A DSN that is a symlink is resolved and works, including one planted before the
+database exists. Everything derived from the DSN — the sidecar names, and the
+`.<database>.locks/` directory — comes from the resolved path, so two processes
+reaching one database by different spellings still lock against each other.
+
+The directory holding the database is yours, and `openvox-ca` never changes its
+mode. Anything that copies the database — a backup, a volume snapshot, a restored
+tarball — has to preserve the modes, sidecars included.
+
+`openvox-ca-ctl setup` / `import` work on the local filesystem
 only; bootstrap against a scratch directory, then point a SQLite-backed
 `openvox-ca` at a fresh database.
 

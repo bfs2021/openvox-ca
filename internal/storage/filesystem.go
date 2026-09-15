@@ -269,7 +269,28 @@ func (b *FilesystemBackend) AppendLine(ctx context.Context, key string, data []b
 	if err := os.MkdirAll(filepath.Dir(p), DirPerm); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, permFor(kind))
+	// Created with O_EXCL first so that the mode can be set on a file we know we
+	// just made. O_CREATE's mode argument is masked by the umask, which is how a
+	// public inventory came to be 0640 under a umask of 0027 while
+	// docs/configuration.md publishes it as 0644; AtomicWriteFile already goes out
+	// of its way to defeat the umask for exactly this reason, and this path simply
+	// never did.
+	//
+	// The chmod applies only on creation. Reasserting a mode on a file that was
+	// already there would be changing something the operator owns, which is the
+	// one thing this package does not do -- and on an arbitrary-uid platform it is
+	// a file this process may not even own. A failure is not fatal: the content is
+	// what matters, and the mode is already no wider than the umask allowed.
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_EXCL|os.O_WRONLY, permFor(kind))
+	switch {
+	case err == nil:
+		if cerr := f.Chmod(permFor(kind)); cerr != nil {
+			slog.Debug("Could not set the mode on a newly created blob",
+				"path", p, "mode", permFor(kind).String(), "error", cerr)
+		}
+	case errors.Is(err, fs.ErrExist):
+		f, err = os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	}
 	if err != nil {
 		return err
 	}

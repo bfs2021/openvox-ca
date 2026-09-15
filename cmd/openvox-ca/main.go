@@ -132,6 +132,57 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 	return nil, nil
 }
 
+// reportKeyPermissions acts on what StorageService.CheckKeyPermissions found.
+//
+// World access is refused. A CA private key that every local account can read
+// is one to treat as exposed, and starting anyway would serve from it while
+// saying so only in a log line nobody reads. The message names the file and the
+// command that fixes it, following the autosign executable check below.
+//
+// Group access warns instead. It is what a Kubernetes fsGroup ORs back into the
+// volume at every mount, and on an arbitrary-uid platform such as OpenShift it
+// is how the CA reaches a store a previous pod created under a different uid.
+// Refusing it would break working deployments to protect against the pod's own
+// group. Where the group does have other members it is a real exposure, which
+// is why it is still said out loud.
+//
+// insecureAllow turns the refusal into a warning, the way the no-TLS opt-out
+// does for plain HTTP on a non-loopback address. It shouts, because an operator
+// who reaches for it should be in no doubt what they have turned off.
+func reportKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) error {
+	var worldAccessible []storage.KeyPermWarning
+	for _, w := range warnings {
+		if w.WorldAccessible() {
+			worldAccessible = append(worldAccessible, w)
+			continue
+		}
+		slog.Warn("Key material is readable by its group",
+			"path", w.Path, "mode", w.Mode.String(),
+			"note", "expected under a Kubernetes fsGroup; a real exposure if that group has other members")
+	}
+
+	if len(worldAccessible) == 0 {
+		return nil
+	}
+
+	if !insecureAllow {
+		w := worldAccessible[0]
+		return fmt.Errorf("%s holds CA key material and is world-accessible (mode %s); "+
+			"refusing to start -- fix with: chmod o-rwx %s, or set "+
+			"insecure_allow_world_readable_keys to start anyway",
+			w.Path, w.Mode, w.Path)
+	}
+
+	for _, w := range worldAccessible {
+		slog.Warn("INSECURE: KEY MATERIAL IS WORLD-ACCESSIBLE AND THE CA WAS TOLD TO START ANYWAY. "+
+			"EVERY LOCAL ACCOUNT CAN READ THIS FILE. TREAT THE CA PRIVATE KEY AS COMPROMISED "+
+			"AND ROTATE IT.",
+			"path", w.Path, "mode", w.Mode.String(),
+			"remedy", "chmod o-rwx "+w.Path)
+	}
+	return nil
+}
+
 // buildBackendSpec derives a storage.BackendSpec from the server config. The
 // spec is used to construct the StorageService in every mode (frontend,
 // signer, single-process), ensuring backend selection happens in one place.
@@ -405,6 +456,7 @@ func newRootCmd() *cobra.Command {
 		caSigningConcurrency    int
 		configFile              string
 		encryptCAKey            bool
+		insecureAllowWorldKeys  bool
 		caKeyPassphraseFile     string
 		singleProcess           bool
 		storageBackend          string
@@ -526,6 +578,9 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("encrypt-ca-key") {
 				cfg.EncryptCAKey = encryptCAKey
+			}
+			if cmd.Flags().Changed("insecure-allow-world-readable-keys") {
+				cfg.InsecureAllowWorldReadableKeys = insecureAllowWorldKeys
 			}
 			if cmd.Flags().Changed("ca-key-passphrase-file") {
 				cfg.CAKeyPassphraseFile = caKeyPassphraseFile
@@ -930,15 +985,22 @@ func newRootCmd() *cobra.Command {
 				}
 			}
 
-			// SECURITY: Warn if any private key files have overly permissive modes.
-			// The server does not modify existing file permissions; operators should
-			// fix these manually (e.g. chmod 0640 or stricter).
+			// SECURITY: key material must not be readable by every local account.
+			// This covers the local private-key directory and, through
+			// KeyFileLister, whatever files the backend keeps the key in -- the
+			// SQLite database and its sidecars hold it as a blob.
+			//
+			// Nothing here changes a mode. openvox-ca creates its own files without
+			// world access and leaves everything else as the operator set it, so a
+			// finding is a condition only they can resolve, and world access is
+			// refused rather than corrected: a key every local account could read
+			// is one to treat as exposed, not one to quietly narrow and serve.
+			// Group access is a warning, not a refusal -- a Kubernetes fsGroup
+			// reapplies it at every mount, and on an arbitrary-uid platform it is
+			// how the CA reaches a store it did not create.
 			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-			if warnings := store.CheckKeyPermissions(); len(warnings) > 0 {
-				for _, w := range warnings {
-					slog.Warn("Private key file has overly permissive mode",
-						"path", w.Path, "mode", w.Mode.String(), "expected", "0600 or stricter")
-				}
+			if err := reportKeyPermissions(store.CheckKeyPermissions(), cfg.InsecureAllowWorldReadableKeys); err != nil {
+				return err
 			}
 
 			// --- HTTP(S) Server ---
@@ -1201,6 +1263,8 @@ func newRootCmd() *cobra.Command {
 	f.IntVar(&csrRateLimit, "csr-rate-limit", -1, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables; unset uses the default of 60)")
 	f.IntVar(&caSigningConcurrency, "ca-signing-concurrency", -1, "Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound; unset uses max(4, GOMAXPROCS)). Lower it to a remote signer's capacity")
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
+	f.BoolVar(&insecureAllowWorldKeys, "insecure-allow-world-readable-keys", false,
+		"Start even when CA key material is readable by every local account, warning loudly instead of refusing. Treat the key as compromised if you need this")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")
 	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default), 'etcd', 'redis' (alias 'valkey'), 'sqlite', 'postgres', or 'mysql' (alias 'mariadb')")

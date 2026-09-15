@@ -187,6 +187,23 @@ behaviour".
 By default, the CA private key is stored as unencrypted PEM at `<cadir>/private/ca_key.pem`.
 Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an Argon2id-derived key.
 
+That path is the filesystem backend's. On the other backends the key is a blob
+in the store instead — unless `ca_key_file` pins it to a local file. The
+encryption below is applied before the key reaches the store, so it protects it
+on every backend; failing that, what protects it at rest is whatever protects
+the store itself. For SQLite that is the mode of the database file and its
+sidecars; see [storage backends](storage-backends.md#sqlite-backend).
+
+One caveat on every backend but the filesystem one, whether or not
+`ca_key_file` is set: the auto-generated passphrase file described below does
+not land under your configured `cadir`. The passphrase resolver is given a base
+directory by the backend, and only the filesystem backend supplies one, so on
+the others the file is written to `private/.ca_key_passphrase` relative to the
+process working directory — whatever `cadir` is set to, and it is still set,
+since per-subject keys live there. Set an explicit passphrase source rather
+than relying on the generated one; the path is logged when the passphrase is
+first generated, and not on later starts.
+
 ### How it works
 
 - The private key is marshalled to PKCS#8 DER, then encrypted with AES-256-GCM.

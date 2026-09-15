@@ -186,8 +186,15 @@ type serverConfig struct {
 	ExpiredCertCleanupIntervalSec int  `yaml:"expired_cert_cleanup_interval_sec"` // how often to run; 0 = built-in default (24h)
 
 	// CA key encryption at rest.
-	EncryptCAKey        bool   `yaml:"encrypt_ca_key"`         // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
-	CAKeyPassphraseFile string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
+	EncryptCAKey bool `yaml:"encrypt_ca_key"` // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
+
+	// InsecureAllowWorldReadableKeys downgrades the startup refusal on
+	// world-accessible key material to a warning. Named for what it is: the CA
+	// private key being readable by every local account is not a configuration
+	// to hold quietly, and an operator reaching for this should see that in the
+	// key they are setting.
+	InsecureAllowWorldReadableKeys bool   `yaml:"insecure_allow_world_readable_keys"`
+	CAKeyPassphraseFile            string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
 
 	// PromoteCNToSAN adds the CN as a DNS SAN when the CSR has no SANs (default: true).
 	PromoteCNToSAN bool `yaml:"promote_cn_to_san"`
@@ -923,6 +930,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_ENCRYPT_CA_KEY"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.EncryptCAKey = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.InsecureAllowWorldReadableKeys = b
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_PROMOTE_CN_TO_SAN"); v != "" {
