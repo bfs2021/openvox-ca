@@ -228,8 +228,10 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 
 (The directory also holds small internal integrity files; leave them in place.)
 File permissions are fixed: `0600` for anything under `private/` and for the
-lock files under `locks/`, `0644` for everything else. Those modes are set when
-each file is created and do not depend on your umask.
+lock files under `locks/`, `0644` for everything else. The blob modes are set on
+each file as it is created and your umask cannot widen them; the lock files and
+the directories are created at these modes and a tighter umask narrows them
+further.
 
 `openvox-ca` never changes the mode of a file it did not create, so anything
 already on disk is left as you have it — but it does check `*_key.pem` under
@@ -664,14 +666,28 @@ What it does instead is refuse to start when key material is readable by every
 local account:
 
 ```text
-/var/lib/puppet-ca/ca.db holds CA key material and is world-accessible (mode
--rw-r--r--); refusing to start -- fix with: chmod o-rwx /var/lib/puppet-ca/ca.db
+CA key material is world-accessible and readable by every local account
+(/var/lib/puppet-ca/ca.db (mode -rw-r--r--), /var/lib/puppet-ca/ca.db-wal (mode
+-rw-r--r--)); refusing to start -- fix with: chmod o-rwx /var/lib/puppet-ca/ca.db
+/var/lib/puppet-ca/ca.db-wal, or set insecure_allow_world_readable_keys to start
+anyway. A key that has been world-readable should be treated as exposed and
+rotated
 ```
 
-A key every local account could read is one to treat as exposed, so the fix is
-`chmod o-rwx` **and** deciding whether to rotate the CA key. Group access is
-reported as a warning and does not stop the CA: expected under an `fsGroup`, and
-worth a look where the group has other members.
+Every world-accessible file is named, not just the first, so one `chmod` clears
+the condition instead of uncovering the next one on the following start. A key
+every local account could read is one to treat as exposed, so the fix is `chmod
+o-rwx` **and** deciding whether to rotate the CA key.
+
+Group access is reported once at `Info`, listing the files, and does not stop the
+CA. It is the mode the store is created with, so a correct deployment has it —
+under an `fsGroup`, and on a plain systemd install alike. Where that group has
+members other than the CA it is worth acting on, but that is not something the
+server can tell from the inside, which is why it does not shout.
+
+The check runs before the CA is initialised and before any child process is
+forked, so a refusal happens before a key is written into a store that would
+have been refused, and reaches you on the terminal even under `--daemon`.
 
 Setting `insecure_allow_world_readable_keys` downgrades the refusal to a loud
 warning. It exists so a world-readable store cannot lock you out of the CA you
@@ -919,6 +935,11 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
 - `openvox-ca` writes the cert at mode `0644` and the key at mode `0600`
   atomically (temp-file + rename). If you supply pre-existing files, they are
   read as-is and never overwritten unless the server rotates the CA.
+- A supplied `ca_key_file` is checked at startup on **every** backend, like any
+  other file holding key material: world access refuses startup, group access is
+  reported at `Info`. Where the path is a read-only mount — a Kubernetes Secret
+  volume — `chmod` will not work and the fix belongs in the volume, as
+  `defaultMode: 0600`.
 - Existing protections still apply: `encrypt_ca_key` encrypts the key PEM
   before writing, and `ca_key_passphrase_file` overrides the auto-generated
   passphrase file.

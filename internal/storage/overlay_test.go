@@ -182,6 +182,67 @@ var _ = Describe("OverlayBackendPathProvider", func() {
 	})
 })
 
+// KeyFilePaths is what keeps the permission check alive when ca_key_file is
+// set: StorageService.CheckKeyPermissions type-asserts KeyFileLister on the
+// backend, and with an override configured the backend it sees is this overlay
+// rather than the store underneath. Lose either half of the delegation and a
+// world-readable database, or a world-readable pinned key, stops being reported
+// with nothing failing to say so.
+var _ = Describe("OverlayBackendKeyFileLister", func() {
+	It("reports both the base's key files and the pinned CA key", func() {
+		dbPath := filepath.Join(GinkgoT().TempDir(), "ca.db")
+		base, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
+		Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+		DeferCleanup(func() { _ = base.Close() })
+
+		keyPath := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
+		ov, err := NewOverlayBackend(base, map[string]string{KeyCAKey: keyPath})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+
+		paths := ov.KeyFilePaths()
+		Expect(paths).To(ContainElement(keyPath), "the pinned ca_key_file")
+		Expect(paths).To(ContainElement(ContainSubstring("ca.db")), "the base's database")
+		Expect(paths).To(ContainElement(ContainSubstring("ca.db-wal")), "the base's -wal sidecar")
+	})
+
+	It("reports the pinned CA key when the base has no key files of its own", func() {
+		base := NewFilesystemBackend(GinkgoT().TempDir())
+		keyPath := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
+		ov, err := NewOverlayBackend(base, map[string]string{KeyCAKey: keyPath})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+
+		Expect(ov.KeyFilePaths()).To(ConsistOf(keyPath), "only the override")
+	})
+
+	// A cert override is not key material and must not be reported: doing so
+	// would refuse startup over a file that is public by design.
+	It("does not report a pinned CA certificate", func() {
+		base := NewFilesystemBackend(GinkgoT().TempDir())
+		certPath := filepath.Join(GinkgoT().TempDir(), "ca_crt.pem")
+		ov, err := NewOverlayBackend(base, map[string]string{KeyCACert: certPath})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+
+		Expect(ov.KeyFilePaths()).NotTo(ContainElement(certPath), "the CA certificate is public")
+	})
+
+	// The end-to-end assertion: the one that fails if the wiring is lost rather
+	// than if the method is deleted.
+	It("carries a world-readable pinned key through to CheckKeyPermissions", func() {
+		base := NewFilesystemBackend(GinkgoT().TempDir())
+		keyPath := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
+		Expect(os.WriteFile(keyPath, nil, 0o600)).To(Succeed(), "seed the pinned key")
+		Expect(os.Chmod(keyPath, 0o644)).To(Succeed(), "widen it past any umask")
+
+		ov, err := NewOverlayBackend(base, map[string]string{KeyCAKey: keyPath})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+
+		warnings := NewWithBackend(ov, "").CheckKeyPermissions()
+		Expect(warnings).To(HaveLen(1), "one finding, for the pinned key")
+		Expect(warnings[0].Path).To(Equal(keyPath))
+		Expect(warnings[0].WorldAccessible()).To(BeTrue(), "world access on the pinned key")
+	})
+})
+
 var _ = Describe("OverlayBackendRequiresNonEmptyOverride", func() {
 	It("rejects nil, all-empty, and nil-base configurations", func() {
 		base := NewFilesystemBackend(GinkgoT().TempDir())

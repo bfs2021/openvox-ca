@@ -824,6 +824,12 @@ var _ = Describe("applyServerEnv each variable", func() {
 		},
 		Entry("CADIR", "PUPPET_CA_CADIR", "/some/dir",
 			func(c *serverConfig) bool { return c.CADir == "/some/dir" }, "CADir"),
+		// true is the distinguishing value: false is the zero value, so an entry
+		// asserting false would pass with the variable unread or the field
+		// misnamed.
+		Entry("INSECURE_ALLOW_WORLD_READABLE_KEYS", "PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", "true",
+			func(c *serverConfig) bool { return c.InsecureAllowWorldReadableKeys },
+			"InsecureAllowWorldReadableKeys"),
 		Entry("CLIENT_REVOCATION_POLICY", "PUPPET_CA_CLIENT_REVOCATION_POLICY", "check",
 			func(c *serverConfig) bool { return c.ClientRevocationPolicy == "check" }, "ClientRevocationPolicy"),
 		Entry("CLIENT_CRL_REFRESH_INTERVAL_SEC", "PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", "300",

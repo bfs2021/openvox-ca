@@ -124,8 +124,18 @@ var _ = Describe("CheckKeyPermissions", func() {
 		It("reports no world access when the database is only group-accessible", func() {
 			Expect(os.Chmod(dbPath, 0o660)).To(Succeed())
 
-			for _, w := range svc.CheckKeyPermissions() {
-				Expect(w.WorldAccessible()).To(BeFalse(), "world access on %s (mode %s)", w.Path, w.Mode)
+			warnings := svc.CheckKeyPermissions()
+
+			// Assert the finding exists before classifying it. A bare loop over
+			// the result is satisfied by an empty slice, so narrowing the check
+			// to world access only would have kept this green while silently
+			// removing everything an fsGroup deployment is told.
+			w := findFor(warnings, dbPath)
+			Expect(w).NotTo(BeNil(), "a finding for the group-accessible database")
+			Expect(w.WorldAccessible()).To(BeFalse(), "group access is not world access")
+
+			for _, other := range warnings {
+				Expect(other.WorldAccessible()).To(BeFalse(), "world access on %s (mode %s)", other.Path, other.Mode)
 			}
 		})
 
@@ -149,6 +159,27 @@ var _ = Describe("CheckKeyPermissions", func() {
 			Expect(w).NotTo(BeNil(), "warning for the -wal sidecar")
 			Expect(w.WorldAccessible()).To(BeTrue(), "world access")
 		})
+	})
+
+	// A path whose mode cannot be read at all is not the same fact as a path whose
+	// mode is fine, and the difference decides whether the CA serves. Reported as
+	// world-accessible so the caller refuses rather than starting on key material
+	// nobody checked.
+	It("reports a path it cannot judge as world-accessible", func() {
+		if os.Geteuid() == 0 {
+			Skip("root can read a directory whatever its mode")
+		}
+		dir := GinkgoT().TempDir()
+		keyDir := filepath.Join(dir, "private")
+		Expect(os.Mkdir(keyDir, 0o700)).To(Succeed(), "make the private directory")
+		Expect(os.Chmod(keyDir, 0o000)).To(Succeed(), "make it unreadable")
+		DeferCleanup(func() { _ = os.Chmod(keyDir, 0o700) })
+
+		svc := NewWithBackend(NewFilesystemBackend(dir), keyDir)
+
+		w := findFor(svc.CheckKeyPermissions(), keyDir)
+		Expect(w).NotTo(BeNil(), "a finding for the unreadable directory")
+		Expect(w.WorldAccessible()).To(BeTrue(), "an unjudgeable path fails closed")
 	})
 
 	// An in-memory database has no files, and a backend that declares none must

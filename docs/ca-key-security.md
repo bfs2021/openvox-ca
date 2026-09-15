@@ -218,8 +218,11 @@ first generated, and not on later starts.
    Under the default process split only the signer child receives it; see
    [process isolation](#process-isolation).
 3. **Auto-generated:** if no passphrase source is configured, a cryptographically random
-   passphrase is generated and saved to `<cadir>/private/.ca_key_passphrase` (mode `0600`).
-   The path is logged at startup so operators know where it is.
+   passphrase is generated and saved to `<cadir>/private/.ca_key_passphrase` (mode
+   `0600`) on the filesystem backend, or to `private/.ca_key_passphrase` relative
+   to the process working directory on every other backend — see the caveat
+   above. The path is logged when the passphrase is generated, and not on later
+   starts.
 
 ### Example usage
 

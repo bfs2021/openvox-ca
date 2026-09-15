@@ -1132,7 +1132,21 @@ func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 		// sidecar names are derived from the DSN rather than chosen, and a
 		// dangling or redirected link there is not something to follow.
 		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() {
+		if errors.Is(err, fs.ErrNotExist) {
+			// Most of these paths are optional -- the sidecars exist only while
+			// the database is open, and private/ is empty on a first bootstrap.
+			return
+		}
+		if err != nil {
+			// Anything else means the mode could not be judged, which is not the
+			// same fact as "the mode is fine". Reporting it as a finding makes
+			// the caller refuse rather than serve key material nobody checked.
+			slog.Warn("Could not check the permissions of a file holding key material",
+				"path", path, "error", err)
+			warnings = append(warnings, KeyPermWarning{Path: path, Mode: keyPermUnknown})
+			return
+		}
+		if !info.Mode().IsRegular() {
 			return
 		}
 		if perm := info.Mode().Perm(); perm&^os.FileMode(FilePermPrivate) != 0 {
@@ -1141,7 +1155,15 @@ func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 	}
 
 	if s.localPrivateKeyDir != "" {
-		if entries, err := os.ReadDir(s.localPrivateKeyDir); err == nil {
+		entries, err := os.ReadDir(s.localPrivateKeyDir)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// No private/ yet: a first bootstrap, nothing to judge.
+		case err != nil:
+			slog.Warn("Could not read the private key directory to check its permissions",
+				"path", s.localPrivateKeyDir, "error", err)
+			warnings = append(warnings, KeyPermWarning{Path: s.localPrivateKeyDir, Mode: keyPermUnknown})
+		default:
 			for _, e := range entries {
 				if e.IsDir() || !strings.HasSuffix(e.Name(), "_key.pem") {
 					continue

@@ -186,15 +186,14 @@ type serverConfig struct {
 	ExpiredCertCleanupIntervalSec int  `yaml:"expired_cert_cleanup_interval_sec"` // how often to run; 0 = built-in default (24h)
 
 	// CA key encryption at rest.
-	EncryptCAKey bool `yaml:"encrypt_ca_key"` // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
+	EncryptCAKey        bool   `yaml:"encrypt_ca_key"`         // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
+	CAKeyPassphraseFile string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
 
 	// InsecureAllowWorldReadableKeys downgrades the startup refusal on
-	// world-accessible key material to a warning. Named for what it is: the CA
-	// private key being readable by every local account is not a configuration
-	// to hold quietly, and an operator reaching for this should see that in the
-	// key they are setting.
-	InsecureAllowWorldReadableKeys bool   `yaml:"insecure_allow_world_readable_keys"`
-	CAKeyPassphraseFile            string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
+	// world-accessible key material to a warning. Named for what it is: an
+	// operator reaching for this should see what they are turning off in the
+	// key itself.
+	InsecureAllowWorldReadableKeys bool `yaml:"insecure_allow_world_readable_keys"`
 
 	// PromoteCNToSAN adds the CN as a DNS SAN when the CSR has no SANs (default: true).
 	PromoteCNToSAN bool `yaml:"promote_cn_to_san"`

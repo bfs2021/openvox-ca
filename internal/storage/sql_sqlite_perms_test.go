@@ -218,7 +218,12 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		// blocks until a writer appears, so a create that did not use O_EXCL, or
 		// any inspection that opened the path, would hang here for ever and take
 		// the suite with it rather than failing.
-		_, _ = NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
+		b, _ := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
+		if b != nil {
+			// sql.Open is lazy, so construction succeeds here and leaves a handle
+			// to close even though nothing usable is behind it.
+			DeferCleanup(func() { _ = b.Close() })
+		}
 
 		Expect(permOf(dbPath)).To(Equal(os.FileMode(0o644)), "FIFO mode left alone")
 	})
@@ -244,6 +249,34 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		Expect(worldBits(realDB)).To(BeZero(), "world bits on the resolved database")
 		Expect(worldBits(wal)).To(BeZero(), "world bits on -wal beside the resolved path")
 		Expect(worldBits(shm)).To(BeZero(), "world bits on -shm beside the resolved path")
+	})
+
+	// A chain of dangling links, which is what a relocation through a stable
+	// alias looks like before the first bootstrap. Stopping after one hop would
+	// leave everything derived from the path -- the sidecars, the lock directory,
+	// the files the permission check judges -- pointing at an intermediate link
+	// while the driver created the real database somewhere else, under the umask.
+	It("resolves a chain of dangling symlinks to its final target", func() {
+		dir := GinkgoT().TempDir()
+		realDB := filepath.Join(dir, "real.db")
+		middle := filepath.Join(dir, "middle.db")
+		link := filepath.Join(dir, "link.db")
+		Expect(os.Symlink(realDB, middle)).To(Succeed(), "middle -> real")
+		Expect(os.Symlink(middle, link)).To(Succeed(), "link -> middle")
+
+		b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + link})
+		Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+		DeferCleanup(func() { _ = b.Close() })
+		Expect(b.EnsureReady(context.Background())).To(Succeed(), "EnsureReady")
+
+		Expect(realDB).To(BeAnExistingFile(), "the database was created at the end of the chain")
+		Expect(worldBits(realDB)).To(BeZero(), "world bits on the created target")
+		// Lstat, not Stat: the intermediate link now resolves to the real
+		// database, so following it would report a regular file and the
+		// assertion would be about the target rather than the link.
+		info, err := os.Lstat(middle)
+		Expect(err).NotTo(HaveOccurred(), "lstat the intermediate link")
+		Expect(info.Mode()&os.ModeSymlink).NotTo(BeZero(), "the intermediate link was not replaced by a file")
 	})
 
 	// Everything derived from the DSN has to come from the same resolved path. The
@@ -286,9 +319,20 @@ var _ = Describe("SQLiteFilePermissions", func() {
 	// that the same way it reports an in-memory database: no file. Taken at face
 	// value it would skip creation entirely and let the driver make the database at
 	// the umask, which is issue #351 again by way of giving up.
-	It("refuses a DSN whose escapes it cannot read", func() {
+	It("refuses an absolute DSN whose escapes it cannot read", func() {
 		_, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:/var/lib/ca%zz.db"})
-		Expect(err).To(MatchError(ContainSubstring("sqlite dsn")), "NewSQLBackend error")
+		Expect(err).To(MatchError(ContainSubstring("reading sqlite dsn")), "url.Parse branch")
+	})
+
+	// The other refusal branch, and the one the doc comment singles out: a
+	// relative file: URI keeps its escapes in url.Opaque, which net/url does not
+	// validate, so only the manual unescape rejects it. Asserted on the
+	// branch-specific text, because both branches mention "sqlite dsn" and an
+	// assertion on the shared part could not tell which one fired.
+	It("refuses a relative DSN whose escapes it cannot read", func() {
+		_, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:ca%20b%zz.db"})
+		Expect(err).To(MatchError(ContainSubstring("reading the database path out of sqlite dsn")),
+			"PathUnescape branch")
 	})
 
 	// An in-memory database has no file, and the open path must not invent one

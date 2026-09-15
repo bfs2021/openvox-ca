@@ -38,6 +38,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -150,37 +151,69 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 // does for plain HTTP on a non-loopback address. It shouts, because an operator
 // who reaches for it should be in no doubt what they have turned off.
 func reportKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) error {
-	var worldAccessible []storage.KeyPermWarning
+	var worldAccessible, groupAccessible []storage.KeyPermWarning
 	for _, w := range warnings {
 		if w.WorldAccessible() {
 			worldAccessible = append(worldAccessible, w)
 			continue
 		}
-		slog.Warn("Key material is readable by its group",
-			"path", w.Path, "mode", w.Mode.String(),
-			"note", "expected under a Kubernetes fsGroup; a real exposure if that group has other members")
+		groupAccessible = append(groupAccessible, w)
+	}
+
+	// Group access is reported once, at Info, listing the files rather than one
+	// record each. It is the expected state and not a finding: openvox-ca creates
+	// its own store group-accessible by design, so under the usual 0022 umask a
+	// correct SQLite deployment has a 0640 database and three 0640 sidecars. A
+	// warning on every start of a correct deployment is one nobody reads, and
+	// attributing it to a cause -- a Kubernetes fsGroup, say -- would be wrong on
+	// the systemd installs where no fsGroup exists and the mode is simply ours.
+	if len(groupAccessible) > 0 {
+		slog.Info("Key material is accessible to its group, which is the default",
+			"paths", keyPermPaths(groupAccessible),
+			"note", "a real exposure only if that group has members other than the CA")
 	}
 
 	if len(worldAccessible) == 0 {
 		return nil
 	}
 
+	// Every world-accessible path, not just the first. SQLite keeps the key in
+	// four files whose modes move together, so naming one would have the operator
+	// fix it, restart, and be refused again by the next.
+	paths := keyPermPaths(worldAccessible)
 	if !insecureAllow {
-		w := worldAccessible[0]
-		return fmt.Errorf("%s holds CA key material and is world-accessible (mode %s); "+
+		return fmt.Errorf("CA key material is world-accessible and readable by every local account (%s); "+
 			"refusing to start -- fix with: chmod o-rwx %s, or set "+
-			"insecure_allow_world_readable_keys to start anyway",
-			w.Path, w.Mode, w.Path)
+			"insecure_allow_world_readable_keys to start anyway. A key that has been "+
+			"world-readable should be treated as exposed and rotated",
+			paths, strings.Join(keyPermPathList(worldAccessible), " "))
 	}
 
-	for _, w := range worldAccessible {
-		slog.Warn("INSECURE: KEY MATERIAL IS WORLD-ACCESSIBLE AND THE CA WAS TOLD TO START ANYWAY. "+
-			"EVERY LOCAL ACCOUNT CAN READ THIS FILE. TREAT THE CA PRIVATE KEY AS COMPROMISED "+
-			"AND ROTATE IT.",
-			"path", w.Path, "mode", w.Mode.String(),
-			"remedy", "chmod o-rwx "+w.Path)
-	}
+	slog.Warn("INSECURE: KEY MATERIAL IS WORLD-ACCESSIBLE AND THE CA WAS TOLD TO START ANYWAY. "+
+		"EVERY LOCAL ACCOUNT CAN READ THESE FILES. TREAT THE CA PRIVATE KEY AS COMPROMISED "+
+		"AND ROTATE IT.",
+		"paths", paths,
+		"remedy", "chmod o-rwx "+strings.Join(keyPermPathList(worldAccessible), " "))
 	return nil
+}
+
+// keyPermPaths renders findings for an operator: each path with the mode that
+// made it a finding, so the message says what is wrong as well as where.
+func keyPermPaths(warnings []storage.KeyPermWarning) string {
+	parts := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		parts = append(parts, fmt.Sprintf("%s (mode %s)", w.Path, w.Mode))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// keyPermPathList renders the bare paths, for pasting into the suggested chmod.
+func keyPermPathList(warnings []storage.KeyPermWarning) []string {
+	paths := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		paths = append(paths, w.Path)
+	}
+	return paths
 }
 
 // buildBackendSpec derives a storage.BackendSpec from the server config. The
@@ -664,6 +697,11 @@ func newRootCmd() *cobra.Command {
 				if err := preflightInstanceLock(ctx, cfg); err != nil {
 					return err
 				}
+				// Same reasoning for key-material permissions: a refusal raised
+				// past the fork is discarded with the child's stderr.
+				if err := preflightKeyPermissions(ctx, cfg); err != nil {
+					return err
+				}
 
 				exe, err := os.Executable()
 				if err != nil {
@@ -730,6 +768,20 @@ func newRootCmd() *cobra.Command {
 						slog.Warn("Failed to release the store's instance lock", "error", err)
 					}
 				}()
+			}
+
+			// --- Key material must not be readable by every local account ---
+			// Here rather than after CA.Init, and in the parent rather than in a
+			// child, because on the default topology it is the signer child that
+			// bootstraps the CA: a later check would write a fresh private key
+			// into an already world-accessible store and refuse afterwards.
+			// Whichever child opens the store next inherits a store this has
+			// already passed judgement on.
+			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
+			if role == "" {
+				if err := preflightKeyPermissions(ctx, cfg); err != nil {
+					return err
+				}
 			}
 
 			// Signer mode: load key, serve signing requests on socketpair, exit.
@@ -983,24 +1035,6 @@ func newRootCmd() *cobra.Command {
 				if err := provisionServingCert(ctx, myCA, serving); err != nil {
 					return err
 				}
-			}
-
-			// SECURITY: key material must not be readable by every local account.
-			// This covers the local private-key directory and, through
-			// KeyFileLister, whatever files the backend keeps the key in -- the
-			// SQLite database and its sidecars hold it as a blob.
-			//
-			// Nothing here changes a mode. openvox-ca creates its own files without
-			// world access and leaves everything else as the operator set it, so a
-			// finding is a condition only they can resolve, and world access is
-			// refused rather than corrected: a key every local account could read
-			// is one to treat as exposed, not one to quietly narrow and serve.
-			// Group access is a warning, not a refusal -- a Kubernetes fsGroup
-			// reapplies it at every mount, and on an arbitrary-uid platform it is
-			// how the CA reaches a store it did not create.
-			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-			if err := reportKeyPermissions(store.CheckKeyPermissions(), cfg.InsecureAllowWorldReadableKeys); err != nil {
-				return err
 			}
 
 			// --- HTTP(S) Server ---

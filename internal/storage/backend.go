@@ -113,6 +113,12 @@ type KeyPermWarning struct {
 	Mode os.FileMode
 }
 
+// keyPermUnknown is the mode recorded when a path holding key material could
+// not be judged at all -- an unreadable parent directory, an I/O error. It sets
+// every world bit so that WorldAccessible reports true and the caller refuses:
+// a permission this process cannot read is not one it may assume is safe.
+const keyPermUnknown = os.FileMode(0o777)
+
 // WorldAccessible reports whether the mode grants any access to users outside
 // the owner and the group. That is the distinction the server acts on: world
 // access means every local account can read the CA private key and is refused,

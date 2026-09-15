@@ -45,8 +45,15 @@ var _ = Describe("reportKeyPermissions", func() {
 		return &buf
 	}
 
-	worldReadable := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca.db", Mode: os.FileMode(0o644)}
-	groupReadable := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca.db", Mode: os.FileMode(0o640)}
+	// Distinct paths, and the realistic pairing: SQLite keeps the key across a
+	// database and its sidecars, each with its own mode. Sharing one path between
+	// the fixtures would make it impossible for any assertion here to catch the
+	// refusal naming the wrong file.
+	worldReadable := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca.db-wal", Mode: os.FileMode(0o644)}
+	// Deliberately not a prefix of the world-accessible path: "ca.db" is a
+	// substring of "ca.db-wal", so a NotTo(ContainSubstring) over the pair could
+	// never pass and the spec below would be unfailable in the wrong direction.
+	groupReadable := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/private/ca_key.pem", Mode: os.FileMode(0o640)}
 
 	It("starts with nothing to report", func() {
 		buf := captureWarnings()
@@ -61,7 +68,9 @@ var _ = Describe("reportKeyPermissions", func() {
 		Expect(err).To(HaveOccurred(), "world-accessible key material")
 		Expect(err.Error()).To(ContainSubstring("refusing to start"), "the refusal")
 		Expect(err.Error()).To(ContainSubstring(worldReadable.Path), "the file at fault")
+		Expect(err.Error()).To(ContainSubstring(worldReadable.Mode.String()), "the mode that made it a finding")
 		Expect(err.Error()).To(ContainSubstring("chmod o-rwx"), "the remedy")
+		Expect(err.Error()).To(ContainSubstring("rotated"), "what to do about a key that was exposed")
 	})
 
 	// Group access must not be a refusal. Under the chart's default fsGroup the
@@ -72,8 +81,7 @@ var _ = Describe("reportKeyPermissions", func() {
 
 		Expect(reportKeyPermissions([]storage.KeyPermWarning{groupReadable}, false)).To(Succeed(),
 			"group access must not stop the CA starting")
-		Expect(buf.String()).To(ContainSubstring("readable by its group"), "the warning")
-		Expect(buf.String()).To(ContainSubstring(groupReadable.Path), "the file named")
+		Expect(buf.String()).To(BeEmpty(), "group access is not a warning-level condition")
 	})
 
 	// The opt-out downgrades the refusal, and shouts. An operator who reaches for
@@ -94,7 +102,6 @@ var _ = Describe("reportKeyPermissions", func() {
 		buf := captureWarnings()
 
 		Expect(reportKeyPermissions([]storage.KeyPermWarning{groupReadable}, true)).To(Succeed())
-		Expect(buf.String()).To(ContainSubstring("readable by its group"), "the group warning")
 		Expect(buf.String()).NotTo(ContainSubstring("INSECURE"), "no scream for group access")
 	})
 
@@ -107,5 +114,21 @@ var _ = Describe("reportKeyPermissions", func() {
 
 		Expect(err).To(HaveOccurred(), "the world-accessible file is not first")
 		Expect(err.Error()).To(ContainSubstring("refusing to start"), "the refusal")
+		Expect(err.Error()).To(ContainSubstring(worldReadable.Path), "names the world-accessible file")
+		Expect(err.Error()).NotTo(ContainSubstring(groupReadable.Path),
+			"does not send the operator to chmod a file that is merely group-accessible")
+	})
+
+	// Every world-accessible path, not just the first. SQLite keeps the key in
+	// four files whose modes move together, so naming one would have the operator
+	// fix it, restart, and be refused again by the next.
+	It("names every world-accessible file in one refusal", func() {
+		second := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca.db-shm", Mode: os.FileMode(0o644)}
+
+		err := reportKeyPermissions([]storage.KeyPermWarning{worldReadable, second}, false)
+
+		Expect(err).To(HaveOccurred(), "two world-accessible files")
+		Expect(err.Error()).To(ContainSubstring(worldReadable.Path), "the first")
+		Expect(err.Error()).To(ContainSubstring(second.Path), "the second")
 	})
 })

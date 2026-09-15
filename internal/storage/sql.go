@@ -105,6 +105,12 @@ const (
 	// while protecting nothing: the pod's own group is not a third party.
 	sqliteFilePermCreate = 0o660
 
+	// sqliteSymlinkHops bounds the manual resolution of a chain of dangling
+	// symlinks, the way the kernel bounds its own (ELOOP after 40 on Linux, 32
+	// on the BSDs). Only reached when the target does not exist yet, since
+	// EvalSymlinks handles every chain that does.
+	sqliteSymlinkHops = 32
+
 	// lockNameSQLMigrate is the distributed-lock name held for a migration run.
 	// It is deliberately distinct from the CA's "bootstrap" lock: EnsureReady
 	// runs before (and, via MigrateService, inside) that one, so sharing a name
@@ -933,10 +939,16 @@ func createSQLiteDatabase(dsn string) error {
 	}
 
 	// O_EXCL is what makes this "only if nothing is there already": it fails
-	// with EEXIST on a regular file, a directory, a FIFO and a dangling symlink
-	// alike, so an existing store is never opened, never followed and never
-	// written through. Losing the race to a concurrent starter lands here too,
-	// and is not an error — the winner created it under the same rule.
+	// with EEXIST on a regular file, a directory and a FIFO alike, so an
+	// existing store is never opened and never written through. Losing the race
+	// to a concurrent starter lands here too, and is not an error — the winner
+	// created it under the same rule.
+	//
+	// A symlink never arrives here as a symlink: resolveSQLitePath has already
+	// followed it, deliberately, so that an operator who points the DSN at a
+	// data volume gets the database created at the other end. O_EXCL then
+	// applies at that target, which is what stops an existing file there being
+	// written through.
 	//
 	// An empty file is a valid empty SQLite database, so the driver adopts this
 	// one rather than creating its own.
@@ -1080,11 +1092,28 @@ func resolveSQLitePath(path string) string {
 	// A symlink whose target does not exist yet: an operator pointing the CA at
 	// a data volume before the first bootstrap fills it. Follow it by hand,
 	// since EvalSymlinks will not resolve a dangling link.
-	if target, err := os.Readlink(path); err == nil {
+	//
+	// A loop rather than a single hop, because a chain of them resolves to the
+	// same file the driver will open, and stopping early would leave everything
+	// derived from this path -- the sidecar names, the lock directory, the files
+	// the permission check judges -- pointing at an intermediate link while the
+	// driver created the real database somewhere else under the umask. The hop
+	// limit is the conventional one; a path still unresolved after that is a
+	// loop, and is left as it was for the open to reject.
+	for range sqliteSymlinkHops {
+		target, err := os.Readlink(path)
+		if err != nil {
+			break
+		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(path), target)
 		}
 		path = target
+		// The chain may reach an existing file part-way along, in which case
+		// EvalSymlinks can finish the job and resolve any symlinked parents too.
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			return resolved
+		}
 	}
 	// The file is absent, so resolve as much as exists: the directory holding
 	// it, which may itself be reached through a symlink.

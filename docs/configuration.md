@@ -2336,7 +2336,11 @@ store the same logical state elsewhere.
 | Lock files under `locks/` | `0600` |
 | Public data (certs, CSRs, inventory) | `0644` |
 
-These modes are set when each file is created and do not depend on your umask.
+Blob modes — the private keys, the CRL, the supersession list and the public
+data — are set on each file as it is created and your umask cannot widen them.
+Directories and the lock files under `locks/` are created at the modes above and
+a tighter umask narrows them further.
+
 `openvox-ca` never changes the mode of a file it did not create, so anything
 already on disk stays as you have it — but a private key readable by every local
 account makes the server refuse to start. See [storage
