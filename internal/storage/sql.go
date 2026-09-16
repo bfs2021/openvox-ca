@@ -1050,7 +1050,8 @@ func sqliteKeyFilePaths(dsn string) []string {
 // the one that drifted would be the one guarding against that.
 func SQLiteFilePath(dsn string) (string, bool) {
 	path, query := dsn, ""
-	if strings.HasPrefix(path, "file:") {
+	isURI := strings.HasPrefix(path, "file:")
+	if isURI {
 		u, err := url.Parse(path)
 		if err != nil {
 			return "", false
@@ -1080,8 +1081,17 @@ func SQLiteFilePath(dsn string) (string, bool) {
 	if path == "" || path == ":memory:" {
 		return "", false
 	}
-	if v, err := url.ParseQuery(query); err == nil && v.Get("mode") == "memory" {
-		return "", false
+	// mode=memory is honoured only where SQLite honours it: inside a "file:"
+	// URI, which the driver opens with SQLITE_OPEN_URI. On a bare path the
+	// parameter is not URI syntax and the driver opens the file regardless --
+	// measured: a DSN of "<dir>/ca.db?mode=memory" creates <dir>/ca.db, plus
+	// -wal and -shm, at the umask. Treating that as an in-memory database
+	// skipped the create, the key-file list and the lock all at once, which is
+	// issue #351 reached through a DSN that merely looks like it names no file.
+	if isURI {
+		if v, err := url.ParseQuery(query); err == nil && v.Get("mode") == "memory" {
+			return "", false
+		}
 	}
 	return path, true
 }

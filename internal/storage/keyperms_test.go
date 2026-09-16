@@ -246,6 +246,27 @@ var _ = Describe("CheckKeyPermissions", func() {
 			"nothing to judge, and nothing was written through it either")
 	})
 
+	// The three sources overlap by construction: a ca_key_passphrase_file named
+	// inside <cadir>/private is both a directory entry and a caller-supplied
+	// path. Reported twice, it is chmodded twice in the remedy and counted twice
+	// in the group-access record, which is a number an operator reads.
+	It("reports a path reachable from two sources only once", func() {
+		dir := GinkgoT().TempDir()
+		priv := filepath.Join(dir, "private")
+		Expect(os.MkdirAll(priv, DirPerm)).To(Succeed())
+		shared := filepath.Join(priv, ".ca_key_passphrase")
+		Expect(os.WriteFile(shared, nil, 0o600)).To(Succeed(), "seed it")
+		Expect(os.Chmod(shared, 0o644)).To(Succeed(), "world-readable, whatever the umask")
+
+		svc := NewWithBackend(NewFilesystemBackend(dir), priv)
+
+		// Named by the caller as well as found by the directory scan.
+		warnings := svc.CheckKeyPermissions(shared)
+
+		Expect(warnings).To(HaveLen(1), "one file, one finding")
+		Expect(warnings[0].Path).To(Equal(shared))
+	})
+
 	// The other fail-closed arm: a backend-declared file whose own Lstat fails,
 	// as opposed to the private-key directory whose ReadDir fails. That is the arm
 	// covering the database, its sidecars and a pinned ca_key_file -- everything

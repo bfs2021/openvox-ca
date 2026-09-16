@@ -245,13 +245,39 @@ func logKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) {
 	// Only reachable with the opt-out set; without it the refusal already stopped
 	// startup.
 	if len(worldAccessible) > 0 && insecureAllow {
-		slog.Warn("INSECURE: KEY MATERIAL IS WORLD-ACCESSIBLE AND THE CA WAS TOLD TO START ANYWAY. "+
-			"EVERY LOCAL ACCOUNT CAN READ THESE FILES. TREAT THE CA PRIVATE KEY AS COMPROMISED "+
-			"AND ROTATE IT.",
+		slog.Warn(insecureKeyPermHeadline,
 			"paths", keyPermPaths(worldAccessible),
 			"remedy", "chmod o-rwx -- "+strings.Join(keyPermPathList(worldAccessible), " "))
 	}
 }
+
+// keyPermInsecureNotice renders the opt-out's warning as a line of text, or ""
+// when there is nothing to say. Shared so the terminal copy under --daemon and
+// the slog record below cannot drift apart.
+func keyPermInsecureNotice(warnings []storage.KeyPermWarning, insecureAllow bool) string {
+	if !insecureAllow {
+		return ""
+	}
+	var worldAccessible []storage.KeyPermWarning
+	for _, w := range warnings {
+		if !w.Unreadable && w.WorldAccessible() {
+			worldAccessible = append(worldAccessible, w)
+		}
+	}
+	if len(worldAccessible) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s Paths: %s. Remedy: chmod o-rwx -- %s",
+		insecureKeyPermHeadline,
+		keyPermPaths(worldAccessible),
+		strings.Join(keyPermPathList(worldAccessible), " "))
+}
+
+// insecureKeyPermHeadline is the shouting itself, in one place because it is
+// emitted twice: to the terminal before a --daemon fork, and to the log.
+const insecureKeyPermHeadline = "INSECURE: KEY MATERIAL IS WORLD-ACCESSIBLE AND THE CA WAS TOLD TO START ANYWAY. " +
+	"EVERY LOCAL ACCOUNT CAN READ THESE FILES. TREAT THE CA PRIVATE KEY AS COMPROMISED " +
+	"AND ROTATE IT."
 
 // keyPermPaths renders findings for an operator: each path with the mode that
 // made it a finding, so the message says what is wrong as well as where.
@@ -806,8 +832,19 @@ func newRootCmd() *cobra.Command {
 				}
 				// Same reasoning for key-material permissions: a refusal raised
 				// past the fork is discarded with the child's stderr.
-				if _, err := preflightKeyPermissions(ctx, cfg); err != nil {
+				daemonWarnings, err := preflightKeyPermissions(ctx, cfg)
+				if err != nil {
 					return err
+				}
+				// And the same reasoning again for the opt-out's warning, which
+				// is not a refusal and so does not return through cobra. The
+				// child's stderr is /dev/null, so with no log_file configured
+				// the one notice telling an operator their CA key is readable
+				// by every local account would reach nobody at all. Say it here,
+				// where there is still a terminal.
+				if notice := keyPermInsecureNotice(daemonWarnings,
+					cfg.InsecureAllowWorldReadableKeys); notice != "" {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), notice)
 				}
 
 				exe, err := os.Executable()

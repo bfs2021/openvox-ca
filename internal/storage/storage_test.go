@@ -287,7 +287,11 @@ var _ = Describe("StorageService", func() {
 
 		It("reports files with group-readable permissions (0640)", func() {
 			keyPath := store.PrivateKeyPath("loose-node")
-			Expect(os.WriteFile(keyPath, []byte("fake"), 0640)).To(Succeed())
+			// Seeded then chmodded: os.WriteFile's mode is masked by the umask,
+			// so at 0077 this would land at 0600 and the spec would fail for a
+			// reason that is not its subject.
+			Expect(os.WriteFile(keyPath, []byte("fake"), storage.FilePermPrivate)).To(Succeed())
+			Expect(os.Chmod(keyPath, 0640)).To(Succeed())
 			warnings := store.CheckKeyPermissions()
 			Expect(warnings).To(HaveLen(1))
 			Expect(warnings[0].Path).To(Equal(keyPath))
@@ -296,7 +300,8 @@ var _ = Describe("StorageService", func() {
 
 		It("reports files with world-readable permissions (0644)", func() {
 			keyPath := store.PrivateKeyPath("wide-open")
-			Expect(os.WriteFile(keyPath, []byte("fake"), 0644)).To(Succeed())
+			Expect(os.WriteFile(keyPath, []byte("fake"), storage.FilePermPrivate)).To(Succeed())
+			Expect(os.Chmod(keyPath, 0644)).To(Succeed())
 			warnings := store.CheckKeyPermissions()
 			Expect(warnings).To(HaveLen(1))
 			Expect(warnings[0].Path).To(Equal(keyPath))

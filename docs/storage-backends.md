@@ -227,8 +227,9 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 > [storage internals](development/storage-internals.md).
 
 (The directory also holds small internal integrity files; leave them in place.)
-File permissions are fixed: `0600` for anything under `private/`, for the
-inventory and for the lock files under `locks/`, `0644` for everything else. The
+File permissions are fixed: `0600` for anything under `private/`, for the CRL,
+for the pending-supersession list, for the inventory and for the lock files
+under `locks/`; `0644` for the public data — issued certificates and CSRs. The
 blob modes are set on each file as it is created and your umask cannot widen
 them; the lock files and the directories are created at these modes and a
 tighter umask narrows them further.
@@ -649,10 +650,17 @@ than failing under contention.
 
 A `file:` DSN is read as a URI, so its `%HH` escapes are decoded: `file:ca%20b.db`
 names a database called `ca b.db`, and a path containing a literal `%` has to be
-written `%25`. A DSN whose escapes cannot be read is refused at startup
-(`reading the database path out of sqlite dsn ...`) rather than left unprotected
-— openvox-ca has to know which file the driver will open in order to create it
-safely and to check its permissions later.
+written `%25`. A DSN that cannot be read is refused at startup rather than left
+unprotected — openvox-ca has to know which file the driver will open in order to
+create it safely and to check its permissions later. There are two such
+refusals, so you can search for whichever you see: `reading sqlite dsn ...` when
+the DSN is not a URI at all, and `reading the database path out of sqlite dsn
+...` when it is but its escapes cannot be decoded.
+
+`mode=memory` is honoured only in the `file:` form, which is the only place
+SQLite honours it. On a bare path (`/var/lib/puppet-ca/ca.db?mode=memory`) the
+driver creates the file anyway, so openvox-ca protects and checks it like any
+other database.
 
 ```text
 --storage-backend sqlite

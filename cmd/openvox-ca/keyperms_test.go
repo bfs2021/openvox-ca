@@ -198,6 +198,69 @@ var _ = Describe("key-material permissions at startup", func() {
 		Expect(err.Error()).NotTo(ContainSubstring("more"), "nothing elided")
 	})
 
+	// Under --daemon the child's stderr is /dev/null and the parent returns
+	// before any logger exists, so with no log_file configured the opt-out's
+	// warning had nowhere to go: the operator was told the CA started and never
+	// that its key is readable by every local account.
+	Describe("the opt-out's notice for the terminal", func() {
+		It("renders the shouting and the remedy", func() {
+			notice := keyPermInsecureNotice([]storage.KeyPermWarning{worldReadable}, true)
+
+			Expect(notice).To(ContainSubstring("INSECURE"), "the shouting")
+			Expect(notice).To(ContainSubstring("ROTATE IT"), "what to do")
+			Expect(notice).To(ContainSubstring(worldReadable.Path), "the file")
+			Expect(notice).To(ContainSubstring("chmod o-rwx -- "), "the remedy")
+		})
+
+		It("says nothing without the opt-out, since the refusal already stopped startup", func() {
+			Expect(keyPermInsecureNotice([]storage.KeyPermWarning{worldReadable}, false)).To(BeEmpty())
+		})
+
+		It("says nothing when only group access was found", func() {
+			Expect(keyPermInsecureNotice([]storage.KeyPermWarning{groupReadable}, true)).To(BeEmpty())
+		})
+
+		// An unjudgeable path is refused before this is reached and is not a
+		// world-access finding; including it would put a mode nobody established
+		// and a chmod that clears nothing into the shouting.
+		It("says nothing for an unjudgeable path", func() {
+			unjudgeable := storage.KeyPermWarning{
+				Path:       "/var/lib/puppet-ca/private",
+				Unreadable: true,
+				Err:        errors.New("permission denied"),
+			}
+			Expect(keyPermInsecureNotice([]storage.KeyPermWarning{unjudgeable}, true)).To(BeEmpty())
+		})
+	})
+
+	// The cap boundary, which is where an off-by-one lives: at exactly the limit
+	// nothing is elided, one past it the tail is summarised.
+	DescribeTable("the steady-state record caps at ten",
+		func(n int, elided bool) {
+			buf := captureAll()
+			many := make([]storage.KeyPermWarning, 0, n)
+			for i := range n {
+				many = append(many, storage.KeyPermWarning{
+					Path: fmt.Sprintf("/var/lib/puppet-ca/private/node-%02d_key.pem", i),
+					Mode: os.FileMode(0o640),
+				})
+			}
+
+			logKeyPermissions(many, false)
+
+			last := fmt.Sprintf("node-%02d_key.pem", n-1)
+			if elided {
+				Expect(buf.String()).NotTo(ContainSubstring(last), "the tail is summarised")
+				Expect(buf.String()).To(ContainSubstring("more"), "and counted")
+			} else {
+				Expect(buf.String()).To(ContainSubstring(last), "every path fits")
+				Expect(buf.String()).NotTo(ContainSubstring("more"), "so nothing is elided")
+			}
+		},
+		Entry("exactly the limit", 10, false),
+		Entry("one past the limit", 11, true),
+	)
+
 	// The opt-out warns about every world-accessible file, not just the first.
 	// Only the refusal path had a multi-finding spec, so the loop that is supposed
 	// to iterate was never proven to get past element one.
@@ -370,6 +433,12 @@ var _ = Describe("key-material permissions at startup", func() {
 // and that the config field reaches it. Each of those is a mutation the
 // function-level specs cannot see.
 var _ = Describe("the server's own startup, on key-material permissions", func() {
+	// These drive whole commands, so the loader reads PUPPET_CA_* out of the
+	// developer's own environment unless it is cleared: PUPPET_CA_ROLE or
+	// PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS set outside the suite would
+	// change what these specs assert without failing them.
+	BeforeEach(func() { clearServerEnv() })
+
 	// worldReadableCADir bootstraps a CA and then widens its private key, which
 	// is the condition the check exists to refuse.
 	worldReadableCADir := func() string {

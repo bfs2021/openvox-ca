@@ -1143,7 +1143,19 @@ func (s *StorageService) CheckKeyPermissions(extra ...string) []KeyPermWarning {
 		warnings = append(warnings, KeyPermWarning{Path: path, Unreadable: true, Err: err})
 	}
 
+	// One finding per path. The three sources overlap by construction: a
+	// ca_key_file pinned inside <cadir>/private is both a directory entry and an
+	// overlay override, and a ca_key_passphrase_file can be named there too. A
+	// path reported twice doubles it in the refusal's chmod remedy and inflates
+	// the group-access count, which is a number an operator reads.
+	seen := make(map[string]bool)
+
 	check := func(path string) {
+		if seen[path] {
+			return
+		}
+		seen[path] = true
+
 		info, err := os.Lstat(path)
 		if errors.Is(err, fs.ErrNotExist) {
 			// Most of these paths are optional -- the sidecars exist only while

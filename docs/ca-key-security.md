@@ -225,9 +225,14 @@ when the passphrase is first generated, and not on later starts.
    above. The path is logged when the passphrase is generated, and not on later
    starts.
 
-A passphrase file readable by every local account makes the server **refuse to
-start**, on every backend — it unlocks the encrypted key, so world access to it
-is world access to the key. Group access is reported and does not stop the CA.
+A passphrase file **you configure** — `ca_key_passphrase_file` — readable by
+every local account makes the server **refuse to start**, whichever backend you
+run: it unlocks the encrypted key, so world access to it is world access to the
+key. The auto-generated file is covered only on the filesystem backend, where it
+sits under `<cadir>/private/` and is judged with everything else there; on the
+other backends it lands outside any directory openvox-ca scans, which is the
+same defect as the caveat above and is tracked in the same issue. Group access
+is reported and does not stop the CA.
 `insecure_allow_world_readable_keys` downgrades the refusal to a loud warning.
 The check and its remedy are described in full under [the filesystem
 backend](storage-backends.md#filesystem-backend-default).

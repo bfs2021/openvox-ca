@@ -284,6 +284,77 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		Expect(info.Mode()&os.ModeSymlink).NotTo(BeZero(), "the intermediate link was not replaced by a file")
 	})
 
+	// -journal is declared as key material because journal_mode=WAL is only a
+	// default the operator can override back to a rollback journal -- and a
+	// rollback journal holds page images of the key row. Every other spec here
+	// runs in WAL mode, where no -journal is ever created, so the one sidecar
+	// whose presence depends on a decision the operator makes had no mode
+	// assertion at all.
+	It("creates the -journal sidecar without world access when the DSN asks for one", func() {
+		dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred(), "resolve the fixture directory")
+		dbPath := filepath.Join(dir, "ca.db")
+
+		// journal_mode is only added when the DSN has not set it, so this wins.
+		dsn := "file:" + dbPath + "?_pragma=journal_mode(DELETE)"
+		b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: dsn})
+		Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+		DeferCleanup(func() { _ = b.Close() })
+		Expect(b.EnsureReady(context.Background())).To(Succeed(), "EnsureReady")
+
+		Expect(worldBits(dbPath)).To(BeZero(), "the database itself")
+		Expect(b.KeyFilePaths()).To(ContainElement(dbPath+"-journal"), "declared as key material")
+
+		// The journal exists only while a transaction is open, so assert the
+		// mode on whichever of the two spellings is on disk after the write
+		// above rather than requiring one to be.
+		journal := dbPath + "-journal"
+		if _, statErr := os.Lstat(journal); statErr == nil {
+			Expect(worldBits(journal)).To(BeZero(), "the rollback journal holds page images of the key")
+		}
+		Expect(worldBits(dir)).To(BeZero(), "and nothing widened the directory")
+	})
+
+	// mode=memory is URI syntax, and SQLite honours it only for a "file:" DSN.
+	// On a bare path the driver opens the file anyway, so reading the parameter
+	// there meant the create, the key-file list and the lock were all skipped
+	// while a real database was written at the umask -- issue #351 again,
+	// through a DSN that merely looks like it names no file.
+	It("protects a bare DSN carrying mode=memory, which still creates a file", func() {
+		// 0022 deliberately, against this block's 0077. At 0077 a database the
+		// driver created for itself also lands at 0600, so a "no world bits"
+		// assertion would pass with the protection removed and prove nothing.
+		// At 0022 the two outcomes are 0640 and 0644, and they differ.
+		old := syscall.Umask(0o022)
+		DeferCleanup(func() { syscall.Umask(old) })
+
+		dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred(), "resolve the fixture directory")
+		dbPath := filepath.Join(dir, "ca.db")
+
+		b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: dbPath + "?mode=memory"})
+		Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+		DeferCleanup(func() { _ = b.Close() })
+		Expect(b.EnsureReady(context.Background())).To(Succeed(), "EnsureReady")
+
+		Expect(dbPath).To(BeAnExistingFile(), "the driver creates a file regardless")
+		Expect(worldBits(dbPath)).To(BeZero(), "and it must not be world-accessible")
+		Expect(b.KeyFilePaths()).To(ContainElement(dbPath), "it is judged as key material")
+		_, ok := sqliteLockDir(dbPath + "?mode=memory")
+		Expect(ok).To(BeTrue(), "and it takes a same-host lock")
+	})
+
+	// The "file:" form is where the parameter means what it says, and there the
+	// database really is in memory with nothing on disk to protect.
+	It("still treats a file: DSN with mode=memory as in-memory", func() {
+		dir := GinkgoT().TempDir()
+		dbPath := filepath.Join(dir, "ca.db")
+
+		_, ok := SQLiteFilePath("file:" + dbPath + "?mode=memory")
+
+		Expect(ok).To(BeFalse(), "no file to protect")
+	})
+
 	// A relative target, which is the ordinary spelling of the configuration the
 	// dangling-link loop exists for ("ln -s ../data/ca.db"). Every other link in
 	// these specs is built from a filepath.Join and so is absolute, which means
@@ -377,6 +448,38 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(buf.String()).To(ContainSubstring(legacy), "where the old lock directory is")
 			Expect(buf.String()).To(ContainSubstring("upgrade openvox-ca and openvox-ca-ctl together"),
 				"what the operator has to do about it")
+		})
+
+		// A symlinked *parent* is the case the identity check exists for: the two
+		// paths differ as strings while naming one directory. Built explicitly
+		// rather than relying on the platform, because on macOS TempDir already
+		// sits behind /var -> private/var and on Linux it does not, so the
+		// branch would run on one CI platform and never on the other.
+		It("says nothing when a symlinked parent names the same directory", func() {
+			base, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+			Expect(err).NotTo(HaveOccurred(), "resolve the fixture directory")
+			data := filepath.Join(base, "data")
+			Expect(os.Mkdir(data, 0o750)).To(Succeed(), "the real directory")
+			alias := filepath.Join(base, "alias")
+			Expect(os.Symlink("data", alias)).To(Succeed(), "another name for it")
+
+			dbPath := filepath.Join(data, "ca.db")
+			Expect(os.WriteFile(dbPath, nil, 0o600)).To(Succeed(), "seed the database")
+			inUse, ok := sqliteLockDir("file:" + dbPath)
+			Expect(ok).To(BeTrue(), "lock directory")
+			Expect(os.Mkdir(inUse, 0o700)).To(Succeed(), "the one this version uses")
+
+			viaAlias := filepath.Join(alias, "ca.db")
+			Expect(filepath.Join(alias, ".ca.db.locks")).NotTo(Equal(inUse),
+				"the two spellings must differ, or the spec proves nothing")
+
+			buf := captureWarnings()
+			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + viaAlias})
+			Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+			DeferCleanup(func() { _ = b.Close() })
+
+			Expect(buf.String()).NotTo(ContainSubstring("stranded"),
+				"one directory reached by two names is not a stranded directory")
 		})
 
 		// The ordinary case must stay silent, or the warning is one nobody reads:

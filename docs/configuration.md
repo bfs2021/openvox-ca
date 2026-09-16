@@ -2352,9 +2352,9 @@ backends](storage-backends.md#filesystem-backend-default).
 The table describes `--cadir`. Every backend still keeps server-generated
 per-subject keys in `<cadir>/private/`, so the `Directories` and `Private keys`
 rows bind whichever one you run. The remaining rows describe the filesystem
-backend: on SQLite the CA key, the CRL, the pending-supersession list and the
-public data are rows in the database instead, and the same-host lock files sit
-in `.<database>.locks/` beside it. The database and its `-wal`, `-shm` and
+backend: on SQLite the CA key, the CRL, the pending-supersession list, the
+inventory and the public data are rows in the database instead, and the
+same-host lock files sit in `.<database>.locks/` beside it. The database and its `-wal`, `-shm` and
 `-journal` sidecars are created without world access and otherwise follow your
 umask — see [storage backends](storage-backends.md#sqlite-backend).
 

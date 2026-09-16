@@ -1160,6 +1160,8 @@ var _ = Describe("crlChainRefreshInterval", func() {
 
 // --- allow_subject_alt_names wiring ---
 
+// --- insecure_allow_world_readable_keys wiring ---
+
 var _ = Describe("insecure_allow_world_readable_keys wiring", func() {
 	// Published on three routes -- flag, YAML key, environment variable -- and
 	// only the environment one was exercised. Its failure mode is silent and
@@ -1191,9 +1193,17 @@ var _ = Describe("insecure_allow_world_readable_keys wiring", func() {
 		Expect(cfg.InsecureAllowWorldReadableKeys).To(BeTrue())
 	})
 
-	// The flag route, through the command an operator actually runs. Driven as
-	// far as the parse rather than through Execute, because the success path of
-	// this option starts a server.
+	// The flag route, as far as it can honestly be driven. Execute is not an
+	// option -- the success path of this option is a running server -- and the
+	// variable the RunE overlay copies into cfg is local to newRootCmd, so
+	// nothing outside can read it.
+	//
+	// What this pins: the flag exists under its documented name, it is a
+	// boolean, and setting it registers as Changed, which is the condition the
+	// overlay branch tests. What it does NOT pin is the branch itself: deleting
+	// `if cmd.Flags().Changed("insecure-allow-world-readable-keys")` leaves this
+	// green. Closing that needs the overlay lifted out of RunE, which is a
+	// change to sixty-odd sibling branches and not this PR's to make.
 	It("is read from the flag, which outranks both", func() {
 		path := writeTempConfig("insecure_allow_world_readable_keys: false\n")
 
