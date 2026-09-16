@@ -196,7 +196,7 @@ func refuseOnKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow boo
 // has one; the refusal above is what runs earlier, where printing is the point
 // rather than logging.
 func logKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) {
-	var worldAccessible, groupAccessible []storage.KeyPermWarning
+	var worldAccessible, groupAccessible, ownerOnly []storage.KeyPermWarning
 	for _, w := range warnings {
 		switch {
 		case w.Unreadable:
@@ -204,22 +204,42 @@ func logKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) {
 				"path", w.Path, "error", w.Err)
 		case w.WorldAccessible():
 			worldAccessible = append(worldAccessible, w)
-		default:
+		case w.Mode&0o070 != 0:
 			groupAccessible = append(groupAccessible, w)
+		default:
+			// Everything else is a finding only because CheckKeyPermissions
+			// reports anything wider than 0600, and 0700 is wider than 0600
+			// without granting anybody anything. Reached by a key restored from
+			// an archive or a filesystem that does not carry Unix modes.
+			ownerOnly = append(ownerOnly, w)
 		}
 	}
 
 	// Group access is reported once, at Info, listing the files rather than one
-	// record each. It is the expected state and not a finding: openvox-ca creates
-	// its own store group-accessible by design, so under the usual 0022 umask a
-	// correct SQLite deployment has a 0640 database and 0640 sidecars. A warning
-	// on every start of a correct deployment is one nobody reads, and blaming a
-	// cause -- a Kubernetes fsGroup, say -- would be wrong on the systemd installs
-	// where no fsGroup exists and the mode is simply ours.
+	// record each. It is the expected state on a store that creates it that way,
+	// and a warning on every start of a correct deployment is one nobody reads.
+	//
+	// What the record must not do is name a cause. Group access is created by
+	// openvox-ca only on the SQLite backend, whose database is created 0660 and
+	// whose sidecars inherit that; on the default filesystem backend everything
+	// under private/ is written 0600, so group access there came from the
+	// deployment -- a Kubernetes fsGroup ORing it into the volume, or somebody's
+	// chmod. An earlier version of this record said "which is the default", which
+	// told an operator that a 0640 CA key in a filesystem cadir was the CA's own
+	// doing when the CA would never have created it.
 	if len(groupAccessible) > 0 {
-		slog.Info("Key material is accessible to its group, which is the default",
-			"paths", keyPermPaths(groupAccessible),
-			"note", "a real exposure only if that group has members other than the CA")
+		slog.Info("Key material is accessible to its group",
+			"paths", keyPermPathsCapped(groupAccessible),
+			"count", len(groupAccessible),
+			"note", "created that way on the SQLite backend and under a Kubernetes fsGroup; "+
+				"on the filesystem backend openvox-ca writes 0600, so group access there came "+
+				"from the deployment. A real exposure only if that group has members other than the CA")
+	}
+
+	if len(ownerOnly) > 0 {
+		slog.Info("Key material has permission bits beyond 0600 but grants no group or world access",
+			"paths", keyPermPathsCapped(ownerOnly),
+			"count", len(ownerOnly))
 	}
 
 	// Only reachable with the opt-out set; without it the refusal already stopped
@@ -241,6 +261,25 @@ func keyPermPaths(warnings []storage.KeyPermWarning) string {
 		parts = append(parts, fmt.Sprintf("%s (mode %s)", w.Path, w.Mode))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// keyPermPathsCapped is keyPermPaths for a record that repeats on every start.
+// The finding set is not bounded by the backend: every per-subject key under
+// private/ is judged, and a CA that retains keys for a few thousand subjects has
+// a few thousand findings on every start under a Kubernetes fsGroup. Unbounded,
+// that is a several-hundred-kilobyte log line each time, which a pipeline with a
+// field cap truncates -- discarding the tail of the very enumeration the record
+// exists to carry.
+//
+// The refusal is deliberately not capped: it happens once, it is what the
+// operator acts on, and a remedy missing half its paths is one that leaves the
+// CA refusing after the restart.
+func keyPermPathsCapped(warnings []storage.KeyPermWarning) string {
+	const limit = 10
+	if len(warnings) <= limit {
+		return keyPermPaths(warnings)
+	}
+	return fmt.Sprintf("%s, and %d more", keyPermPaths(warnings[:limit]), len(warnings)-limit)
 }
 
 // keyPermErrors renders the unjudgeable findings: each path with the error that
@@ -783,7 +822,7 @@ func newRootCmd() *cobra.Command {
 				if err := c.Start(); err != nil {
 					return fmt.Errorf("failed to start daemon: %w", err)
 				}
-				fmt.Printf("Puppet CA started in background (PID: %d)\n", c.Process.Pid)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Puppet CA started in background (PID: %d)\n", c.Process.Pid)
 				return nil
 			}
 
@@ -856,7 +895,7 @@ func newRootCmd() *cobra.Command {
 
 			// Signer mode: load key, serve signing requests on socketpair, exit.
 			if role == "signer" {
-				return runSignerMode(ctx, cfg, absCADir)
+				return runSignerMode(ctx, cfg, absCADir, keyPermWarnings)
 			}
 
 			// Launcher mode (default): spawn isolated signer + frontend children.
@@ -1493,7 +1532,8 @@ func ignoreReloadSignal() {
 // IMPORTANT: The signer calls Init() which handles bootstrapping. The PSK
 // handshake in signer.Serve() happens AFTER Init completes, so the frontend
 // can safely read the CA cert from disk once the handshake succeeds.
-func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) error {
+func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string,
+	keyPermWarnings []storage.KeyPermWarning) error {
 	logFile, err := setupLogger(cfg)
 	if err != nil {
 		// Signer: fall back to stderr if log file fails.
@@ -1503,6 +1543,13 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) erro
 	if logFile != nil {
 		defer closeRoleLog(logFile)()
 	}
+
+	// Say what the preflight found, now that a logger exists. The signer is the
+	// process that loads the CA private key, and it is startable on its own --
+	// a topology the preflight's own comment names as supported. Reporting only
+	// from the launcher and the frontend left a hand-started signer silent about
+	// a store it had just judged, including the shouting one under the opt-out.
+	logKeyPermissions(keyPermWarnings, cfg.InsecureAllowWorldReadableKeys)
 
 	ignoreReloadSignal()
 

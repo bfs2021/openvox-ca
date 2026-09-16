@@ -240,8 +240,16 @@ startup. That is every file under `private/` — the CA key, the per-subject
 alike, because that directory holds secrets by construction — plus a
 `ca_key_passphrase_file` you point it at. A file readable by every local account
 makes it **refuse to start**, naming the file and the `chmod` that fixes it; one
-readable only by its group is reported at `Info` and does not stop the CA, since
-that is the mode the store is created with.
+readable only by its group is reported at `Info` and does not stop the CA.
+
+Group access here is not something `openvox-ca` created. Everything it writes
+under `private/` on this backend is `0600`, so a group-readable key in a
+filesystem cadir came from the deployment — a Kubernetes `fsGroup` ORing group
+access into the mounted volume at every mount, or somebody's `chmod`. It is
+tolerated rather than expected, because those are legitimate deployments and the
+CA cannot tell from the inside whether that group has members other than itself.
+(On the SQLite backend the store genuinely is created group-accessible; that is
+described [below](#sqlite-backend).)
 `insecure_allow_world_readable_keys` downgrades the refusal to a loud warning if
 you need the CA running in order to fix the thing it is refusing over.
 

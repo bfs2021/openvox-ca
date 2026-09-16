@@ -23,7 +23,9 @@
 package storage
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -332,8 +334,68 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		if back != nil {
 			DeferCleanup(func() { _ = back.Close() })
 		}
-		// Either outcome is acceptable -- the point is that it returned.
-		_ = err
+
+		// Returning at all is the result. But asserting nothing about what it
+		// returned would let "give up and leave the path as given" become
+		// anything else without a spec noticing, so pin the current outcome:
+		// construction succeeds, because sql.Open is lazy and the resolution
+		// simply stops after the hop bound.
+		Expect(err).NotTo(HaveOccurred(), "giving up on the cycle is not a construction failure")
+		Expect(back.KeyFilePaths()).NotTo(BeEmpty(), "it still derived paths from the DSN")
+	})
+
+	// The upgrade boundary the resolution created. A process on a version that
+	// locked beside the DSN spelling and one on this version do not exclude each
+	// other, and nothing here can prevent that -- the other process is the one
+	// holding the wrong lock. What it can do is say so where an operator will
+	// read it.
+	Describe("a lock directory stranded beside the DSN's own spelling", func() {
+		captureWarnings := func() *bytes.Buffer {
+			GinkgoHelper()
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			DeferCleanup(func() { slog.SetDefault(orig) })
+			return &buf
+		}
+
+		It("warns when one exists and this version locks elsewhere", func() {
+			realDB := filepath.Join(GinkgoT().TempDir(), "real.db")
+			linkDir := GinkgoT().TempDir()
+			link := filepath.Join(linkDir, "link.db")
+			Expect(os.WriteFile(realDB, nil, 0o600)).To(Succeed(), "seed the database")
+			Expect(os.Symlink(realDB, link)).To(Succeed(), "reach it through a link")
+			legacy := filepath.Join(linkDir, ".link.db.locks")
+			Expect(os.Mkdir(legacy, 0o700)).To(Succeed(), "what an earlier version left behind")
+
+			buf := captureWarnings()
+			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + link})
+			Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+			DeferCleanup(func() { _ = b.Close() })
+
+			Expect(buf.String()).To(ContainSubstring("stranded"), "the warning")
+			Expect(buf.String()).To(ContainSubstring(legacy), "where the old lock directory is")
+			Expect(buf.String()).To(ContainSubstring("upgrade openvox-ca and openvox-ca-ctl together"),
+				"what the operator has to do about it")
+		})
+
+		// The ordinary case must stay silent, or the warning is one nobody reads:
+		// for a DSN that resolves to itself the two directories are the same
+		// place, and there is nothing stranded.
+		It("says nothing for a DSN that does not traverse a symlink", func() {
+			dbPath := filepath.Join(GinkgoT().TempDir(), "ca.db")
+			Expect(os.WriteFile(dbPath, nil, 0o600)).To(Succeed(), "seed the database")
+			dir, ok := sqliteLockDir("file:" + dbPath)
+			Expect(ok).To(BeTrue(), "lock directory")
+			Expect(os.Mkdir(dir, 0o700)).To(Succeed(), "the one this version uses")
+
+			buf := captureWarnings()
+			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
+			Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+			DeferCleanup(func() { _ = b.Close() })
+
+			Expect(buf.String()).NotTo(ContainSubstring("stranded"), "nothing was stranded")
+		})
 	})
 
 	// Everything derived from the DSN has to come from the same resolved path. The

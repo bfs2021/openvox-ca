@@ -253,10 +253,61 @@ func NewSQLBackend(cfg SQLConfig) (*SQLBackend, error) {
 	if cfg.Dialect == SQLitePure {
 		if dir, ok := sqliteLockDir(cfg.DSN); ok {
 			b.sameHostLocks = newFileLocks(dir)
+			warnOnStrandedSQLiteLockDir(cfg.DSN, dir)
 		}
 		b.keyFilePaths = sqliteKeyFilePaths(cfg.DSN)
 	}
 	return b, nil
+}
+
+// warnOnStrandedSQLiteLockDir reports a lock directory beside the DSN's own
+// spelling when the lock directory in use is somewhere else.
+//
+// The same-host lock directory derives from the resolved database path, so for a
+// DSN that reaches the database through a symlink -- including a symlinked
+// parent, such as a bind mount or a relocated /var/lib -- it sits beside the
+// target. Earlier versions derived it from the spelling and locked beside the
+// link. Between the two, a process on each version takes a different lock and
+// neither excludes the other, which is the one guarantee this lock exists to
+// give.
+//
+// Nothing here can prevent that: the old process is the one holding the wrong
+// lock, and it is not running this code. What it can do is say so, at the moment
+// an operator is in a position to act -- an mtime on that directory younger than
+// the upgrade is a live process on the old version, not a leftover. A warning
+// rather than a refusal, because the ordinary case is a stale directory from an
+// upgrade that finished, and refusing to start over it would turn a housekeeping
+// task into an outage.
+func warnOnStrandedSQLiteLockDir(dsn, inUse string) {
+	spelling, ok := SQLiteFilePath(dsn)
+	if !ok {
+		return
+	}
+	legacy := filepath.Join(filepath.Dir(spelling), "."+filepath.Base(spelling)+".locks")
+	if legacy == inUse {
+		return
+	}
+	legacyInfo, err := os.Stat(legacy)
+	if err != nil {
+		return
+	}
+	// Identity, not spelling. A symlinked parent is usually just the platform's
+	// other name for the same directory -- macOS reaches /var through a link to
+	// /private/var -- and there the two paths differ while naming one directory,
+	// which is nothing stranded and a warning on every start of a correct
+	// deployment. Only a genuinely different directory is a finding.
+	if inUseInfo, err := os.Stat(inUse); err == nil && os.SameFile(legacyInfo, inUseInfo) {
+		return
+	}
+	slog.Warn("A same-host lock directory was left beside this DSN's own spelling, "+
+		"which is not where this version locks",
+		"stranded", legacy,
+		"in_use", inUse,
+		"why", "the lock directory derives from the resolved database path, so a DSN reaching "+
+			"the database through a symlink locks beside the target; earlier versions locked "+
+			"beside the link",
+		"action", "a process still running the earlier version would not exclude this one -- "+
+			"upgrade openvox-ca and openvox-ca-ctl together, then remove the stranded directory")
 }
 
 // newSQLBackend takes both budgets already defaulted: applyDefaults is the single

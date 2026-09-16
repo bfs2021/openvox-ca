@@ -64,8 +64,13 @@ var _ = Describe("CheckKeyPermissions", func() {
 			Expect(serviceOn().CheckKeyPermissions()).To(BeEmpty(), "warnings for a correct key")
 		})
 
+		// Seeded at 0600 and chmodded, not written at the mode under test:
+		// os.WriteFile's mode is masked by the umask, so a developer or runner
+		// sitting at 0077 would get 0600 here, findFor would return nil, and
+		// the spec would fail for a reason that is not its subject.
 		It("reports a group-readable key as not world-accessible", func() {
-			Expect(os.WriteFile(keyPath, nil, 0o640)).To(Succeed())
+			Expect(os.WriteFile(keyPath, nil, 0o600)).To(Succeed())
+			Expect(os.Chmod(keyPath, 0o640)).To(Succeed(), "group-readable, whatever the umask")
 
 			w := findFor(serviceOn().CheckKeyPermissions(), keyPath)
 			Expect(w).NotTo(BeNil(), "warning for a group-readable key")
@@ -73,7 +78,8 @@ var _ = Describe("CheckKeyPermissions", func() {
 		})
 
 		It("reports a world-readable key as world-accessible", func() {
-			Expect(os.WriteFile(keyPath, nil, 0o644)).To(Succeed())
+			Expect(os.WriteFile(keyPath, nil, 0o600)).To(Succeed())
+			Expect(os.Chmod(keyPath, 0o644)).To(Succeed(), "world-readable, whatever the umask")
 
 			w := findFor(serviceOn().CheckKeyPermissions(), keyPath)
 			Expect(w).NotTo(BeNil(), "warning for a world-readable key")
@@ -83,7 +89,8 @@ var _ = Describe("CheckKeyPermissions", func() {
 		// World execute grants no read, but on a key file it is still access
 		// granted to everyone and there is no legitimate reason for it.
 		It("counts world-execute as world access", func() {
-			Expect(os.WriteFile(keyPath, nil, 0o601)).To(Succeed())
+			Expect(os.WriteFile(keyPath, nil, 0o600)).To(Succeed())
+			Expect(os.Chmod(keyPath, 0o601)).To(Succeed(), "world-executable, whatever the umask")
 
 			w := findFor(serviceOn().CheckKeyPermissions(), keyPath)
 			Expect(w).NotTo(BeNil(), "warning for a world-executable key")

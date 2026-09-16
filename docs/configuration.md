@@ -2340,7 +2340,7 @@ store the same logical state elsewhere.
 Blob modes — the private keys, the CRL, the supersession list, the inventory
 and the public data — are set on each file as it is created and your umask
 cannot widen them. The inventory is `0600` because it names every certificate
-the CA has issued; the migration guide has you edit it as the CA user.
+the CA has issued.
 Directories and the lock files under `locks/` are created at the modes above and
 a tighter umask narrows them further.
 

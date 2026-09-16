@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -123,6 +124,78 @@ var _ = Describe("key-material permissions at startup", func() {
 		Expect(buf.String()).To(ContainSubstring("EVERY LOCAL ACCOUNT CAN READ THESE FILES"), "the shouting")
 		Expect(buf.String()).To(ContainSubstring("ROTATE IT"), "what the operator must now do")
 		Expect(buf.String()).To(ContainSubstring(worldReadable.Path), "the file named")
+	})
+
+	// 0700 grants nobody anything, and is a finding only because
+	// CheckKeyPermissions reports everything wider than 0600. Classifying the
+	// group arm by elimination announced it as "accessible to its group" with
+	// "(mode -rwx------)" in the same string, which the mode itself contradicts.
+	It("does not call an owner-only mode group access", func() {
+		buf := captureAll()
+		ownerOnly := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/private/ca_key.pem", Mode: os.FileMode(0o700)}
+
+		logKeyPermissions([]storage.KeyPermWarning{ownerOnly}, false)
+
+		Expect(buf.String()).NotTo(ContainSubstring("accessible to its group"), "it is not")
+		Expect(buf.String()).To(ContainSubstring("grants no group or world access"), "what it is")
+		Expect(buf.String()).To(ContainSubstring(ownerOnly.Path), "the file named")
+	})
+
+	// The record must not name a cause that holds on one backend only. Group
+	// access is created by openvox-ca on SQLite and ORed in by a Kubernetes
+	// fsGroup; on the default filesystem backend everything under private/ is
+	// written 0600, so group access there is the deployment's doing, and telling
+	// the operator it "is the default" told them their CA had done it.
+	It("does not blame the CA for group access it did not create", func() {
+		buf := captureAll()
+
+		logKeyPermissions([]storage.KeyPermWarning{groupReadable}, false)
+
+		Expect(buf.String()).To(ContainSubstring("accessible to its group"), "the report")
+		Expect(buf.String()).NotTo(ContainSubstring("which is the default"), "not on every backend")
+		Expect(buf.String()).To(ContainSubstring("came from the deployment"),
+			"where filesystem-backend group access comes from")
+	})
+
+	// The Info record repeats on every start, and the finding set is not bounded
+	// by the backend: under a Kubernetes fsGroup every retained per-subject key
+	// is a finding. Unbounded, a CA with a few thousand subjects emits a
+	// several-hundred-kilobyte line each start, which a field-capping pipeline
+	// truncates -- discarding the tail of the enumeration the record is for.
+	It("bounds the steady-state record rather than naming thousands of files", func() {
+		buf := captureAll()
+		many := make([]storage.KeyPermWarning, 0, 25)
+		for i := range 25 {
+			many = append(many, storage.KeyPermWarning{
+				Path: fmt.Sprintf("/var/lib/puppet-ca/private/node-%02d_key.pem", i),
+				Mode: os.FileMode(0o640),
+			})
+		}
+
+		logKeyPermissions(many, false)
+
+		Expect(buf.String()).To(ContainSubstring("node-00_key.pem"), "the first")
+		Expect(buf.String()).To(ContainSubstring("and 15 more"), "and a count for the rest")
+		Expect(buf.String()).NotTo(ContainSubstring("node-24_key.pem"), "not all of them")
+		Expect(buf.String()).To(ContainSubstring("count=25"), "the total is still reported")
+	})
+
+	// The refusal is deliberately not capped: it happens once, and a remedy
+	// missing half its paths leaves the CA refusing after the restart.
+	It("does not cap the refusal, which the operator has to act on", func() {
+		many := make([]storage.KeyPermWarning, 0, 25)
+		for i := range 25 {
+			many = append(many, storage.KeyPermWarning{
+				Path: fmt.Sprintf("/var/lib/puppet-ca/private/node-%02d_key.pem", i),
+				Mode: os.FileMode(0o644),
+			})
+		}
+
+		err := refuseOnKeyPermissions(many, false)
+
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("node-24_key.pem"), "every path, so one chmod clears it")
+		Expect(err.Error()).NotTo(ContainSubstring("more"), "nothing elided")
 	})
 
 	// The opt-out warns about every world-accessible file, not just the first.
@@ -346,6 +419,9 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 
 		err := cmd.Execute()
 		Expect(err).To(MatchError(ContainSubstring("refusing to start")))
+		// Load-bearing only because main.go writes that line to cmd.OutOrStdout();
+		// while it went to os.Stdout through fmt.Printf this buffer was empty
+		// under every behaviour and the assertion could not fail.
 		Expect(out.String()).NotTo(ContainSubstring("started in background"),
 			"reporting a background start for a process that was refused is the failure")
 	})
@@ -370,4 +446,53 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		Expect(err).NotTo(HaveOccurred(), "the opt-out must reach the decision")
 		Expect(warnings).NotTo(BeEmpty(), "the findings still come back, to be logged")
 	})
+
+	// The other end of the same wiring, and the only thing making an
+	// operator-supplied passphrase file subject to the refusal. The callee half
+	// is pinned in internal/storage; nothing drove the caller, so dropping
+	// cfg.CAKeyPassphraseFile from the call left every spec green while a
+	// world-readable file that unlocks the encrypted CA key stopped being judged.
+	It("passes ca_key_passphrase_file through to the check", func() {
+		caDir := GinkgoT().TempDir()
+		bootstrapCAInDir(caDir, "puppet.example.com")
+
+		passPath := filepath.Join(GinkgoT().TempDir(), "key-passphrase")
+		Expect(os.WriteFile(passPath, []byte("hunter2\n"), 0o600)).To(Succeed(), "seed the passphrase file")
+		Expect(os.Chmod(passPath, 0o644)).To(Succeed(), "world-readable, whatever the umask")
+
+		cfg := &serverConfig{CADir: caDir, CAKeyPassphraseFile: passPath}
+
+		_, err := preflightKeyPermissions(context.Background(), cfg)
+
+		Expect(err).To(MatchError(ContainSubstring("refusing to start")),
+			"a world-readable passphrase file unlocks the key, so it is refused like the key")
+		Expect(err).To(MatchError(ContainSubstring(passPath)), "and the refusal names it")
+	})
+
+	// The check runs for every role, which is published to operators. Folding
+	// the call into the `if role == ""` block above -- the natural tidy-up,
+	// since the instance lock two blocks earlier is role-gated on purpose --
+	// left the suite green while the signer, the process that loads the key,
+	// bootstrapped into and served from a world-accessible store.
+	DescribeTable("refuses whichever role is started",
+		func(role string) {
+			caDir := worldReadableCADir()
+			GinkgoT().Setenv("PUPPET_CA_ROLE", role)
+
+			cmd := newRootCmd()
+			cmd.SetOut(GinkgoWriter)
+			cmd.SetErr(GinkgoWriter)
+			cmd.SetArgs([]string{"--cadir", caDir, "--host", "127.0.0.1", "--port", "0"})
+
+			done := make(chan error, 1)
+			go func() { done <- cmd.Execute() }()
+
+			var err error
+			Eventually(done, "30s").Should(Receive(&err),
+				"the refusal must come before the role does any work")
+			Expect(err).To(MatchError(ContainSubstring("refusing to start")))
+		},
+		Entry("signer", "signer"),
+		Entry("frontend", "frontend"),
+	)
 })
