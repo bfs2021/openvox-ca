@@ -262,6 +262,28 @@ func preflightInstanceLock(ctx context.Context, cfg *serverConfig) error {
 // it unlocks the encrypted CA key, so world access to it is the same finding as
 // world access to the key.
 //
+// CodeQL reports this argument, and the reports are dismissed rather than fixed.
+// go/clear-text-logging traces cfg.CAKeyPassphraseFile to the slog calls in
+// logKeyPermissions and calls it a secret reaching a log. What it has is the
+// field *name*: the value is a path. CheckKeyPermissions reaches it with
+// Lstat/Stat and never opens it, and KeyPermWarning carries only Path, Mode,
+// Unreadable and Err -- so no file contents exist anywhere in the flow to leak.
+// Naming the file is the whole point of the message, since the operator has to
+// chmod it.
+//
+// Dismissed per alert (#62, #64-#67, all "false positive") rather than excluded
+// by rule in .github/codeql/codeql-config.yml. That file excludes
+// go/log-injection and states the standard an exclusion has to meet: it is only
+// as good as the invariant beneath it, and it is silent where a dismissal is at
+// least visible. go/log-injection has that invariant, enforced by a depguard
+// rule and a spec. This has none to offer -- the argument here is about four
+// call sites, not about a whole rule being mismodelled -- and excluding
+// go/clear-text-logging would silence a real passphrase-content leak for ever.
+//
+// If this function or logKeyPermissions is reshuffled enough for CodeQL to file
+// the alerts afresh, they come back: dismissals attach to alerts, not to code.
+// Re-dismiss with the reasoning above rather than reaching for the exclusion.
+//
 // The findings come back with the error so the caller can log them once a logger
 // exists. Nothing is logged here: at this point in startup the default handler is
 // still Go's own, so a record emitted now would miss a configured logfile.
