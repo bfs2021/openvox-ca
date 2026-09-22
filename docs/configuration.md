@@ -1438,7 +1438,7 @@ now resolves to the new one. The CA logs the displaced serial and the command
 that retires it, and the certificate keeps its own inventory row, so an operator
 who missed that line finds it as a second row under one certname:
 
-```
+```bash
 openvox-ca-ctl revoke --serial <hex>
 ```
 

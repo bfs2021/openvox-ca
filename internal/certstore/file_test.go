@@ -195,6 +195,35 @@ var _ = Describe("FileStore", func() {
 			Expect(cfg.Key).NotTo(BeAnExistingFile())
 		})
 
+		// The third arm: os.Stat fails for a reason that is neither "absent"
+		// nor "present but not a directory". Reached here by putting a regular
+		// file part-way along the path, so the stat of the directory BELOW it
+		// returns ENOTDIR -- which is not fs.ErrNotExist, so it falls through
+		// the first branch to the generic one.
+		//
+		// ENOTDIR rather than a mode-0000 parent, deliberately: an
+		// unreadable-directory fixture passes as root, and CI runs containers
+		// as root, so that version of this spec would quietly stop testing
+		// anything in the one place it most needs to run.
+		It("reports a stat failure that is neither absent nor a file", func() {
+			blocker := filepath.Join(dir, "blocker")
+			Expect(os.WriteFile(blocker, []byte("PEM"), 0o644)).To(Succeed())
+			buried := filepath.Join(blocker, "below")
+			cfg = certstore.FilesConfig{
+				Cert: filepath.Join(buried, "cert.pem"),
+				Key:  filepath.Join(dir, "key.pem"),
+			}
+
+			err := store().Save(ctx, []byte("CERT"), []byte("KEY"))
+
+			Expect(err).To(MatchError(ContainSubstring("checking the directory for")),
+				"a stat failure that is not ErrNotExist must reach the generic arm, "+
+					"not be reported as a missing directory")
+			Expect(err).NotTo(MatchError(ContainSubstring("does not exist: create")))
+			Expect(cfg.Key).NotTo(BeAnExistingFile(),
+				"nothing is written when the check refuses")
+		})
+
 		It("fails naming the directory, before writing anything", func() {
 			missing := filepath.Join(dir, "does-not-exist")
 			cfg = certstore.FilesConfig{

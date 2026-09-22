@@ -33,8 +33,6 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// NamespaceFile is the standard in-cluster path holding the pod's own
-// namespace, mounted from its ServiceAccount.
 // The managed-by label marks every object openvox-ca maintains in a cluster,
 // whichever feature wrote it: a kubernetes_export target, or the Secret a
 // managed certificate lives in. One selector therefore finds everything this CA
@@ -66,6 +64,8 @@ func WithManagedByLabel(configured map[string]string) map[string]string {
 	return labels
 }
 
+// NamespaceFile is the standard in-cluster path holding the pod's own
+// namespace, mounted from its ServiceAccount.
 const NamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 // InClusterClientset builds a Kubernetes clientset from the in-cluster
@@ -103,14 +103,23 @@ func InClusterClientset(feature string) (kubernetes.Interface, error) {
 // file, so a caller must not turn this error into a claim about where the
 // process is running. Both errors name the path, which is what an operator
 // needs either way.
-func PodNamespace() (string, error) {
-	data, err := os.ReadFile(NamespaceFile)
+func PodNamespace() (string, error) { return podNamespaceFrom(NamespaceFile) }
+
+// podNamespaceFrom is PodNamespace against a caller-supplied path, so the
+// read-failure, all-whitespace and success arms can be driven directly.
+//
+// A seam rather than a var: making NamespaceFile writable to reach these
+// branches would leave the real path mutable at runtime for the benefit of a
+// test, and this value decides which namespace a Secret store writes into when
+// an entry does not name one. That is worth keeping constant.
+func podNamespaceFrom(path string) (string, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("reading pod namespace from %s: %w", NamespaceFile, err)
+		return "", fmt.Errorf("reading pod namespace from %s: %w", path, err)
 	}
 	ns := strings.TrimSpace(string(data))
 	if ns == "" {
-		return "", fmt.Errorf("pod namespace file %s is empty", NamespaceFile)
+		return "", fmt.Errorf("pod namespace file %s is empty", path)
 	}
 	return ns, nil
 }

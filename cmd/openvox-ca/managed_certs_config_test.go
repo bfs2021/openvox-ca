@@ -361,6 +361,45 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 				warnIfManagedCertIsAdmin(cfg, managed)
 			})).To(BeEmpty())
 		})
+
+		// The half-configured pair, which is the only thing that distinguishes
+		// the gate from its own inversion. The condition is
+		//
+		//	if cfg.TLSCert == "" || cfg.TLSKey == ""
+		//
+		// and the two specs above pin only the ends of it: both empty warns,
+		// both set stays silent. Those two agree under `&&` as well, so
+		// swapping the operator leaves them both green while silencing every
+		// half-configured CA -- which is precisely the configuration that gets
+		// no second report, because buildAuthConfig runs only when BOTH are
+		// set. Suppressing the warning there loses it altogether.
+		//
+		// Hence one entry per combination rather than one for "half": with
+		// `||` a single missing half is enough, and a gate that tested only
+		// TLSCert would pass a table that never varied TLSKey alone.
+		DescribeTable("warns whenever TLS is not fully configured",
+			func(cert, key string, wantWarning bool) {
+				cfg := badCfg()
+				cfg.TLSCert = cert
+				cfg.TLSKey = key
+
+				out := captureLogs(slog.LevelWarn, func() {
+					warnIfManagedCertIsAdmin(cfg, managed)
+				})
+				if wantWarning {
+					Expect(out).To(ContainSubstring("Could not read the admin allow list"),
+						"nothing else reads this file when TLS is incomplete, so the "+
+							"warning would vanish entirely")
+					return
+				}
+				Expect(out).To(BeEmpty(),
+					"buildAuthConfig fails the startup with the same error a moment later")
+			},
+			Entry("neither set", "", "", true),
+			Entry("only the certificate set", "/etc/openvox-ca/tls.pem", "", true),
+			Entry("only the key set", "", "/etc/openvox-ca/tls-key.pem", true),
+			Entry("both set", "/etc/openvox-ca/tls.pem", "/etc/openvox-ca/tls-key.pem", false),
+		)
 	})
 
 	It("warns when the certname is listed in puppet_server", func() {

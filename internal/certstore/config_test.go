@@ -21,6 +21,8 @@ import (
 	"context"
 	"crypto/x509"
 	"net"
+	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -745,6 +747,43 @@ managed_certs:
 			Expect(sec.Data).To(HaveKeyWithValue("tls.crt", []byte("CERT")))
 		})
 
+		// The file store's half of the same wiring, at the same depth. The
+		// Secret spec above builds, saves through the returned closure and
+		// reads the object back; the file side was asserted only as "Load and
+		// Save are not nil", which a closure over the wrong FilesConfig
+		// satisfies just as well. Both stores are reached through one switch in
+		// BuildIn, so an arm that built the right kind of store around the
+		// wrong configuration would show up here and nowhere else.
+		//
+		// The key's mode is part of it: this store is the only copy of a
+		// private key, and a build that wired the paths correctly but lost the
+		// store's mode handling would pass every content assertion.
+		It("writes through the file store the entry names", func() {
+			dir := GinkgoT().TempDir()
+			certPath := filepath.Join(dir, "a.pem")
+			keyPath := filepath.Join(dir, "a-key.pem")
+			cfg := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: ` + certPath + `, key: ` + keyPath + `}}
+`)
+			Expect(cfg.Validate()).To(Succeed())
+
+			managed, err := cfg.Build(certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(managed[0].Save(context.Background(), []byte("CERT"), []byte("KEY"))).To(Succeed())
+
+			Expect(os.ReadFile(certPath)).To(Equal([]byte("CERT")))
+			Expect(os.ReadFile(keyPath)).To(Equal([]byte("KEY")))
+
+			info, err := os.Stat(keyPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o600)),
+				"the private key must not be readable beyond its owner")
+		})
+
 		// The third of Build's entry guards. Its two siblings are covered
 		// above; without this one the assertion depth across them is uneven,
 		// and a file-only deployment is the case a caller is likeliest to
@@ -755,10 +794,6 @@ managed_certs:
 		})
 	})
 
-	// Both features write ca.crt under different field managers, and the
-	// exporter forces every apply. Sharing a Secret would churn the object for
-	// ever without anything looking broken, which is the kind of fault found
-	// months later.
 	// The second consumer's half of the seam. Every refusal this package makes
 	// names the block the entry came from, and until openvox-ca#326 there was
 	// only one block, so the name was written into eleven messages. A serving
@@ -918,8 +953,40 @@ managed_certs:
 			Expect(err).To(MatchError(ContainSubstring("managed_certs[0] (a.example.com)")))
 			Expect(err).To(MatchError(ContainSubstring("codeSigning")))
 		})
+
+		// The store-less entry, which used to be a nil dereference rather than
+		// a refusal: `files` was the switch's default, so an entry naming
+		// neither flavour reached NewFileStore(*e.Store.Files, ...) and
+		// panicked. Validate refuses that entry, and Build's doc comment says
+		// to call Validate first -- but the failure mode for skipping it
+		// should name the entry, not produce a stack inside this package. A
+		// second consumer calling BuildIn is how such a precondition gets
+		// missed in the first place.
+		It("names the entry when the store names neither flavour", func() {
+			cfg := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {}
+`)
+
+			var managed []ca.ManagedCert
+			var err error
+			Expect(func() {
+				managed, err = cfg.Build(certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
+			}).NotTo(Panic(), "a caller that skipped Validate gets an error, not a panic")
+
+			Expect(err).To(MatchError(ContainSubstring("managed_certs[0] (a.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("neither `secret` nor `files`")))
+			Expect(managed).To(BeEmpty(), "a refused entry must not reach the reconcile loop")
+		})
 	})
 
+	// Both features write ca.crt under different field managers, and the
+	// exporter forces every apply. Sharing a Secret would churn the object for
+	// ever without anything looking broken, which is the kind of fault found
+	// months later.
 	Describe("the overlap with kubernetes_export", func() {
 		It("refuses a Secret that is also an export target", func() {
 			err := decode(minimal).CheckExportOverlap([][2]string{{"openvox", "puppetserver-tls"}})

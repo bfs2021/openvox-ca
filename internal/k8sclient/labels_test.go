@@ -18,18 +18,11 @@
 package k8sclient_test
 
 import (
-	"testing"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/voxpupuli/openvox-ca/internal/k8sclient"
 )
-
-func TestK8sClient(t *testing.T) {
-	RegisterFailHandler(Fail)
-	RunSpecs(t, "k8sclient Suite")
-}
 
 // The label both features apply, which docs/kubernetes-export.md tells
 // operators is one selector over everything this CA owns. It used to be two

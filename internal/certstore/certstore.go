@@ -464,13 +464,6 @@ func (e *Entry) ipAddresses() ([]net.IP, error) {
 	return out, nil
 }
 
-// uris parses the entry's URI alternative names.
-//
-// Absolute only. url.Parse accepts almost anything, including a bare word,
-// which becomes a relative reference -- and a uniformResourceIdentifier SAN
-// that is not absolute names nothing a verifier can compare against. An
-// operator who meant a DNS name and wrote it here should be told, not given a
-// certificate carrying it as a URI.
 // emails trims each rfc822Name and refuses one that is not an address.
 //
 // The other three name types each get a startup refusal -- an IP that does not
@@ -501,6 +494,13 @@ func (e *Entry) emails() ([]string, error) {
 	return out, nil
 }
 
+// uris parses the entry's URI alternative names.
+//
+// Absolute only. url.Parse accepts almost anything, including a bare word,
+// which becomes a relative reference -- and a uniformResourceIdentifier SAN
+// that is not absolute names nothing a verifier can compare against. An
+// operator who meant a DNS name and wrote it here should be told, not given a
+// certificate carrying it as a URI.
 func (e *Entry) uris() ([]*url.URL, error) {
 	if len(e.URIs) == 0 {
 		return nil, nil
@@ -521,7 +521,6 @@ func (e *Entry) uris() ([]*url.URL, error) {
 	return out, nil
 }
 
-// Validate checks every entry and returns an error describing the first problem,
 // Block is the configuration block a set of entries came from, for diagnostics.
 //
 // Every refusal this package produces names the entry it is about, and the name
@@ -577,6 +576,7 @@ func (b Block) withCertname(i int, certname string) string {
 	return fmt.Sprintf("%s (%s)", b.at(i), certname)
 }
 
+// Validate checks every entry and returns an error describing the first problem,
 // naming the entry by index and certname so an operator can find it in a list.
 //
 // Called once at startup, before anything touches storage. A mistyped certname,
@@ -1060,8 +1060,21 @@ func (c Config) BuildIn(block Block, deps Deps) ([]ca.ManagedCert, error) {
 					block.withCertname(i, e.Certname), e.Store.Secret.Name)
 			}
 			loader = NewSecretStore(deps.Client, *e.Store.Secret, ns, deps.CACerts)
-		default:
+		case e.Store.Files != nil:
 			loader = NewFileStore(*e.Store.Files, deps.CACerts)
+		default:
+			// Unreachable through Validate, which refuses a store naming
+			// neither flavour, and this function's doc comment says to call it
+			// first. But the previous shape made `files` the default rather
+			// than a case, so a caller that skipped validation dereferenced a
+			// nil *FileStoreConfig here -- a panic whose stack names this
+			// package and not the entry that caused it. A second consumer
+			// calling BuildIn is exactly how a documented precondition gets
+			// missed, so the cost of missing it is a message that names the
+			// entry.
+			return nil, fmt.Errorf("%s: store names neither `secret` nor `files`; "+
+				"Validate must be called before Build",
+				block.withCertname(i, e.Certname))
 		}
 
 		out = append(out, ca.ManagedCert{
