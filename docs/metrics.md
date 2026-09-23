@@ -491,7 +491,7 @@ expiry alerts take over as that predecessor ages — but there is no series that
 says "this entry's last reconcile failed", so between those two there is a
 window where only the logs show it. Closing that needs a per-entry
 reconcile-failure series, of the shape
-`puppetca_kubernetes_export_last_error_timestamp_seconds` takes for the
+`puppetca_k8s_export_last_error_timestamp_seconds` takes for the
 exporter; it is not in this release.
 
 `max without (serial, state)` rather than `on (subject)`: it collapses the

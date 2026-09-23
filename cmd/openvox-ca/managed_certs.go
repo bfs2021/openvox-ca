@@ -54,7 +54,7 @@ import (
 // its NotAfter. Between those two the component is presenting a revoked
 // certificate and nothing pages. Closing it needs a series this mechanism does
 // not publish: a per-entry reconcile-failure counter, which is the shape the
-// exporter's puppetca_kubernetes_export_last_error_timestamp_seconds takes.
+// exporter's puppetca_k8s_export_last_error_timestamp_seconds takes.
 // That is worth doing and is not in #243; the reconcile failure is logged every
 // pass in the meantime.
 //

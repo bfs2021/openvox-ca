@@ -1044,10 +1044,17 @@ func (c Config) BuildIn(block Block, deps Deps) ([]ca.ManagedCert, error) {
 			return nil, fmt.Errorf("%s: %w", block.withCertname(i, e.Certname), err)
 		}
 
-		var loader interface {
-			Load(context.Context) ([]byte, []byte, error)
-			Save(context.Context, []byte, []byte) error
-		}
+		// The two methods, taken individually rather than through a value that
+		// has both. An `interface { Load(...); Save(...) }` local would be the
+		// spanning contract this package's doc comment says it does not keep --
+		// the paragraph above explains why the entries carry two function
+		// fields instead -- and declaring one here quietly reintroduced it for
+		// the length of this loop, which is how a stated design stops matching
+		// the code that is supposed to embody it.
+		var (
+			load func(context.Context) ([]byte, []byte, error)
+			save func(context.Context, []byte, []byte) error
+		)
 		switch {
 		case e.Store.Secret != nil:
 			ns := e.Store.Secret.Namespace
@@ -1059,9 +1066,11 @@ func (c Config) BuildIn(block Block, deps Deps) ([]ca.ManagedCert, error) {
 					"and the CA pod's own could not be resolved",
 					block.withCertname(i, e.Certname), e.Store.Secret.Name)
 			}
-			loader = NewSecretStore(deps.Client, *e.Store.Secret, ns, deps.CACerts)
+			store := NewSecretStore(deps.Client, *e.Store.Secret, ns, deps.CACerts)
+			load, save = store.Load, store.Save
 		case e.Store.Files != nil:
-			loader = NewFileStore(*e.Store.Files, deps.CACerts)
+			store := NewFileStore(*e.Store.Files, deps.CACerts)
+			load, save = store.Load, store.Save
 		default:
 			// Unreachable through Validate, which refuses a store naming
 			// neither flavour, and this function's doc comment says to call it
@@ -1079,8 +1088,8 @@ func (c Config) BuildIn(block Block, deps Deps) ([]ca.ManagedCert, error) {
 
 		out = append(out, ca.ManagedCert{
 			Spec: spec,
-			Load: loader.Load,
-			Save: loader.Save,
+			Load: load,
+			Save: save,
 		})
 	}
 	return out, nil

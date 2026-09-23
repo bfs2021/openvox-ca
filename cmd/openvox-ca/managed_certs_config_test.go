@@ -92,7 +92,16 @@ managed_certs:
 		Expect(err).NotTo(HaveOccurred())
 		Expect(managed).To(HaveLen(1))
 		Expect(managed[0].Spec.Subject).To(Equal("puppetserver.openvox.svc.cluster.local"))
-		Expect(managed[0].Spec.DNSNames).To(HaveLen(2))
+		// The names themselves, in order, rather than a count of them. A count
+		// passes just as well when the wrong two arrive, and the certname is
+		// the likeliest wrong one: promote_cn_to_san deliberately does not
+		// apply to a managed certificate, so a build that promoted the subject
+		// into the SAN list would still produce two entries here.
+		Expect(managed[0].Spec.DNSNames).To(Equal([]string{
+			"puppetserver", "puppetserver.openvox.svc",
+		}))
+		Expect(managed[0].Spec.DNSNames).NotTo(ContainElement(managed[0].Spec.Subject),
+			"the certname is not promoted into the SAN list for a managed certificate")
 		Expect(managed[0].Load).NotTo(BeNil())
 		Expect(managed[0].Save).NotTo(BeNil())
 	})

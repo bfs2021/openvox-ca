@@ -390,25 +390,41 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		}
 	})
 
-	It("reserves the CA's own key and certificate wherever they are configured", func() {
-		cfg := &serverConfig{}
-		cfg.CAKeyFile = "/var/secrets/ca_key.pem"
-		cfg.CACertFile = "/var/secrets/ca_crt.pem"
+	// One entry per file, because the name of this container promises both and
+	// a reader scanning the suite for "is the ca_cert_file collision covered?"
+	// gets its answer from that name. It used to configure both files and
+	// collide with only the key, so `ca_cert_file` could have been dropped from
+	// caOwnedPaths entirely with this test still green -- a label attached to
+	// something it does not describe, which no tooling will ever contradict.
+	DescribeTable("reserves the CA's own key and certificate wherever they are configured",
+		func(collideWith, wantSetting string) {
+			cfg := &serverConfig{}
+			cfg.CAKeyFile = "/var/secrets/ca_key.pem"
+			cfg.CACertFile = "/var/secrets/ca_crt.pem"
 
-		reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")
-		Expect(err).NotTo(HaveOccurred())
+			reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")
+			Expect(err).NotTo(HaveOccurred())
 
-		cfgCerts := certstore.Config{{
-			Certname:    "a.example.com",
-			Names:       []string{"a"},
-			RenewBefore: certstore.Duration(720 * time.Hour),
-			Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
-				Cert: "/var/secrets/a.pem", Key: "/var/secrets/ca_key.pem",
-			}},
-		}}
-		Expect(cfgCerts.CheckReservedPaths(reserved)).
-			To(MatchError(ContainSubstring("is ca_key_file")))
-	})
+			cfgCerts := certstore.Config{{
+				Certname:    "a.example.com",
+				Names:       []string{"a"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/var/secrets/a.pem", Key: collideWith,
+				}},
+			}}
+
+			err = cfgCerts.CheckReservedPaths(reserved)
+			Expect(err).To(MatchError(ContainSubstring("is " + wantSetting)))
+			// Named as the setting it actually collided with. Reporting the
+			// wrong one sends an operator to edit a line that is not the
+			// problem, and both files are configured here, so a message built
+			// from the wrong entry would still look plausible.
+			Expect(err).To(MatchError(ContainSubstring(collideWith)))
+		},
+		Entry("the private key", "/var/secrets/ca_key.pem", "ca_key_file"),
+		Entry("the certificate", "/var/secrets/ca_crt.pem", "ca_cert_file"),
+	)
 
 	It("reserves each configured client_ca anchor and CRL bundle", func() {
 		cfg := &serverConfig{}

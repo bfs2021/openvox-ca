@@ -744,7 +744,13 @@ managed_certs:
 			sec, err := client.CoreV1().Secrets("ca-system").
 				Get(context.Background(), "a-tls", metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred())
+			// Both halves of what Save wrote, not just the certificate. The
+			// key is the material this whole mechanism exists to place, and a
+			// build that wired the certificate to the right Secret and the key
+			// to the wrong one -- or dropped it -- satisfies a tls.crt-only
+			// assertion completely.
 			Expect(sec.Data).To(HaveKeyWithValue("tls.crt", []byte("CERT")))
+			Expect(sec.Data).To(HaveKeyWithValue("tls.key", []byte("KEY")))
 		})
 
 		// The file store's half of the same wiring, at the same depth. The
@@ -980,6 +986,56 @@ managed_certs:
 			Expect(err).To(MatchError(ContainSubstring("managed_certs[0] (a.example.com)")))
 			Expect(err).To(MatchError(ContainSubstring("neither `secret` nor `files`")))
 			Expect(managed).To(BeEmpty(), "a refused entry must not reach the reconcile loop")
+		})
+	})
+
+	// The configuration almost every deployment has. The package doc promises
+	// the feature is "entirely dormant when the list is empty -- no goroutine,
+	// no storage key, no Kubernetes client", and all three entry points guard
+	// on Enabled() before touching anything. Nothing drove those guards, so
+	// each could have been deleted and only a deployment that configures no
+	// managed certificates would have noticed -- which is to say, almost all of
+	// them, and not in CI.
+	Describe("when no managed certificate is configured", func() {
+		var empty certstore.Config
+
+		It("builds nothing, and needs nothing to do it", func() {
+			// Deps deliberately zero: no CACerts, no Client. Build refuses a
+			// nil CACerts for any real entry, so this also pins the ORDER of
+			// the two guards -- dormancy is decided before the dependency
+			// check, which is what lets a file-only or Kubernetes-free
+			// deployment start without supplying either.
+			managed, err := empty.Build(certstore.Deps{})
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(managed).To(BeEmpty())
+		})
+
+		It("claims no Secret and needs no namespace", func() {
+			Expect(empty.Enabled()).To(BeFalse())
+			Expect(empty.NeedsKubernetes()).To(BeFalse())
+			Expect(empty.NeedsDefaultNamespace()).To(BeFalse())
+		})
+
+		It("collides with nothing", func() {
+			Expect(empty.CheckExportOverlap([][2]string{{"openvox", "puppetserver-tls"}})).
+				To(Succeed())
+			Expect(empty.CheckReservedPaths([]certstore.ReservedPath{
+				{Setting: "ca_key_file", Path: "/var/secrets/ca_key.pem"},
+			})).To(Succeed())
+		})
+
+		// The empty slice and the nil slice reach these functions from
+		// different places -- a `managed_certs:` key present but empty, and the
+		// key absent entirely -- and len() treats them alike. Asserted so that
+		// a guard rewritten as `c != nil` would be caught.
+		It("treats a present-but-empty block as absent", func() {
+			present := certstore.Config{}
+
+			Expect(present.Enabled()).To(BeFalse())
+			managed, err := present.Build(certstore.Deps{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(managed).To(BeEmpty())
 		})
 	})
 
