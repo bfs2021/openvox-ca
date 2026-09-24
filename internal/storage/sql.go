@@ -226,7 +226,20 @@ var sqlTLSConfigSeq atomic.Int64
 func NewSQLBackend(cfg SQLConfig) (*SQLBackend, error) {
 	cfg.applyDefaults()
 
-	sqldb, bunDialect, err := openSQLDB(cfg)
+	// One resolution, shared by everything derived from it. The file created,
+	// the sidecar names, the lock directory and the paths the permission check
+	// judges all have to name the same database; resolving separately per
+	// consumer both invites them to disagree and walks the filesystem three
+	// times per construction.
+	var target sqliteTarget
+	if cfg.Dialect == SQLitePure {
+		var terr error
+		if target, terr = resolveSQLiteTarget(cfg.DSN); terr != nil {
+			return nil, terr
+		}
+	}
+
+	sqldb, bunDialect, err := openSQLDB(cfg, target)
 	if err != nil {
 		return nil, err
 	}
@@ -251,11 +264,11 @@ func NewSQLBackend(cfg SQLConfig) (*SQLBackend, error) {
 
 	b := newSQLBackend(bun.NewDB(sqldb, bunDialect), true, cfg.RequestTimeout, cfg.MigrationTimeout)
 	if cfg.Dialect == SQLitePure {
-		if dir, ok := sqliteLockDir(cfg.DSN); ok {
+		if dir, ok := target.lockDir(); ok {
 			b.sameHostLocks = newFileLocks(dir)
 			warnOnStrandedSQLiteLockDir(cfg.DSN, dir)
 		}
-		b.keyFilePaths = sqliteKeyFilePaths(cfg.DSN)
+		b.keyFilePaths = target.keyFilePaths()
 	}
 	return b, nil
 }
@@ -317,11 +330,11 @@ func newSQLBackend(db *bun.DB, owned bool, timeout, migrationTimeout time.Durati
 }
 
 // openSQLDB opens the database/sql handle and matching bun dialect for cfg.
-func openSQLDB(cfg SQLConfig) (*sql.DB, schema.Dialect, error) {
+func openSQLDB(cfg SQLConfig, target sqliteTarget) (*sql.DB, schema.Dialect, error) {
 	switch cfg.Dialect {
 	case SQLitePure:
-		dsn := sqliteDSNWithDefaults(cfg.DSN)
-		if err := createSQLiteDatabase(cfg.DSN); err != nil {
+		dsn := sqliteDSNWithDefaults(sqliteDriverDSN(target))
+		if err := createSQLiteDatabase(target); err != nil {
 			return nil, nil, err
 		}
 		sqldb, err := sql.Open(sqliteshim.ShimName, dsn)
@@ -940,10 +953,118 @@ func (b *SQLBackend) AcquireInstanceLock() (Unlocker, error) {
 // to the process that opened it and so has nothing to exclude.
 func sqliteLockDir(dsn string) (string, bool) {
 	path, ok := sqliteDatabasePath(dsn)
-	if !ok {
+	return sqliteTarget{dsn: dsn, path: path, ok: ok}.lockDir()
+}
+
+// sqliteTarget is one SQLite DSN resolved once: the path every derived name is
+// built from, established at backend construction and shared from there.
+//
+// Resolving per consumer was not only three filesystem walks -- it meant four
+// independent answers to "which file is the database", which is the question
+// this whole file exists to answer consistently. ok is false for an in-memory
+// database, which has no file at all; the zero value is that case, so a
+// non-SQLite backend carries an inert one.
+type sqliteTarget struct {
+	dsn  string
+	path string
+	ok   bool
+}
+
+// resolveSQLiteTarget reads the DSN and resolves it, once.
+//
+// The readability check comes first and its error is returned rather than
+// folded into ok: "no file behind this DSN" and "this DSN cannot be read" are
+// different facts, and treating the second as the first would skip protection
+// silently on exactly the input it cannot reason about.
+func resolveSQLiteTarget(dsn string) (sqliteTarget, error) {
+	if err := sqliteDSNReadable(dsn); err != nil {
+		return sqliteTarget{}, err
+	}
+	path, ok := sqliteDatabasePath(dsn)
+	return sqliteTarget{dsn: dsn, path: path, ok: ok}, nil
+}
+
+// lockDir is the same-host lock directory for this target: a hidden sibling of
+// the resolved database file.
+func (t sqliteTarget) lockDir() (string, bool) {
+	if !t.ok {
 		return "", false
 	}
-	return filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".locks"), true
+	return filepath.Join(filepath.Dir(t.path), "."+filepath.Base(t.path)+".locks"), true
+}
+
+// keyFilePaths names every file that can hold the CA key: the database and the
+// three sidecars SQLite maintains beside it. Empty for an in-memory database.
+//
+// -journal is in the list because journal_mode=WAL is only a default that the
+// DSN can override, and a rollback journal holds page images of what it
+// protects, the key row included.
+func (t sqliteTarget) keyFilePaths() []string {
+	if !t.ok {
+		return nil
+	}
+	return []string{t.path, t.path + "-wal", t.path + "-shm", t.path + "-journal"}
+}
+
+// sqliteDriverDSN rewrites the DSN to name the resolved database, so the driver
+// opens the file this package created rather than the spelling it was given.
+//
+// Without this the two disagree whenever the DSN reaches the database through a
+// symlink: createSQLiteDatabase creates the target at sqliteFilePermCreate,
+// then the driver is handed the link and follows it again. sql.Open is lazy, so
+// the gap between the two runs until the first real connection, and anyone able
+// to repoint the link inside it gets the driver to create a database of its own
+// at the umask -- 0644, which is issue #351 exactly.
+//
+// Reaching that needs write access to the directory holding the DSN path, which
+// docs/storage-backends.md already requires of the operator: whoever has it
+// chooses where the database is created anyway, before this process starts and
+// with no race to win. So this is not the difference between safe and exposed.
+// What it is is the last place where something derived from the DSN disagreed
+// about which file the database is -- the sidecar names, the lock directory and
+// the permission check all resolve, and only the open did not.
+//
+// The form is preserved rather than normalised. A "file:" DSN stays a URI, with
+// the resolved path escaped by net/url and the operator's own query untouched,
+// because SQLite reads a URI's parameters (mode, cache, immutable) only in that
+// form; rewriting it as a bare path would silently change what they mean. A
+// bare DSN stays bare, which needs no escaping at all -- the driver takes those
+// bytes literally.
+func sqliteDriverDSN(t sqliteTarget) string {
+	if !t.ok {
+		// No file behind this DSN: an in-memory database, which has nothing to
+		// resolve and must reach the driver exactly as the operator wrote it.
+		return t.dsn
+	}
+
+	if strings.HasPrefix(t.dsn, "file:") {
+		u, err := url.Parse(t.dsn)
+		if err != nil {
+			// Unreachable: resolveSQLiteTarget refuses an unparseable DSN
+			// before this is called. Returning the original rather than a
+			// half-built one keeps that a refusal rather than a silent rewrite.
+			return t.dsn
+		}
+		// Built explicitly rather than by url.URL.String(), which writes "//"
+		// for any non-empty path: a relative one then reaches SQLite as an
+		// authority ("file://ca%20b.db"), which it rejects outright. The two
+		// URI spellings are not interchangeable -- "file:///abs" for absolute,
+		// opaque "file:rel" for relative -- and only EscapedPath is shared.
+		out := "file:"
+		if filepath.IsAbs(t.path) {
+			out += "//"
+		}
+		out += (&url.URL{Path: t.path}).EscapedPath()
+		if u.RawQuery != "" {
+			out += "?" + u.RawQuery
+		}
+		return out
+	}
+
+	if i := strings.IndexByte(t.dsn, '?'); i >= 0 {
+		return t.path + t.dsn[i:]
+	}
+	return t.path
 }
 
 // createSQLiteDatabase brings the database file into existence before the driver
@@ -972,22 +1093,15 @@ func sqliteLockDir(dsn string) (string, bool) {
 // existing database keeps whatever mode it has, and world access on it is
 // caught at startup by StorageService.CheckKeyPermissions rather than silently
 // corrected here.
-func createSQLiteDatabase(dsn string) error {
-	// "No file behind this DSN" and "this DSN cannot be read" are different
-	// facts, and SQLiteFilePath reports both as false. Treating the second as
-	// the first would skip this silently on exactly the input it cannot reason
-	// about, leaving the driver to create the database at the umask — the defect
-	// this exists to prevent, reached by giving up rather than by getting it
-	// wrong.
-	if err := sqliteDSNReadable(dsn); err != nil {
-		return err
-	}
-
-	path, ok := sqliteDatabasePath(dsn)
-	if !ok {
+func createSQLiteDatabase(t sqliteTarget) error {
+	if !t.ok {
 		// An in-memory database is private to this process and has no file.
+		// A DSN that could not be read never reaches here: resolveSQLiteTarget
+		// returns that as an error rather than as "no file", so this is not the
+		// branch that swallows it.
 		return nil
 	}
+	path := t.path
 
 	// O_EXCL is what makes this "only if nothing is there already": it fails
 	// with EEXIST on a regular file, a directory and a FIFO alike, so an
@@ -1020,22 +1134,6 @@ func createSQLiteDatabase(dsn string) error {
 // cannot stat, and their protection is the server's own, not a file mode.
 func (b *SQLBackend) KeyFilePaths() []string {
 	return b.keyFilePaths
-}
-
-// sqliteKeyFilePaths returns the files a SQLite store keeps the CA key in: the
-// database and the three sidecars SQLite maintains beside it. Empty for an
-// in-memory database, and for a DSN that cannot be read — the latter is already
-// refused by createSQLiteDatabase before any of this is reachable.
-//
-// -journal is in the list because journal_mode=WAL is only a default that the
-// DSN can override, and a rollback journal holds page images of what it
-// protects, the key row included.
-func sqliteKeyFilePaths(dsn string) []string {
-	path, ok := sqliteDatabasePath(dsn)
-	if !ok {
-		return nil
-	}
-	return []string{path, path + "-wal", path + "-shm", path + "-journal"}
 }
 
 // SQLiteFilePath extracts the database file path from a SQLite DSN, which the

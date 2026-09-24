@@ -191,11 +191,20 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		dir := filepath.Join(GinkgoT().TempDir(), "adirectory")
 		Expect(os.Mkdir(dir, 0o755)).To(Succeed(), "seed a directory where a database is named")
 
-		b, _ := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dir})
-		if b != nil {
-			DeferCleanup(func() { _ = b.Close() })
-		}
+		// The error is asserted, not discarded. Construction succeeding and
+		// construction failing are both defensible answers to "a directory sits
+		// where the database should be", but they are different answers, and
+		// discarding the error let either become the other without a spec
+		// noticing. O_EXCL fails EEXIST on the directory, createSQLiteDatabase
+		// treats losing that race as "somebody else made it" and returns nil,
+		// and sql.Open is lazy -- so construction succeeds and the failure
+		// arrives at first use.
+		b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dir})
+		Expect(err).NotTo(HaveOccurred(), "construction is lazy; the directory is not rejected here")
+		DeferCleanup(func() { _ = b.Close() })
 
+		Expect(b.EnsureReady(context.Background())).NotTo(Succeed(),
+			"and a directory is not a database, so first use fails")
 		Expect(permOf(dir)).To(Equal(os.FileMode(0o755)), "directory mode left alone")
 	})
 
@@ -223,12 +232,12 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		// blocks until a writer appears, so a create that did not use O_EXCL, or
 		// any inspection that opened the path, would hang here for ever and take
 		// the suite with it rather than failing.
-		b, _ := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
-		if b != nil {
-			// sql.Open is lazy, so construction succeeds here and leaves a handle
-			// to close even though nothing usable is behind it.
-			DeferCleanup(func() { _ = b.Close() })
-		}
+		// sql.Open is lazy, so construction succeeds here and leaves a handle to
+		// close even though nothing usable is behind it. Asserted rather than
+		// discarded, for the reason the directory spec above gives.
+		b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
+		Expect(err).NotTo(HaveOccurred(), "construction is lazy; the FIFO is not rejected here")
+		DeferCleanup(func() { _ = b.Close() })
 
 		Expect(permOf(dbPath)).To(Equal(os.FileMode(0o644)), "FIFO mode left alone")
 	})
@@ -313,6 +322,97 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(worldBits(journal)).To(BeZero(), "the rollback journal holds page images of the key")
 		}
 		Expect(worldBits(dir)).To(BeZero(), "and nothing widened the directory")
+	})
+
+	// The window between creating the database and the driver opening it. It is
+	// deterministic rather than racy to drive, because sql.Open is lazy: nothing
+	// connects until EnsureReady, so the swap below happens inside the gap every
+	// time rather than sometimes.
+	//
+	// Handed the DSN's own spelling, the driver follows the link again and
+	// creates a database of its own at the umask -- 0644, which is issue #351.
+	// Handed the resolved path, it opens the file this package created and the
+	// swap changes nothing.
+	DescribeTable("a symlink swapped between create and open",
+		func(dsnFor func(link string) string) {
+			dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+			Expect(err).NotTo(HaveOccurred(), "resolve the fixture directory")
+			original := filepath.Join(dir, "original.db")
+			hijacked := filepath.Join(dir, "hijacked.db")
+			link := filepath.Join(dir, "ca.db")
+			Expect(os.Symlink(original, link)).To(Succeed(), "link -> original")
+
+			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: dsnFor(link)})
+			Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+			DeferCleanup(func() { _ = b.Close() })
+			Expect(original).To(BeAnExistingFile(), "created at the resolved target")
+
+			// The swap, inside the window sql.Open's laziness leaves open.
+			Expect(os.Remove(link)).To(Succeed(), "drop the original link")
+			Expect(os.Symlink(hijacked, link)).To(Succeed(), "link -> hijacked")
+
+			Expect(b.EnsureReady(context.Background())).To(Succeed(), "EnsureReady")
+
+			Expect(hijacked).NotTo(BeAnExistingFile(),
+				"the driver must not have followed the swapped link")
+			Expect(worldBits(original)).To(BeZero(), "and the real database keeps its mode")
+		},
+		Entry("named by a file: URI", func(link string) string { return "file:" + link }),
+		Entry("named by a bare path", func(link string) string { return link }),
+	)
+
+	// What the driver is handed, per DSN form. The behavioural spec above can
+	// only observe the outcome; these pin the rewrite itself, including that an
+	// operator's own parameters survive it -- SQLite reads mode, cache and
+	// immutable only in the URI form, so dropping or re-spelling them would
+	// change what the DSN means.
+	Describe("the DSN handed to the driver", func() {
+		It("names the resolved database for an absolute file: URI", func() {
+			dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+			Expect(err).NotTo(HaveOccurred())
+			real := filepath.Join(dir, "real.db")
+			link := filepath.Join(dir, "link.db")
+			Expect(os.WriteFile(real, nil, 0o600)).To(Succeed())
+			Expect(os.Symlink(real, link)).To(Succeed())
+
+			t, err := resolveSQLiteTarget("file:" + link + "?cache=shared")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(sqliteDriverDSN(t)).To(Equal("file://" + real + "?cache=shared"))
+		})
+
+		It("keeps a relative file: URI opaque, since file:// would be an authority", func() {
+			t, err := resolveSQLiteTarget("file:ca%20b.db")
+			Expect(err).NotTo(HaveOccurred())
+
+			dsn := sqliteDriverDSN(t)
+
+			Expect(dsn).To(HavePrefix("file:"), "still a URI")
+			Expect(dsn).NotTo(HavePrefix("file://"), "a relative path is not an authority")
+			Expect(dsn).To(ContainSubstring("ca%20b.db"), "and the space stays escaped")
+		})
+
+		It("leaves a bare path bare, which needs no escaping", func() {
+			dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+			Expect(err).NotTo(HaveOccurred())
+			real := filepath.Join(dir, "real db.db")
+			link := filepath.Join(dir, "link.db")
+			Expect(os.WriteFile(real, nil, 0o600)).To(Succeed())
+			Expect(os.Symlink(real, link)).To(Succeed())
+
+			t, err := resolveSQLiteTarget(link + "?_pragma=foo")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(sqliteDriverDSN(t)).To(Equal(real+"?_pragma=foo"),
+				"the driver takes these bytes literally, so the space is not escaped")
+		})
+
+		It("hands an in-memory DSN through untouched", func() {
+			t, err := resolveSQLiteTarget(":memory:")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(sqliteDriverDSN(t)).To(Equal(":memory:"), "nothing to resolve")
+		})
 	})
 
 	// mode=memory is URI syntax, and SQLite honours it only for a "file:" DSN.
@@ -411,8 +511,21 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		// anything else without a spec noticing, so pin the current outcome:
 		// construction succeeds, because sql.Open is lazy and the resolution
 		// simply stops after the hop bound.
+		// Non-emptiness was the weaker claim this spec used to make, and it was
+		// satisfied by any four paths at all. What matters is *which* path the
+		// resolution settled on when it gave up: the hop bound leaves the name
+		// as given, so everything derived from it names the link rather than
+		// some intermediate or empty spelling.
 		Expect(err).NotTo(HaveOccurred(), "giving up on the cycle is not a construction failure")
-		Expect(back.KeyFilePaths()).NotTo(BeEmpty(), "it still derived paths from the DSN")
+		// Precisely: the parent is resolved and only the cycling name is left as
+		// given. Asserting "the path as given" would have been wrong in the
+		// other direction on macOS, where TempDir sits behind /var.
+		parent, perr := filepath.EvalSymlinks(filepath.Dir(a))
+		Expect(perr).NotTo(HaveOccurred(), "resolve the fixture's parent")
+		gaveUpAt := filepath.Join(parent, filepath.Base(a))
+		Expect(back.KeyFilePaths()).To(ConsistOf(
+			gaveUpAt, gaveUpAt+"-wal", gaveUpAt+"-shm", gaveUpAt+"-journal"),
+			"the parent resolved, the cycling name left alone")
 	})
 
 	// The upgrade boundary the resolution created. A process on a version that

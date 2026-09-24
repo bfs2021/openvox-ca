@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -493,6 +494,70 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		// under every behaviour and the assertion could not fail.
 		Expect(out.String()).NotTo(ContainSubstring("started in background"),
 			"reporting a background start for a process that was refused is the failure")
+	})
+
+	// The wiring, not the rendering. keyPermInsecureNotice has its own specs
+	// above; what had none was the one call site that reaches an operator when
+	// no log_file is configured -- the terminal, before the fork. Delete that
+	// Fprintln and the suite stayed green while the only warning telling
+	// somebody their CA key is world-readable went to a /dev/null stderr.
+	//
+	// The fork is stubbed rather than allowed: under `go test` the child is this
+	// test binary re-executed with the test flags, which re-runs the suite
+	// inside itself.
+	It("shouts to the terminal before forking under --daemon", func() {
+		caDir := worldReadableCADir()
+
+		// The stub refuses rather than succeeding: on success the caller reads
+		// c.Process.Pid to report the child, and a stub cannot set that. What
+		// this spec is about happens before either.
+		var forked bool
+		stubErr := errors.New("stubbed fork")
+		orig := startDaemonChild
+		startDaemonChild = func(*exec.Cmd) error { forked = true; return stubErr }
+		DeferCleanup(func() { startDaemonChild = orig })
+
+		cmd := newRootCmd()
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		cmd.SetArgs([]string{
+			"--cadir", caDir, "--host", "127.0.0.1", "--port", "0", "--daemon",
+			"--insecure-allow-world-readable-keys",
+		})
+
+		err := cmd.Execute()
+
+		Expect(err).To(MatchError(ContainSubstring("failed to start daemon")),
+			"the opt-out let it through to the fork, which the stub refused")
+		Expect(forked).To(BeTrue(), "and it did reach the fork")
+		Expect(errOut.String()).To(ContainSubstring("INSECURE"), "the shouting reached the terminal")
+		Expect(errOut.String()).To(ContainSubstring("ROTATE IT"), "what to do about it")
+		Expect(errOut.String()).To(ContainSubstring("chmod o-rwx -- "), "the remedy")
+	})
+
+	// The same path without the opt-out refuses, and must say nothing about
+	// having started: the ordering is what makes the refusal visible at all.
+	It("says nothing and does not fork when the opt-out is absent", func() {
+		caDir := worldReadableCADir()
+
+		var forked bool
+		orig := startDaemonChild
+		startDaemonChild = func(*exec.Cmd) error { forked = true; return nil }
+		DeferCleanup(func() { startDaemonChild = orig })
+
+		cmd := newRootCmd()
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		cmd.SetArgs([]string{"--cadir", caDir, "--host", "127.0.0.1", "--port", "0", "--daemon"})
+
+		err := cmd.Execute()
+
+		Expect(err).To(MatchError(ContainSubstring("refusing to start")))
+		Expect(forked).To(BeFalse(), "the refusal has to come before the fork")
+		Expect(errOut.String()).NotTo(ContainSubstring("INSECURE"),
+			"no opt-out means no start, so nothing to shout about")
 	})
 
 	// What connects cfg.InsecureAllowWorldReadableKeys to the decision. Driven

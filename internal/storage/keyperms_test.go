@@ -23,6 +23,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -266,6 +267,33 @@ var _ = Describe("CheckKeyPermissions", func() {
 		Expect(warnings).To(HaveLen(1), "one file, one finding")
 		Expect(warnings[0].Path).To(Equal(shared))
 	})
+
+	// Anything that is not a regular file is not key material, and its mode does
+	// not mean what a file's does: a directory under private/ needs its execute
+	// bit to be traversable, and a socket or FIFO holds nothing. Without this
+	// guard the 0750 directory every deployment has would be reported as a
+	// finding wider than 0600 on every start, and the refusal would fire on a
+	// correct store -- so the guard is what makes the whole check usable, not an
+	// optimisation.
+	DescribeTable("says nothing about a thing that is not a regular file",
+		func(create func(path string)) {
+			dir := GinkgoT().TempDir()
+			priv := filepath.Join(dir, "private")
+			Expect(os.MkdirAll(priv, DirPerm)).To(Succeed())
+			create(filepath.Join(priv, "notafile"))
+
+			svc := NewWithBackend(NewFilesystemBackend(dir), priv)
+
+			Expect(svc.CheckKeyPermissions()).To(BeEmpty(), "nothing to judge")
+		},
+		Entry("a directory, which needs its execute bit", func(path string) {
+			Expect(os.Mkdir(path, 0o750)).To(Succeed())
+		}),
+		Entry("a FIFO, which holds nothing", func(path string) {
+			Expect(syscall.Mkfifo(path, 0o666)).To(Succeed())
+			Expect(os.Chmod(path, 0o666)).To(Succeed(), "past any umask")
+		}),
+	)
 
 	// The other fail-closed arm: a backend-declared file whose own Lstat fails,
 	// as opposed to the private-key directory whose ReadDir fails. That is the arm

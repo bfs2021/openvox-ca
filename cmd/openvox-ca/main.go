@@ -133,6 +133,19 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 	return nil, nil
 }
 
+// startDaemonChild forks the background process. It is a variable so that the
+// pre-fork sequence -- the instance-lock pre-flight, the permission refusal and
+// the opt-out's terminal notice -- can be driven by a spec without a fork
+// actually happening.
+//
+// Nothing else makes that reachable. The child is this same binary re-executed
+// with os.Args, and under `go test` os.Args are the *test* binary's arguments,
+// so a real fork re-runs the whole suite inside itself -- with PUPPET_CA_DAEMON
+// set, which is the one thing that would stop it forking again. The pre-fork
+// sequence is where every refusal an operator can actually see is decided, so
+// leaving it uncoverable was the worse trade.
+var startDaemonChild = func(c *exec.Cmd) error { return c.Start() }
+
 // refuseOnKeyPermissions decides whether the CA may start, given what
 // StorageService.CheckKeyPermissions found. It logs nothing: it runs in the
 // parent before the role dispatch and before the fork, which is before any
@@ -856,7 +869,7 @@ func newRootCmd() *cobra.Command {
 				c.Stdin = nil
 				c.Stdout = nil
 				c.Stderr = nil
-				if err := c.Start(); err != nil {
+				if err := startDaemonChild(c); err != nil {
 					return fmt.Errorf("failed to start daemon: %w", err)
 				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Puppet CA started in background (PID: %d)\n", c.Process.Pid)
