@@ -1176,15 +1176,28 @@ every renewal is one a disclosure stops mattering about. Set it where the key is
 the identity rather than an implementation detail — a TLSA record with a
 key-based selector, or an SPKI pin, names the key, and re-keying breaks it.
 
-Four things it does not mean, each of which the obvious reading gets wrong:
+Five things it does not mean, each of which the obvious reading gets wrong:
 
+- **It does not mean "reuse whatever key is in the store".** The key is reused
+  only when it is the private half of a certificate this CA issued for this
+  certname — the CA verifies the stored certificate against its own signature
+  and checks that the key matches it, before any other reasoning. Anything else
+  is replaced with a fresh key and warned about: a key someone else wrote there,
+  a key that does not match the certificate beside it, or a self-consistent
+  certificate and key minted by a different CA. Without that check, being able
+  to **write** the store would be enough to have a key of your choosing
+  certified under this certname. Write access is the point: anyone who can
+  *read* the store already holds the key the CA put there and gains nothing.
 - **A revoked certificate is re-keyed anyway**, and the CA warns. Reissuing over
   the same key would hand back — on a fresh serial, with a full lifetime, and on
   no CRL — exactly the material an operator revoking for key disclosure was
   retiring.
-- **A stored key below the CA's key-strength policy is refused, not replaced.**
-  The entry fails every pass until it is fixed, because silently re-keying would
-  defeat the pin entirely.
+- **A *reused* key below the CA's key-strength policy is refused, not
+  replaced.** The entry fails every pass until it is fixed, because silently
+  re-keying would defeat the pin entirely. That applies to a key the CA has
+  established as its own — the pin is real and cannot be honoured. A weak key
+  that is *not* the CA's never reaches that check: the ownership test above
+  replaces it first and the pass succeeds.
 - **`key_algo` and `key_size` describe what to *generate*.** A reused key keeps
   whatever it already has, so the settings do not interact: changing them under
   `reuse_key` takes effect only when there is no key to reuse.

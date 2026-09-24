@@ -185,6 +185,31 @@ managed_certs:
 			Expect(managed[0].Spec.KeyConfig).To(Equal(ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}))
 		})
 
+		// The normalisation on the way to ca.KeyConfig, which nothing drove.
+		// ca.KeyAlgo's constants are lower-case, so a value that reached the
+		// mechanism as written would not match one and the entry would be
+		// refused -- an operator who capitalised the algorithm, or left a
+		// trailing space from a copy-paste, getting told their key_algo is
+		// invalid when the CA does accept it.
+		DescribeTable("normalises key_algo before the mechanism sees it",
+			func(written string) {
+				managed := build(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    key_algo: "` + written + `"
+    key_size: 256
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`))
+				Expect(managed[0].Spec.KeyConfig.Algo).To(Equal(ca.KeyAlgoECDSA))
+			},
+			Entry("as written", "ecdsa"),
+			Entry("upper case", "ECDSA"),
+			Entry("mixed case", "EcDsA"),
+			Entry("padded", "  ecdsa  "),
+		)
+
 		It("refuses a key configuration that could never be issued", func() {
 			err := decode(`
 managed_certs:

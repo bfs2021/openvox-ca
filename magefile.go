@@ -3056,6 +3056,15 @@ config:
 			notWants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
 		},
 		{
+			// An unreadable config mounts the token. Asserted against
+			// needsAPIAccess's OWN configFullyKnown arm, which is what decides
+			// it -- not managedCertsNeedAPI's "unknown" arm, which cannot be
+			// reached from here. See the note on managedCertsNeedAPI.
+			name:  "an unreadable config mounts the token, because a Secret store may exist",
+			sets:  []string{tls, "existingConfigMap=my-config"},
+			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+		},
+		{
 			name:  "OpenBao Kubernetes auth mounts the token too",
 			sets:  []string{tls, "config.ca_key_provider=openbao", "config.openbao.auth_method=kubernetes"},
 			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},

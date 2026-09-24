@@ -370,6 +370,25 @@ given a projected token it has no use for. "unknown" from managedCertSecrets is
 not this predicate's problem: needsAPIAccess already answers true for an
 unreadable configuration, before it reaches here.
 */}}
+{{/*
+The "unknown" arm below is currently UNREACHABLE from both call sites, and is
+kept deliberately rather than deleted.
+
+needsAPIAccess returns true from its own configFullyKnown test before it reaches
+this predicate, and the NOTES gate at the other call site is guarded by
+`and (eq configFileKnown "true") …` — and configFileKnown true is exactly the
+condition under which managedCertSecrets returns JSON rather than "unknown". So
+no caller can observe it today, which means no test can either: an assertion
+aimed at it passes whether the arm is present or absent, as one written for it
+demonstrated.
+
+It stays because this is a general predicate about a feature, not about a
+caller. A future consumer that asks "do managed certificates need the API?"
+without first establishing that the config is readable would get the
+fail-closed answer from an empty list, which is the wrong direction for a
+question about granting access. Deleting the arm would move that hazard into
+whoever writes the next caller.
+*/}}
 {{- define "openvox-ca.managedCertsNeedAPI" -}}
 {{- $raw := include "openvox-ca.managedCertSecrets" . -}}
 {{- if or (eq $raw "unknown") (fromJsonArray $raw) -}}

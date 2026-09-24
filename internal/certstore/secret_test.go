@@ -143,6 +143,30 @@ var _ = Describe("SecretStore", func() {
 	})
 
 	Describe("Save", func() {
+		// Save's own existence check, which is a separate get from Load's and
+		// had no failure path driven. It decides `force`, and force is what
+		// separates drift from adoption -- so a Save that could not read the
+		// Secret and applied anyway would be choosing between overwriting a
+		// foreign object and refusing its own, on no information. It must
+		// fail and write nothing.
+		It("applies nothing when it cannot tell whether the Secret exists", func() {
+			client.PrependReactor("get", "secrets",
+				func(ktesting.Action) (bool, runtime.Object, error) {
+					return true, nil, errors.New("apiserver is having a moment")
+				})
+
+			err := newStore(certstore.SecretConfig{}).Save(ctx, []byte("CERT"), []byte("KEY"))
+			Expect(err).To(MatchError(ContainSubstring("apiserver is having a moment")))
+
+			// Asserted on the actions rather than by reading the Secret back,
+			// because the reactor above would fail that read too and a failed
+			// read is not evidence of a missing write.
+			for _, a := range client.Actions() {
+				Expect(a.GetVerb()).NotTo(Equal("patch"),
+					"no apply may be attempted when existence is unknown")
+			}
+		})
+
 		It("writes the certificate, the key and the CA chain together, as a TLS Secret", func() {
 			Expect(newStore(certstore.SecretConfig{}).Save(ctx, []byte("CERT"), []byte("KEY"))).To(Succeed())
 
@@ -225,11 +249,21 @@ var _ = Describe("SecretStore", func() {
 			Expect(getErr).To(HaveOccurred(), "no Secret should have been created")
 		})
 
-		It("refuses to write an empty CA chain", func() {
+		It("refuses to write an empty CA chain, and writes nothing at all", func() {
 			src = stubCA{pem: nil}
 
 			err := newStore(certstore.SecretConfig{}).Save(ctx, []byte("CERT"), []byte("KEY"))
 			Expect(err).To(MatchError(ContainSubstring("empty CA certificate chain")))
+
+			// The half this spec was missing, and the half that matters: its
+			// sibling above proves the unreadable-chain arm leaves no Secret,
+			// while this one asserted only the message. A refusal that had
+			// already written the certificate and key would satisfy the
+			// assertion above completely, and would leave a component holding
+			// a pair with no trust anchor beside it -- the exact state the
+			// refusal exists to avoid.
+			_, getErr := client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+			Expect(getErr).To(HaveOccurred(), "no Secret should have been created")
 		})
 	})
 

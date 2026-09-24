@@ -247,16 +247,32 @@ type Entry struct {
 	// implementation detail -- a TLSA record with a key-based selector, or an
 	// SPKI pin, names the key, and re-keying breaks it.
 	//
-	// Four things it does not mean, each of which the obvious reading gets
+	// Five things it does not mean, each of which the obvious reading gets
 	// wrong:
 	//
+	//   - SECURITY: it does not mean "reuse whatever key is in the store". The
+	//     key is reused only when it is the private half of a certificate this
+	//     CA issued for this certname, which internal/ca establishes with
+	//     CheckSignatureFrom and a public-key comparison before any other
+	//     reasoning. Anything else -- a key someone else put there, a key that
+	//     does not match the stored certificate, a self-consistent pair minted
+	//     by another CA -- is replaced with a fresh one and warned about.
+	//     Without that, write access to the store alone would be enough to have
+	//     a key of your choosing certified under this certname, which is a far
+	//     weaker capability than holding a CA-signed credential. Note it is
+	//     write access that matters: anyone who can *read* the store already
+	//     holds the key the CA put there.
 	//   - A revoked certificate is replaced with a new key whatever this says,
 	//     and the CA warns. Reissuing over the same key would hand back, on a
 	//     fresh serial with a full lifetime and on no CRL, exactly the material
 	//     an operator revoking for key disclosure was retiring.
-	//   - A stored key below the CA's key-strength policy is refused, not
-	//     silently replaced. The entry fails every pass until the operator
+	//   - A *reused* key below the CA's key-strength policy is refused, not
+	//     silently replaced: the entry fails every pass until the operator
 	//     fixes it, because re-keying quietly would defeat the pin entirely.
+	//     That applies to a key the CA established as its own -- the pin is
+	//     real and cannot be honoured. A weak key that is *not* ours never gets
+	//     that far: the ownership test above replaces it first, and the pass
+	//     succeeds.
 	//   - `key_algo` and `key_size` describe what to *generate*. A reused key
 	//     keeps whatever it already has, so changing them under `reuse_key`
 	//     takes effect only when there is no key to reuse.
