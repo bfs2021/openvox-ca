@@ -31,8 +31,17 @@
 #     leaf series from storage -- so they disagree whenever a gather fails. The
 #     cases pin that it fires for a certificate that never appears, stays quiet
 #     for one that exists, keeps the target labels so one replica's certificate
-#     cannot satisfy another's entry, stays quiet for a revoked certificate
-#     awaiting reissue, and stays quiet during a storage outage.
+#     cannot satisfy another's entry, stays quiet for a revoked predecessor
+#     beside a signed certificate, PAGES for a subject whose only certificate is
+#     revoked, and stays quiet during a storage outage.
+#
+#     That fifth clause used to read "stays quiet for a revoked certificate
+#     awaiting reissue", which was the behaviour before `state!="revoked"` was
+#     added to the rule. The case below flipped to expect the opposite and this
+#     summary did not, so the file's own header described the defect the matcher
+#     exists to fix. A header that lists what the cases assert is prose that
+#     goes stale silently; it is kept because the list is how a reader finds the
+#     case they want, but it has to be corrected in step.
 #
 # The firing behaviour is the contract here; the annotation prose is not, so
 # repeating it below is a maintenance cost rather than an assertion worth

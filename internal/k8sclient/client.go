@@ -18,10 +18,23 @@
 // Package k8sclient builds a Kubernetes client from the credentials a pod is
 // given, for the optional features that talk to the API server.
 //
-// It holds no policy of its own. It exists because more than one such feature
-// now needs the same two things -- a clientset built from the in-cluster
-// ServiceAccount, and the pod's own namespace -- and the second copy of the
-// path to a token mount is the copy that goes stale.
+// It exists because more than one such feature needs the same things -- a
+// clientset built from the in-cluster ServiceAccount, and the pod's own
+// namespace -- and the second copy of the path to a token mount is the copy
+// that goes stale.
+//
+// It holds one piece of policy, deliberately: the managed-by label every
+// object this CA maintains carries, and the helper that merges it in. That is
+// here rather than in either feature because the claim "one selector finds
+// everything openvox-ca owns" is a contract *between* them, not a fact about
+// either, and docs/kubernetes-export.md publishes it to operators. Both
+// packages previously held their own copy, each asserting in a comment that it
+// matched the other, with nothing making it so.
+//
+// This paragraph exists because the doc said "It holds no policy of its own"
+// while the package owned that label -- a description that stopped being true
+// when the label moved here, and which would have told the next reader this was
+// the wrong home for it.
 package k8sclient
 
 import (

@@ -205,6 +205,27 @@ managed_certs:
 			Expect(managed[0].Spec.ExtKeyUsage).To(BeNil())
 		})
 
+		// The explicitly empty list, which the doc comment singles out: it means
+		// the same as absent, so `usages: []` cannot ask for a certificate with
+		// no extended key usage at all. That is a different object and not one
+		// this block offers. Untested until now, so a change making the empty
+		// list mean "no usages" -- the obvious reading, and a narrowing that
+		// would silently strip clientAuth from every entry written that way --
+		// would have passed.
+		It("treats an explicitly empty list as inherit, not as none", func() {
+			managed := build(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    usages: []
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`))
+			Expect(managed[0].Spec.ExtKeyUsage).To(BeNil(),
+				"an empty list inherits the serverAuth+clientAuth pair, as an absent "+
+					"key does; a non-nil empty slice would mean no usages at all")
+		})
+
 		It("narrows to what the entry asks for", func() {
 			managed := build(decode(`
 managed_certs:
@@ -377,9 +398,6 @@ managed_certs:
 			Expect(err).To(MatchError(ContainSubstring("`names`")))
 		})
 
-		// The fourth name type, which was the only one passed through
-		// verbatim: a stray space or a bare word reached the certificate and
-		// the operator found out from whatever failed to verify it.
 		// The arm of Duration.UnmarshalYAML that a malformed duration does not
 		// reach: a node that is not a scalar at all. `renew_before: [720h]` is
 		// what an operator writes by pasting a list where a value goes, and it
@@ -408,8 +426,15 @@ managed_certs:
 			Expect(err).To(MatchError(MatchRegexp(`line \d+: a duration must be a scalar`)))
 		})
 
-		It("refuses an email address that is not one", func() {
-			for _, bad := range []string{"puppetserver", "@example.com", "ca@", "ca@ example.com"} {
+		// The fourth name type, which was the only one passed through
+		// verbatim: a stray space or a bare word reached the certificate and
+		// the operator found out from whatever failed to verify it.
+		//
+		// An Entry each rather than a loop inside one It, per AGENTS.md: a loop
+		// stops at the first failure and reports it under a spec name covering
+		// all four, so three of these could regress while the output named one.
+		DescribeTable("refuses an email address that is not one",
+			func(bad string) {
 				err := decode(`
 managed_certs:
   - certname: a.example.com
@@ -418,10 +443,15 @@ managed_certs:
     renew_before: 720h
     store: {files: {cert: /c.pem, key: /k.pem}}
 `).Validate()
-				Expect(err).To(MatchError(ContainSubstring("not an email address")), bad)
-				Expect(err).To(MatchError(ContainSubstring(bad)), bad)
-			}
-		})
+				Expect(err).To(MatchError(ContainSubstring("not an email address")))
+				Expect(err).To(MatchError(ContainSubstring(bad)),
+					"the refusal names the value that was wrong")
+			},
+			Entry("no domain at all", "puppetserver"),
+			Entry("no local part", "@example.com"),
+			Entry("no domain after the @", "ca@"),
+			Entry("a space inside", "ca@ example.com"),
+		)
 
 		It("trims an email address, as it does every other name type", func() {
 			managed := build(decode(`
@@ -851,6 +881,32 @@ managed_certs:
 			// certificate, the thing it collides with is cadir.
 			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com) stores its cert")))
 			Expect(err).To(MatchError(ContainSubstring("is inside cadir")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+			// The prose as well as the key. This assertion used to check only
+			// the underscored block name, and the body of the same message said
+			// "a managed certificate's file store is overwritten on every
+			// issuance" -- the identical defect in a spelling the matcher could
+			// not see. A second consumer was told its serving certificate was a
+			// managed certificate, and the guard against exactly that passed.
+			Expect(err).NotTo(MatchError(ContainSubstring("managed certificate")),
+				"the message must not call a serving certificate a managed one")
+		})
+
+		// The other arm of the same function, which nothing drove: a reserved
+		// path that is not absolute is refused rather than skipped, because a
+		// relative one can never equal an absolute store path and skipping it
+		// would leave a gap that looks like a passing check. Its message named
+		// `managed_certs` outright.
+		It("names the block when a reserved path cannot be compared", func() {
+			err := single(`    names: [ca]
+    renew_before: 720h
+    store: {files: {cert: /var/lib/openvox-ca/ca.pem, key: /k.pem}}
+`).CheckReservedPathsIn(servingCert, []certstore.ReservedPath{
+				{Setting: "cadir", Path: "relative/cadir", Tree: true},
+			})
+
+			Expect(err).To(MatchError(ContainSubstring("not an absolute path")))
+			Expect(err).To(MatchError(ContainSubstring("serving_cert file stores")))
 			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
 		})
 

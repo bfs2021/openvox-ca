@@ -951,8 +951,8 @@ func (c Config) CheckReservedPathsIn(block Block, reserved []ReservedPath) error
 					// Loudly rather than silently. A relative reserved path can
 					// never equal an absolute store path, so skipping it would
 					// leave a gap that looks exactly like a passing check.
-					return fmt.Errorf("cannot compare managed_certs file stores against %s %q: "+
-						"it is not an absolute path", r.Setting, r.Path)
+					return fmt.Errorf("cannot compare %s file stores against %s %q: "+
+						"it is not an absolute path", block.name(), r.Setting, r.Path)
 				}
 				if !reservedCovers(root, r.Tree, p.path) {
 					continue
@@ -961,8 +961,13 @@ func (c Config) CheckReservedPathsIn(block Block, reserved []ReservedPath) error
 				if r.Tree {
 					scope = "is inside"
 				}
+				// Block-neutral wording. These two messages hardcoded
+				// `managed_certs` and "a managed certificate" inside a function
+				// that takes a Block, so a serving_cert entry was refused under
+				// the name of a block its configuration need not contain --
+				// which is the exact failure the Block type was added to stop.
 				return fmt.Errorf("%s stores its %s at %q, which %s %s (%s): "+
-					"a managed certificate's file store is overwritten on every issuance, and "+
+					"this file store is overwritten on every issuance, and "+
 					"these are the CA's own files. Give the certificate a path of its own",
 					block.withCertname(i, c[i].Certname), p.field, p.path, scope,
 					r.Setting, root)

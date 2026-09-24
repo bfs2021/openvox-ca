@@ -58,9 +58,16 @@ import (
 // That is worth doing and is not in #243; the reconcile failure is logged every
 // pass in the meantime.
 //
-// That series is deliberately general -- one label, the subject, and nothing
-// about the store -- so that the CA's own serving certificate (#326) can use it
-// for a store with quite different failure semantics.
+// puppetca_managed_certificate_configured is deliberately general -- one label,
+// the subject, and nothing about the store -- so that the CA's own serving
+// certificate (#326) can use it for a store with quite different failure
+// semantics.
+//
+// Named rather than "that series", which is what it said: the paragraph above
+// about a reconcile-failure counter that does not exist was inserted between
+// the gauge's introduction and this sentence, leaving the pronoun pointing at
+// the nearest antecedent instead of the intended one. A referent two topics
+// away should be a name.
 //
 // Displacement is NOT a second such outcome, though it reads like one. When a
 // managed issuance replaces a certificate the CA already held for that name,
