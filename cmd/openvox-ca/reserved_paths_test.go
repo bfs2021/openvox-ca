@@ -355,6 +355,36 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		Expect(settings).To(ContainElement("--config"))
 	})
 
+	// Every spelling ParseBackendKind accepts for SQLite, because the check
+	// used to compare against the literal "sqlite" and so silently reserved
+	// nothing for `sqlite3` -- an alias docs/storage-backends.md publishes. An
+	// operator following the documentation got no reservation at all, and the
+	// database holding the inventory, the signed certificates and the CRL was
+	// then a legal target for a managed certificate's file store. A spelling
+	// the list does not recognise is a gap that looks like a passing check.
+	DescribeTable("reserves the SQLite database under every accepted spelling",
+		func(backend string) {
+			cfg := &serverConfig{StorageBackend: backend, SQLDSN: "file:/var/lib/puppet-ca/ca.db"}
+			reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")
+			Expect(err).NotTo(HaveOccurred())
+
+			entry := certstore.Config{{
+				Certname:    "a.example.com",
+				Names:       []string{"a"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/etc/a.pem", Key: "/var/lib/puppet-ca/ca.db",
+				}},
+			}}
+			Expect(entry.CheckReservedPaths(reserved)).
+				To(MatchError(ContainSubstring("is sql_dsn")))
+		},
+		Entry("sqlite", "sqlite"),
+		Entry("the sqlite3 alias", "sqlite3"),
+		Entry("mixed case", "SQLite"),
+		Entry("padded", "  sqlite  "),
+	)
+
 	It("reserves the SQLite database, and only when SQLite is the backend", func() {
 		cfg := &serverConfig{StorageBackend: "sqlite", SQLDSN: "file:/var/lib/puppet-ca/ca.db"}
 		reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")

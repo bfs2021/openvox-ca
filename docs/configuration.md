@@ -1103,9 +1103,17 @@ mean either unit.
 
 **`certname` goes through the CA's ordinary name grammar**, so a bad name is
 refused at startup rather than discovered at issuance, and each name occupies
-the ordinary inventory slot for that subject. A component certificate and an
-agent certificate therefore cannot share a certname, and neither can two
-managed certificates.
+the ordinary inventory slot for that subject.
+
+**Two managed certificates cannot share a certname**: that is refused at
+startup, naming both entries, because they would replace each other on every
+pass. **A managed certificate and an agent sharing one is not prevented**, and
+cannot be — an agent enrols whenever it likes, long after this configuration
+was read. They contend for the single inventory slot that certname has, and the
+one that issues last displaces the other; see [When something goes
+wrong](#when-something-goes-wrong) below for what the CA logs and how to retire
+the displaced certificate. Give a managed certificate a certname nothing else
+enrols under.
 
 **A certificate can be named four ways**, and at least one name of some kind is
 required. `names` carries the DNS entries, and `ip_addresses`,

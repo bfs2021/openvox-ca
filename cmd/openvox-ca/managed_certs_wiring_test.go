@@ -139,7 +139,7 @@ managed_certs:
 		file, err := parser.ParseFile(fset, "main.go", nil, 0)
 		Expect(err).NotTo(HaveOccurred())
 
-		var called, checked bool
+		var called, checked, propagated bool
 		var funcsSeen int
 		ast.Inspect(file, func(n ast.Node) bool {
 			if _, ok := n.(*ast.FuncLit); ok {
@@ -183,8 +183,29 @@ managed_certs:
 			lhs, lok := bin.X.(*ast.Ident)
 			rhs, rok := bin.Y.(*ast.Ident)
 			assigned, aok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
-			if lok && rok && aok && rhs.Name == "nil" && lhs.Name == assigned.Name {
-				checked = true
+			if !lok || !rok || !aok || rhs.Name != "nil" || lhs.Name != assigned.Name {
+				return true
+			}
+			checked = true
+
+			// And the body must PROPAGATE it. Comparing the error to nil is
+			// not the same as failing on it: an empty body, or one that only
+			// logged, satisfied every assertion above while leaving a CA that
+			// starts happily with a configuration it has just decided can
+			// never issue -- which is the opposite of the fail-fast this
+			// function's doc comment promises, and the exact outcome the
+			// guard exists to prevent. The guard was written to catch a
+			// dropped call and silently accepted a swallowed error.
+			for _, st := range stmt.Body.List {
+				ret, ok := st.(*ast.ReturnStmt)
+				if !ok {
+					continue
+				}
+				for _, res := range ret.Results {
+					if id, ok := res.(*ast.Ident); ok && id.Name == assigned.Name {
+						propagated = true
+					}
+				}
 			}
 			return true
 		})
@@ -197,6 +218,10 @@ managed_certs:
 			"main.go does not call attachManagedCerts, so no configured managed "+
 				"certificate would ever be issued, and every other spec in this "+
 				"file would still pass")
+		Expect(propagated).To(BeTrue(),
+			"main.go compares attachManagedCerts's error against nil but does not "+
+				"return it, so a configuration that can never issue would be noted "+
+				"and then started anyway")
 		Expect(checked).To(BeTrue(),
 			"main.go calls attachManagedCerts without checking the error it "+
 				"returns, so a configuration that can never issue would start "+

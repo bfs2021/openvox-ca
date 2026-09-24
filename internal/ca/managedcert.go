@@ -1014,12 +1014,23 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 // certificate reachable only by serial, with no warning, because neither
 // renewal path consults c.ManagedCerts.
 //
-// That asymmetry is known and unaddressed rather than unnoticed. Closing it
-// means teaching both renewal paths about the managed set, which is a change to
-// every issuance path in service of a case an operator reaches only by giving a
-// managed certificate a certname something else already renews -- and the
-// displacement itself is already reported, with the serial and the remedy. It
-// is recorded here so the next reader can weigh it rather than rediscover it.
+// #243 considered closing this and decided not to. That is a decision rather
+// than an oversight, and it is recorded as one because this note previously
+// read "#243 must not inherit the asymmetry as settled" -- an obligation on
+// that PR, which #243 then rewrote into a description without anyone ruling on
+// it. A deferral addressed to a PR that the PR reworded into prose is how debt
+// gets accepted with nobody deciding to accept it.
+//
+// The reasoning, so it can be argued with rather than rediscovered: closing it
+// means teaching both renewal paths about the managed set, which touches every
+// issuance path, in service of a case an operator reaches only by giving a
+// managed certificate a certname something else already renews. The
+// displacement is already reported with the serial and the remedy, and
+// docs/configuration.md now states plainly that a managed certificate and an
+// agent sharing a certname displace each other rather than being prevented from
+// doing so.
+//
+// It is NOT filed as an issue. Whether it should be is a tracker decision.
 //
 // The caller must hold subject's lock and must NOT hold c.mu: IsRevokedSerial
 // takes c.mu.RLock, which is not reentrant. Named for the lock it runs under

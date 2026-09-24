@@ -219,7 +219,18 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 	// other dialect's DSN names a server rather than a file, and an in-memory
 	// database has no file at all, both of which SQLiteFilePath reports by
 	// returning false.
-	if strings.EqualFold(strings.TrimSpace(cfg.StorageBackend), "sqlite") {
+	//
+	// Through ParseBackendKind rather than a string comparison, for the same
+	// reason SQLiteFilePath is used above: a second parser is a second answer.
+	// This compared against the literal "sqlite" and so did not recognise
+	// `sqlite3`, which ParseBackendKind accepts and docs/storage-backends.md
+	// publishes as an alias -- so an operator using the documented spelling got
+	// no reservation at all, and a managed certificate could be pointed at the
+	// database holding the inventory, the signed certificates and the CRL.
+	// A spelling this list does not recognise is a gap that looks like a
+	// passing check.
+	if kind, err := storage.ParseBackendKind(cfg.StorageBackend); err == nil &&
+		kind == storage.BackendSQLite {
 		if path, ok := storage.SQLiteFilePath(cfg.SQLDSN); ok {
 			named = append(named, certstore.ReservedPath{Setting: "sql_dsn", Path: path})
 		}

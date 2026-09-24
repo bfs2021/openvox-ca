@@ -153,8 +153,14 @@ type Entry struct {
 	// existing grammar applies and a bad name is refused at startup rather than
 	// discovered at issuance.
 	//
-	// Each name occupies the ordinary inventory slot for that subject, so a
-	// component certificate and an agent certificate cannot share a certname.
+	// Each name occupies the ordinary inventory slot for that subject. Two
+	// managed certificates sharing one is refused by ValidateIn; a managed
+	// certificate and an *agent* sharing one is not, and cannot be -- an agent
+	// enrols whenever it likes, long after this configuration was read. They
+	// contend for the one slot and the later issuance displaces the earlier,
+	// which the reconcile pass reports with the displaced serial rather than
+	// prevents. Saying "cannot share" here read as a guarantee the CA does not
+	// make.
 	Certname string `yaml:"certname"`
 
 	// Names are the subjectAltName DNS entries, and IPAddresses,
