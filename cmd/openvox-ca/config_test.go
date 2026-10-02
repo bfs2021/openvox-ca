@@ -1200,10 +1200,13 @@ var _ = Describe("insecure_allow_world_readable_keys wiring", func() {
 	//
 	// What this pins: the flag exists under its documented name, it is a
 	// boolean, and setting it registers as Changed, which is the condition the
-	// overlay branch tests. What it does NOT pin is the branch itself: deleting
-	// `if cmd.Flags().Changed("insecure-allow-world-readable-keys")` leaves this
-	// green. Closing that needs the overlay lifted out of RunE, which is a
-	// change to sixty-odd sibling branches and not this PR's to make.
+	// overlay branch tests.
+	//
+	// The branch itself is pinned elsewhere now, and this comment used to say it
+	// was not. keyperms_test.go's "shouts to the terminal before forking under
+	// --daemon" drives the whole command with --insecure-allow-world-readable-keys
+	// and asserts the INSECURE notice, which is only reached if the overlay
+	// copied the flag into cfg -- so deleting the Changed branch fails there.
 	It("is read from the flag, which outranks both", func() {
 		path := writeTempConfig("insecure_allow_world_readable_keys: false\n")
 

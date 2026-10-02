@@ -1113,8 +1113,12 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 	return AtomicWriteFile(s.PrivateKeyPath(subject), pemData, FilePermPrivate)
 }
 
-// CheckKeyPermissions reports files holding key material whose permissions are
-// more permissive than expected (0600). Three sources: every file in the local
+// CheckKeyPermissions reports every file holding key material whose permissions
+// are wider than 0600. That is the reporting threshold, not the expectation:
+// group access is wider than 0600 and is tolerated, so what comes back is a
+// list of findings to judge rather than a list of faults. The caller draws the
+// line -- KeyPermWarning.WorldAccessible is refused, group access is logged, and
+// a mode that could not be read is refused on its own terms. Three sources: every file in the local
 // private-key directory, which for the filesystem backend also contains the CA
 // key; any files the backend itself declares through KeyFileLister — the SQLite
 // database and its sidecars, which hold the CA key as a blob; and any extra

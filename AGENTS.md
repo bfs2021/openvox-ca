@@ -299,19 +299,24 @@ openvox-ca never changes the mode of a file it did not create.**
 Two halves, and both matter:
 
 - **Creation.** Anything holding key material is created with no world bits and
-  otherwise follows the operator's umask, which can only narrow it further. The
+  otherwise follows the operator's umask, where the umask applies at all. The
   private-key writes pass `FilePermPrivate` (0600) explicitly; the SQLite
   database is created by `createSQLiteDatabase` with `O_EXCL` at
   `sqliteFilePermCreate` (0660) before the driver opens it, because SQLite fixes
   the `-wal`/`-shm`/`-journal` modes from the database at creation and never
   revisits them. `AtomicWriteFile` and `AppendLine` set the mode on the
-  descriptor so the umask cannot widen or narrow what the blob kind names.
+  descriptor *after* creating it, so for those two the blob kind decides the
+  mode outright and the umask does not narrow it either. The umask-narrows rule
+  above is about the paths that pass a mode to `O_CREATE` — the SQLite database
+  and the private-key writes.
 - **Never correcting.** No `chmod` of an existing file, no `chown`, ever. Group
   access is legitimate — a Kubernetes `fsGroup` ORs it back into the volume at
   every mount, and on an arbitrary-uid platform it is how a pod reaches a store
   a previous pod created — and `chmod(2)` needs ownership, so tightening would
-  fail EPERM exactly there. An earlier revision of #351 held a chmod primitive
-  and every defect five review rounds found existed because of it.
+  fail EPERM exactly there. An earlier revision of the change that became this
+  policy held a chmod primitive, and every defect five review rounds found
+  existed because of it — the issue (#351) asked for the exposure to be fixed
+  and said nothing about how, so it is the revision that is the lesson here.
 
 What replaces correction is a check: `StorageService.CheckKeyPermissions` judges
 every file under the local private-key directory, every path a backend declares

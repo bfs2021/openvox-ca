@@ -158,10 +158,13 @@ var startDaemonChild = func(c *exec.Cmd) error { return c.Start() }
 // whose permissions could not be read at all is refused too, and separately: it
 // is not the same condition and does not have the same remedy.
 //
-// Group access never refuses. It is the mode the store is created with, so a
-// correct deployment has it -- under a Kubernetes fsGroup, and on a plain
-// systemd install where the umask leaves it. logKeyPermissions reports it once
-// the logger exists.
+// Group access never refuses, but not because every store creates it. On the
+// filesystem backend nothing under private/ has it: those writes pass 0600
+// explicitly. It is the SQLite database and its sidecars that are created
+// group-accessible, and a Kubernetes fsGroup that ORs it into a mounted volume
+// whatever the file was created as. So group access is tolerated rather than
+// expected, and openvox-ca cannot tell from the inside whether that group has
+// members other than itself. logKeyPermissions reports it once a logger exists.
 //
 // insecureAllow turns the world-access refusal into a warning, the way the
 // no-TLS opt-out does for plain HTTP on a non-loopback address. It does not
@@ -228,9 +231,17 @@ func logKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) {
 		}
 	}
 
-	// Group access is reported once, at Info, listing the files rather than one
-	// record each. It is the expected state on a store that creates it that way,
-	// and a warning on every start of a correct deployment is one nobody reads.
+	// Group access is reported at Info, listing the files rather than one record
+	// each, and once per *process* rather than once per start: the default
+	// topology is a launcher that forks a signer and a frontend, each of which
+	// checks for itself and so reports for itself. Three records on one start is
+	// the expected shape, and deliberate -- a child cannot inherit the parent's
+	// verdict across an execve, and a hand-started signer is a supported
+	// topology that must still say what it found.
+	//
+	// Not a warning: it is the expected state on a store that creates it that
+	// way, and a warning on every start of a correct deployment is one nobody
+	// reads.
 	//
 	// What the record must not do is name a cause. Group access is created by
 	// openvox-ca only on the SQLite backend, whose database is created 0660 and
@@ -265,18 +276,20 @@ func logKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) {
 }
 
 // keyPermInsecureNotice renders the opt-out's warning as a line of text, or ""
-// when there is nothing to say. Shared so the terminal copy under --daemon and
-// the slog record below cannot drift apart.
+// when there is nothing to say.
+//
+// What it shares with the slog record in logKeyPermissions is everything that
+// carries meaning: the headline constant, the selection of findings, and the
+// renderers for the paths and the remedy. An earlier version of this comment
+// claimed the two "cannot drift apart", which was not true -- the record
+// filtered the findings for itself, so the two could have disagreed about which
+// files they were talking about. The shapes still differ, deliberately: one is
+// a line for a terminal, the other is structured attributes for a log.
 func keyPermInsecureNotice(warnings []storage.KeyPermWarning, insecureAllow bool) string {
 	if !insecureAllow {
 		return ""
 	}
-	var worldAccessible []storage.KeyPermWarning
-	for _, w := range warnings {
-		if !w.Unreadable && w.WorldAccessible() {
-			worldAccessible = append(worldAccessible, w)
-		}
-	}
+	worldAccessible := worldAccessibleFindings(warnings)
 	if len(worldAccessible) == 0 {
 		return ""
 	}
@@ -284,6 +297,23 @@ func keyPermInsecureNotice(warnings []storage.KeyPermWarning, insecureAllow bool
 		insecureKeyPermHeadline,
 		keyPermPaths(worldAccessible),
 		strings.Join(keyPermPathList(worldAccessible), " "))
+}
+
+// worldAccessibleFindings selects the findings the opt-out's warning is about:
+// world access that was actually established. An unjudgeable path is excluded
+// -- it is refused earlier and separately, and has no mode to report or chmod
+// to suggest.
+//
+// One function because two callers need the same answer: the terminal notice
+// before a --daemon fork, and the slog record once a logger exists.
+func worldAccessibleFindings(warnings []storage.KeyPermWarning) []storage.KeyPermWarning {
+	var out []storage.KeyPermWarning
+	for _, w := range warnings {
+		if !w.Unreadable && w.WorldAccessible() {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // insecureKeyPermHeadline is the shouting itself, in one place because it is

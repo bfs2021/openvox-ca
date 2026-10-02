@@ -295,6 +295,36 @@ var _ = Describe("CheckKeyPermissions", func() {
 		}),
 	)
 
+	// The third fail-closed branch, and the one with no spec: Lstat succeeds on
+	// the link, so the link is followed, and the Stat on its target fails for a
+	// reason that is not ENOENT. A dangling link (ENOENT) is deliberately
+	// nothing to judge; this is the other case -- here an unsearchable directory
+	// between the link and its target, which is EACCES. Losing it would turn an
+	// unjudgeable key into a silent pass.
+	It("reports a symlink whose target cannot be stat'd as unjudgeable", func() {
+		if os.Geteuid() == 0 {
+			Skip("root can search a directory whatever its mode")
+		}
+		dir := GinkgoT().TempDir()
+		hidden := filepath.Join(dir, "hidden")
+		Expect(os.Mkdir(hidden, 0o700)).To(Succeed(), "the target's directory")
+		target := filepath.Join(hidden, "real_key.pem")
+		Expect(os.WriteFile(target, nil, 0o600)).To(Succeed(), "seed the real key")
+
+		link := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
+		Expect(os.Symlink(target, link)).To(Succeed(), "reach it through a link")
+		Expect(os.Chmod(hidden, 0o000)).To(Succeed(), "make the target unreachable")
+		DeferCleanup(func() { _ = os.Chmod(hidden, 0o700) })
+
+		ov, err := NewOverlayBackend(NewFilesystemBackend(dir), map[string]string{KeyCAKey: link})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+
+		w := findFor(NewWithBackend(ov, "").CheckKeyPermissions(), link)
+		Expect(w).NotTo(BeNil(), "a finding for the unjudgeable target")
+		Expect(w.Unreadable).To(BeTrue(), "recorded as unjudgeable, not as a mode")
+		Expect(w.WorldAccessible()).To(BeTrue(), "which fails closed")
+	})
+
 	// The other fail-closed arm: a backend-declared file whose own Lstat fails,
 	// as opposed to the private-key directory whose ReadDir fails. That is the arm
 	// covering the database, its sidecars and a pinned ca_key_file -- everything

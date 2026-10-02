@@ -97,12 +97,29 @@ const (
 	// 0600 under 0077) and can never widen it, so the world bits that issue #351
 	// was about cannot be granted however the process is launched.
 	//
-	// Group is deliberately left in rather than creating at FilePermPrivate. A
-	// Kubernetes fsGroup ORs group access back into the volume at every mount,
-	// and on an arbitrary-uid platform such as OpenShift the pod's uid can
-	// differ between restarts, so group access is how the CA reaches a database
-	// it did not create. Refusing that would break deployments that work today
-	// while protecting nothing: the pod's own group is not a third party.
+	// Group is deliberately left in rather than creating at FilePermPrivate,
+	// and the reason is narrower than it first looks.
+	//
+	// It is NOT fsGroup. A Kubernetes fsGroup ORs group access into the volume
+	// at every mount whatever the file was created as, so under fsGroup the
+	// creation mode makes no difference and 0600 would work just as well. A
+	// review correctly pointed that out; the earlier version of this comment
+	// gave fsGroup as the justification and was wrong to.
+	//
+	// What the group bit is for is the case with no kubelet to re-apply it: a
+	// platform that assigns the pod an arbitrary uid per start, where the gid is
+	// stable and the uid is not. There the database this process creates has to
+	// be readable by the *next* process, which is the same CA under a different
+	// uid. Created at 0600 it would not be, and the store would be unreachable
+	// after a restart. Nothing re-widens it, because this package never chmods a
+	// file it did not create.
+	//
+	// What it costs is real and worth stating: on a systemd or package install,
+	// where the uid is stable, the group bit buys nothing and every member of
+	// the owning group can read the key. That is the trade, it is disclosed in
+	// the PR that introduced it, and the startup check reports group access
+	// rather than refusing on it so an operator can see and narrow it with a
+	// umask.
 	sqliteFilePermCreate = 0o660
 
 	// sqliteSymlinkHops bounds the manual resolution of a chain of dangling
@@ -287,7 +304,8 @@ func NewSQLBackend(cfg SQLConfig) (*SQLBackend, error) {
 // Nothing here can prevent that: the old process is the one holding the wrong
 // lock, and it is not running this code. What it can do is say so, at the moment
 // an operator is in a position to act -- an mtime on that directory younger than
-// the upgrade is a live process on the old version, not a leftover. A warning
+// the upgrade is a live process on the old version, not a leftover, which is why
+// the record carries it. A warning
 // rather than a refusal, because the ordinary case is a stale directory from an
 // upgrade that finished, and refusing to start over it would turn a housekeeping
 // task into an outage.
@@ -296,7 +314,7 @@ func warnOnStrandedSQLiteLockDir(dsn, inUse string) {
 	if !ok {
 		return
 	}
-	legacy := filepath.Join(filepath.Dir(spelling), "."+filepath.Base(spelling)+".locks")
+	legacy := sqliteLockDirFor(spelling)
 	if legacy == inUse {
 		return
 	}
@@ -315,6 +333,10 @@ func warnOnStrandedSQLiteLockDir(dsn, inUse string) {
 	slog.Warn("A same-host lock directory was left beside this DSN's own spelling, "+
 		"which is not where this version locks",
 		"stranded", legacy,
+		// The doc above names the mtime as what separates a live holder from an
+		// upgrade's leftovers, so the record has to carry it: without it the
+		// operator is told to go and look at the thing this already stat'd.
+		"stranded_modified", legacyInfo.ModTime().UTC().Format(time.RFC3339),
 		"in_use", inUse,
 		"why", "the lock directory derives from the resolved database path, so a DSN reaching "+
 			"the database through a symlink locks beside the target; earlier versions locked "+
@@ -947,15 +969,6 @@ func (b *SQLBackend) AcquireInstanceLock() (Unlocker, error) {
 	return b.sameHostLocks.acquireInstance()
 }
 
-// sqliteLockDir derives the same-host lock directory for a SQLite DSN: a hidden
-// sibling of the database file, alongside the -wal and -shm files SQLite
-// maintains itself. Reports false for an in-memory database, which is private
-// to the process that opened it and so has nothing to exclude.
-func sqliteLockDir(dsn string) (string, bool) {
-	path, ok := sqliteDatabasePath(dsn)
-	return sqliteTarget{dsn: dsn, path: path, ok: ok}.lockDir()
-}
-
 // sqliteTarget is one SQLite DSN resolved once: the path every derived name is
 // built from, established at backend construction and shared from there.
 //
@@ -990,7 +1003,16 @@ func (t sqliteTarget) lockDir() (string, bool) {
 	if !t.ok {
 		return "", false
 	}
-	return filepath.Join(filepath.Dir(t.path), "."+filepath.Base(t.path)+".locks"), true
+	return sqliteLockDirFor(t.path), true
+}
+
+// sqliteLockDirFor is the naming formula, in one place. Two callers need it: the
+// directory this version locks in, derived from the resolved path, and the one
+// an earlier version would have used, derived from the DSN's own spelling. They
+// have to agree on the shape or the stranded-directory check compares a name
+// nothing ever created.
+func sqliteLockDirFor(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), "."+filepath.Base(dbPath)+".locks")
 }
 
 // keyFilePaths names every file that can hold the CA key: the database and the

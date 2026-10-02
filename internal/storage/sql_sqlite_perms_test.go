@@ -72,6 +72,18 @@ func permOf(path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
+// lockDirOf resolves a DSN the way the backend does and returns its same-host
+// lock directory. A spec helper rather than a production function: production
+// resolves once at construction and shares that answer, so a DSN-taking
+// lock-directory function existed only for these call sites and gave the
+// package a second resolution path that could drift from the real one.
+func lockDirOf(dsn string) (string, bool) {
+	GinkgoHelper()
+	t, err := resolveSQLiteTarget(dsn)
+	Expect(err).NotTo(HaveOccurred(), "resolve %s", dsn)
+	return t.lockDir()
+}
+
 // worldBits returns the permission bits granted to users outside the owner and
 // the group, which is the only thing these specs care about.
 func worldBits(path string) os.FileMode {
@@ -314,14 +326,21 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		Expect(worldBits(dbPath)).To(BeZero(), "the database itself")
 		Expect(b.KeyFilePaths()).To(ContainElement(dbPath+"-journal"), "declared as key material")
 
-		// The journal exists only while a transaction is open, so assert the
-		// mode on whichever of the two spellings is on disk after the write
-		// above rather than requiring one to be.
+		// The journal has to be caught while it exists. In DELETE mode SQLite
+		// removes it when each transaction commits, so an earlier version of
+		// this spec stat'd it after EnsureReady, got ENOENT, skipped its own
+		// assertion and passed without ever checking the mode it exists to
+		// check. Hold a write transaction open and judge it from inside.
 		journal := dbPath + "-journal"
-		if _, statErr := os.Lstat(journal); statErr == nil {
-			Expect(worldBits(journal)).To(BeZero(), "the rollback journal holds page images of the key")
-		}
-		Expect(worldBits(dir)).To(BeZero(), "and nothing widened the directory")
+		tx, err := b.db.DB.BeginTx(context.Background(), nil)
+		Expect(err).NotTo(HaveOccurred(), "begin a transaction to force the journal into existence")
+		_, err = tx.ExecContext(context.Background(), "CREATE TABLE journal_probe (x INTEGER)")
+		Expect(err).NotTo(HaveOccurred(), "any write inside the transaction will do")
+
+		Expect(journal).To(BeAnExistingFile(), "the rollback journal is on disk mid-transaction")
+		Expect(worldBits(journal)).To(BeZero(), "it holds page images of the key row")
+
+		Expect(tx.Rollback()).To(Succeed(), "and the probe leaves nothing behind")
 	})
 
 	// The window between creating the database and the driver opening it. It is
@@ -415,17 +434,44 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		})
 	})
 
+	// The create-failure branch. Every other collision here is EEXIST, which is
+	// deliberately NOT an error -- the winner of a startup race created the file
+	// under the same rule. Anything else has to surface, or the driver proceeds
+	// to create the database itself at the umask, which is the exposure this
+	// whole file exists to prevent.
+	It("refuses when the database cannot be created for any reason but EEXIST", func() {
+		if os.Geteuid() == 0 {
+			Skip("root can write an unwritable directory")
+		}
+		dir := filepath.Join(GinkgoT().TempDir(), "readonly")
+		Expect(os.Mkdir(dir, 0o500)).To(Succeed(), "a directory the CA cannot write")
+		DeferCleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+		_, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + filepath.Join(dir, "ca.db")})
+
+		Expect(err).To(HaveOccurred(), "EACCES is not EEXIST and must not be swallowed")
+		Expect(err.Error()).To(ContainSubstring("creating sqlite database"), "named for what failed")
+		Expect(err.Error()).To(ContainSubstring("ca.db"), "and which file")
+	})
+
 	// mode=memory is URI syntax, and SQLite honours it only for a "file:" DSN.
 	// On a bare path the driver opens the file anyway, so reading the parameter
 	// there meant the create, the key-file list and the lock were all skipped
 	// while a real database was written at the umask -- issue #351 again,
 	// through a DSN that merely looks like it names no file.
 	It("protects a bare DSN carrying mode=memory, which still creates a file", func() {
-		// 0022 deliberately, against this block's 0077. At 0077 a database the
-		// driver created for itself also lands at 0600, so a "no world bits"
-		// assertion would pass with the protection removed and prove nothing.
-		// At 0022 the two outcomes are 0640 and 0644, and they differ.
-		old := syscall.Umask(0o022)
+		// Set explicitly rather than relying on the enclosing block, which sets
+		// umaskLoose (0022) for every spec here -- so this is the same value,
+		// and it is here to say that this spec *requires* it rather than
+		// inheriting it by luck. An earlier version of this comment claimed the
+		// block ran at 0077 and justified the line by that, which was wrong
+		// about its own fixture.
+		//
+		// 0022 is what makes the assertion below discriminate: at 0077 a
+		// database the driver created for itself also lands at 0600, so "no
+		// world bits" would hold with the protection removed. At 0022 the two
+		// outcomes are 0640 and 0644 and they differ.
+		old := syscall.Umask(umaskLoose)
 		DeferCleanup(func() { syscall.Umask(old) })
 
 		dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
@@ -440,7 +486,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		Expect(dbPath).To(BeAnExistingFile(), "the driver creates a file regardless")
 		Expect(worldBits(dbPath)).To(BeZero(), "and it must not be world-accessible")
 		Expect(b.KeyFilePaths()).To(ContainElement(dbPath), "it is judged as key material")
-		_, ok := sqliteLockDir(dbPath + "?mode=memory")
+		_, ok := lockDirOf(dbPath + "?mode=memory")
 		Expect(ok).To(BeTrue(), "and it takes a same-host lock")
 	})
 
@@ -486,7 +532,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		// And everything derived from the DSN followed it there, rather than
 		// staying beside the link.
 		Expect(b.KeyFilePaths()).To(ContainElement(realDB+"-wal"), "the sidecar names follow the target")
-		lockDir, ok := sqliteLockDir("file:" + link)
+		lockDir, ok := lockDirOf("file:" + link)
 		Expect(ok).To(BeTrue(), "lock directory for the link spelling")
 		Expect(filepath.Dir(lockDir)).To(Equal(filepath.Join(dir, "data")), "beside the target")
 	})
@@ -561,6 +607,11 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(buf.String()).To(ContainSubstring(legacy), "where the old lock directory is")
 			Expect(buf.String()).To(ContainSubstring("upgrade openvox-ca and openvox-ca-ctl together"),
 				"what the operator has to do about it")
+			// The doc names the mtime as what separates a live holder from an
+			// upgrade's leftovers, so the record has to carry it rather than
+			// send the operator to stat a path this already stat'd.
+			Expect(buf.String()).To(ContainSubstring("stranded_modified="),
+				"the signal its own reasoning depends on")
 		})
 
 		// A symlinked *parent* is the case the identity check exists for: the two
@@ -578,7 +629,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 
 			dbPath := filepath.Join(data, "ca.db")
 			Expect(os.WriteFile(dbPath, nil, 0o600)).To(Succeed(), "seed the database")
-			inUse, ok := sqliteLockDir("file:" + dbPath)
+			inUse, ok := lockDirOf("file:" + dbPath)
 			Expect(ok).To(BeTrue(), "lock directory")
 			Expect(os.Mkdir(inUse, 0o700)).To(Succeed(), "the one this version uses")
 
@@ -601,7 +652,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		It("says nothing for a DSN that does not traverse a symlink", func() {
 			dbPath := filepath.Join(GinkgoT().TempDir(), "ca.db")
 			Expect(os.WriteFile(dbPath, nil, 0o600)).To(Succeed(), "seed the database")
-			dir, ok := sqliteLockDir("file:" + dbPath)
+			dir, ok := lockDirOf("file:" + dbPath)
 			Expect(ok).To(BeTrue(), "lock directory")
 			Expect(os.Mkdir(dir, 0o700)).To(Succeed(), "the one this version uses")
 
@@ -624,9 +675,9 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		Expect(os.WriteFile(realDB, nil, 0o600)).To(Succeed(), "seed the database")
 		Expect(os.Symlink(realDB, link)).To(Succeed(), "reach it through a link as well")
 
-		viaLink, ok := sqliteLockDir("file:" + link)
+		viaLink, ok := lockDirOf("file:" + link)
 		Expect(ok).To(BeTrue(), "lock directory for the link spelling")
-		viaTarget, ok := sqliteLockDir("file:" + realDB)
+		viaTarget, ok := lockDirOf("file:" + realDB)
 		Expect(ok).To(BeTrue(), "lock directory for the target spelling")
 
 		Expect(viaLink).To(Equal(viaTarget), "both spellings must lock in the same place")

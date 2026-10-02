@@ -438,7 +438,22 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 	// developer's own environment unless it is cleared: PUPPET_CA_ROLE or
 	// PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS set outside the suite would
 	// change what these specs assert without failing them.
-	BeforeEach(func() { clearServerEnv() })
+	//
+	// clearServerEnv is not enough on its own, and an earlier version of this
+	// comment claimed it was. It deliberately keeps PUPPET_CA_CONFIG, because
+	// callers use that to pin a fixture -- and none of the commands below passes
+	// --config, so resolveConfigFile falls through to PUPPET_CA_CONFIG and then
+	// to /etc/puppet-ca/config.yaml. A host with insecure_allow_world_readable_keys
+	// or a non-filesystem storage_backend in that file changes what these
+	// specs do: the refusal specs would start a server and wait out their
+	// Eventually instead. So the pin is set here, to an empty config, the way
+	// importcacert_test.go does it.
+	BeforeEach(func() {
+		clearServerEnv()
+		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
+		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
+		GinkgoT().Setenv("PUPPET_CA_CONFIG", empty)
+	})
 
 	// worldReadableCADir bootstraps a CA and then widens its private key, which
 	// is the condition the check exists to refuse.
@@ -481,6 +496,16 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		// exit 0, and the child dies in silence.
 		caDir := worldReadableCADir()
 
+		// Stubbed for the same reason its siblings are: if the refusal ever
+		// regresses, this spec reaches the fork, and under `go test` the child
+		// is this test binary re-executed with the test flags -- the suite
+		// running inside itself. The stub is also the assertion that the fork
+		// was not reached at all.
+		var forked bool
+		orig := startDaemonChild
+		startDaemonChild = func(*exec.Cmd) error { forked = true; return nil }
+		DeferCleanup(func() { startDaemonChild = orig })
+
 		cmd := newRootCmd()
 		var out bytes.Buffer
 		cmd.SetOut(&out)
@@ -489,6 +514,7 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 
 		err := cmd.Execute()
 		Expect(err).To(MatchError(ContainSubstring("refusing to start")))
+		Expect(forked).To(BeFalse(), "the refusal has to come before the fork")
 		// Load-bearing only because main.go writes that line to cmd.OutOrStdout();
 		// while it went to os.Stdout through fmt.Printf this buffer was empty
 		// under every behaviour and the assertion could not fail.

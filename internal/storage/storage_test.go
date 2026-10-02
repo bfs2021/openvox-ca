@@ -349,9 +349,14 @@ var _ = Describe("StorageService", func() {
 		})
 
 		It("returns warnings only for loose files in a mixed set", func() {
-			Expect(os.WriteFile(store.PrivateKeyPath("ok-node"), []byte("fake"), 0600)).To(Succeed())
+			// Chmodded rather than seeded at 0644, like the specs above: at
+			// umask 0077 os.WriteFile lands at 0600, the finding disappears and
+			// the spec fails for a reason that is not its subject. This was the
+			// one seed of that shape left in the file.
+			Expect(os.WriteFile(store.PrivateKeyPath("ok-node"), []byte("fake"), storage.FilePermPrivate)).To(Succeed())
 			loosePath := store.PrivateKeyPath("bad-node")
-			Expect(os.WriteFile(loosePath, []byte("fake"), 0644)).To(Succeed())
+			Expect(os.WriteFile(loosePath, []byte("fake"), storage.FilePermPrivate)).To(Succeed())
+			Expect(os.Chmod(loosePath, 0644)).To(Succeed(), "world-readable, whatever the umask")
 			warnings := store.CheckKeyPermissions()
 			Expect(warnings).To(HaveLen(1))
 			Expect(warnings[0].Path).To(Equal(loosePath))
