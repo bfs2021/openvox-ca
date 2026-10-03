@@ -21,7 +21,10 @@
 # Runs on the host and reaches into the two services with `compose exec`,
 # because the hand-over -- one CA stopping, the other starting on what it left
 # -- is the thing under test, and a container cannot do that to its peers.
-# Run from the project root (`mage test:migration` does).
+# Run from the project root (`mage test:migration` does). It builds the ovca
+# image itself, from whatever is in bin/, so run `mage build:all` first when
+# invoking it directly. The inventory snapshot from each phase is kept under
+# .test-output/roundtrip/ for a failed run to be read afterwards.
 #
 # Output: TAP format.  Exit 0 when all pass, exit 1 if any fail.
 
@@ -57,7 +60,8 @@ fi
 # -- Configuration -----------------------------------------------------------
 CADIR=/etc/puppetlabs/puppetserver/ca
 OVCA_URL=http://127.0.0.1:8140
-WORK_DIR=$(mktemp -d /tmp/openvox-ca-roundtrip.XXXXXX)
+WORK_DIR=.test-output/roundtrip
+rm -rf "$WORK_DIR" && mkdir -p "$WORK_DIR"
 
 # Readiness bounds. OpenVox Server is a JVM and takes most of a minute to
 # start; openvox-ca takes a second or two.
@@ -97,7 +101,6 @@ cleanup() {
         failure_log_dump ovca "${_COMPOSE[@]}" >&2
     fi
     "${_COMPOSE[@]}" down --volumes >/dev/null 2>&1
-    rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
 
@@ -123,16 +126,25 @@ wait_ready() {  # service attempts probe-command
     return 1
 }
 
+# start brings a service up and waits for it, leaving the reason in
+# _START_INFO when it does not come up. A failed `up` -- an image that will
+# not pull, a container that cannot be created -- is reported as itself, not
+# as minutes of readiness probes against a container that never existed.
+start() {  # service attempts probe-command
+    local _out
+    if ! _out=$("${_COMPOSE[@]}" up -d "$1" 2>&1); then
+        _START_INFO="compose up -d $1 failed: $_out"
+        return 1
+    fi
+    wait_ready "$1" "$2" "$3" && return 0
+    _START_INFO="not ready after $2 probes"
+    return 1
+}
 start_ovs() {
-    "${_COMPOSE[@]}" up -d ovs >/dev/null 2>&1
-    wait_ready ovs "$OVS_READY_ATTEMPTS" \
+    start ovs "$OVS_READY_ATTEMPTS" \
         'curl -sfk https://localhost:8140/status/v1/simple | grep -q running'
 }
-
-start_ovca() {
-    "${_COMPOSE[@]}" up -d ovca >/dev/null 2>&1
-    wait_ready ovca "$OVCA_READY_ATTEMPTS" "curl -sf ${OVCA_URL}/healthz/ready"
-}
+start_ovca() { start ovca "$OVCA_READY_ATTEMPTS" "curl -sf ${OVCA_URL}/healthz/ready"; }
 
 stop() { "${_COMPOSE[@]}" stop "$1" >/dev/null 2>&1; }
 
@@ -145,11 +157,14 @@ check_inventory() {  # phase service
     local _now="$WORK_DIR/inventory.$1" _prev="$WORK_DIR/inventory.$(( $1 - 1 ))"
     inventory "$2" > "$_now" 2>&1
     if [ -f "$_prev" ]; then
-        if [ "$(head -c "$(wc -c < "$_prev")" "$_now" | cksum)" = "$(cksum < "$_prev")" ]; then
+        head -c "$(wc -c < "$_prev")" "$_now" > "$_now.prefix"
+        if diff -q "$_prev" "$_now.prefix" >/dev/null 2>&1; then
             pass "Phase $1: inventory.txt kept every earlier line byte for byte"
         else
+            # The lines that changed, not both files whole: a whole file is
+            # cut off by fail() long before the difference.
             fail "Phase $1: inventory.txt kept every earlier line byte for byte" \
-                 "before: $(cat "$_prev") after: $(cat "$_now")"
+                 "$(diff "$_prev" "$_now.prefix" 2>&1 | head -6) (snapshots in $WORK_DIR)"
         fi
     fi
     local _bad
@@ -160,12 +175,20 @@ check_inventory() {  # phase service
 }
 
 # -- OpenVox Server operations -----------------------------------------------
-ovs_generate() { ovs_sh "puppetserver ca generate --certname $1" >/dev/null 2>&1; }
+ovs_generate() { ovs_sh "puppetserver ca generate --certname $1" 2>&1; }
 ovs_revoke()   { ovs_sh "puppetserver ca revoke --certname $1" 2>&1; }
 ovs_clean()    { ovs_sh "puppetserver ca clean --certname $1" 2>&1; }
-# ovs_listed reports which section of `puppetserver ca list --all` names $1.
+# ovs_listed reports which section of `puppetserver ca list --all` names $1,
+# and fails, with the listing's output, when the listing itself fails: an
+# empty answer has to mean "not listed", never "could not ask".
 ovs_listed() {
-    ovs_sh 'puppetserver ca list --all' 2>&1 | awk -v n="$1" '
+    local _list
+    if ! _list=$(ovs_sh 'puppetserver ca list --all' 2>&1); then
+        printf 'listing failed: %s' "$_list"
+        return 1
+    fi
+    printf '%s\n' "$_list" | awk -v n="$1" '
+        BEGIN { s = "unsectioned" }
         /^Signed Certificates:/  { s = "signed" }
         /^Revoked Certificates:/ { s = "revoked" }
         /^Requested Certificates:/ { s = "requested" }
@@ -194,13 +217,18 @@ ovca_state() {  # certname -> "signed" / "revoked" / response
     ovca_sh "curl -s ${OVCA_URL}/puppet-ca/v1/certificate_status/$1" 2>&1 \
         | grep -o '"state":"[a-z]*"' | cut -d'"' -f4
 }
-# ovca_crl_lists reports whether the CRL openvox-ca serves lists $1's serial.
-# The serial, not the words "Revoked Certificates": see the migration suite's
-# 6e for why.
+# ovca_crl_lists reports whether the CRL openvox-ca serves lists $1's serial,
+# saying which serial it looked for either way. The serial, not the words
+# "Revoked Certificates": see the migration suite's 6e for why. An empty
+# serial is a failure in its own right, as in 6e: the pattern built from it
+# would match any revoked entry at all.
 ovca_crl_lists() {  # certname
-    ovca_sh "s=\$(openssl x509 -noout -serial -in $CADIR/signed/$1.pem | cut -d= -f2)
+    ovca_sh "s=\$(openssl x509 -noout -serial -in $CADIR/signed/$1.pem 2>/dev/null | cut -d= -f2)
+        [ -n \"\$s\" ] || { echo \"no serial read from signed/$1.pem\"; exit 2; }
         curl -s ${OVCA_URL}/puppet-ca/v1/certificate_revocation_list/ca \
-            | openssl crl -noout -text | grep -qi \"serial number: *0*\${s#0}\\b\""
+            | openssl crl -noout -text | grep -qi \"serial number: *0*\${s#0}\\b\" \
+            || { echo \"serial \$s not in the CRL\"; exit 1; }
+        echo \"serial \$s\""
 }
 
 expect_state() {  # phase certname want
@@ -211,32 +239,35 @@ expect_state() {  # phase certname want
         || fail "Phase $1: openvox-ca reports $2 as $3" "got [$_got]"
 }
 
-expect_ovs_listed() {  # phase certname want ("" for not listed at all)
+expect_ovs_listed() {  # phase certname want ("" for not listed) [what-ran-before]
     local _got _what="lists $2 as $3"
     [ -z "$3" ] && _what="no longer lists $2, which was cleaned"
-    _got=$(ovs_listed "$2")
-    [ "$_got" = "$3" ] \
-        && pass "Phase $1: OpenVox Server $_what" \
-        || fail "Phase $1: OpenVox Server $_what" "got [$_got]"
+    if _got=$(ovs_listed "$2") && [ "$_got" = "$3" ]; then
+        pass "Phase $1: OpenVox Server $_what"
+    else
+        fail "Phase $1: OpenVox Server $_what" "got [$_got]${4:+; before it: $4}"
+    fi
 }
 
 "${_COMPOSE[@]}" down --volumes >/dev/null 2>&1
+_build=$("${_COMPOSE[@]}" build ovca 2>&1) \
+    || bail "openvox-ca image builds" "$(printf '%s' "$_build" | tail -5)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Phase 1 -- OpenVox Server creates the CA, issues and revokes
 # ═════════════════════════════════════════════════════════════════════════════
 printf '# Phase 1 -- OpenVox Server creates the CA\n'
 
-start_ovs || bail "Phase 1: OpenVox Server starts" "not ready after $OVS_READY_ATTEMPTS probes"
+start_ovs || bail "Phase 1: OpenVox Server starts" "$_START_INFO"
 pass "Phase 1: OpenVox Server starts and creates its CA"
 
 for n in a1.example.com a2.example.com a3.example.com; do
-    ovs_generate "$n" \
+    _out=$(ovs_generate "$n") \
         && pass "Phase 1: OpenVox Server issues $n" \
-        || fail "Phase 1: OpenVox Server issues $n"
+        || fail "Phase 1: OpenVox Server issues $n" "$_out"
 done
-ovs_revoke a1.example.com >/dev/null
-expect_ovs_listed 1 a1.example.com revoked
+_out=$(ovs_revoke a1.example.com)
+expect_ovs_listed 1 a1.example.com revoked "$_out"
 check_inventory 1 ovs
 stop ovs
 
@@ -246,7 +277,7 @@ stop ovs
 printf '\n# Phase 2 -- openvox-ca starts on OpenVox Server'"'"'s cadir\n'
 
 start_ovca || bail "Phase 2: openvox-ca starts on OpenVox Server's cadir with no import" \
-    "not ready after $OVCA_READY_ATTEMPTS probes"
+    "$_START_INFO"
 pass "Phase 2: openvox-ca starts on OpenVox Server's cadir with no import"
 
 expect_state 2 a1.example.com revoked
@@ -263,9 +294,9 @@ for n in a2.example.com b1.example.com; do
         && pass "Phase 2: openvox-ca revokes $n by name" \
         || fail "Phase 2: openvox-ca revokes $n by name" "status $_code"
 done
-ovca_crl_lists a2.example.com \
+_out=$(ovca_crl_lists a2.example.com) \
     && pass "Phase 2: the CRL lists the serial OpenVox Server gave a2.example.com" \
-    || fail "Phase 2: the CRL lists the serial OpenVox Server gave a2.example.com"
+    || fail "Phase 2: the CRL lists the serial OpenVox Server gave a2.example.com" "$_out"
 _code=$(ovca_clean a3.example.com)
 [ "$_code" = "204" ] && [ "$(ovca_cert_code a3.example.com)" = "404" ] \
     && pass "Phase 2: openvox-ca cleans a3.example.com, which OpenVox Server issued" \
@@ -279,7 +310,7 @@ stop ovca
 printf '\n# Phase 3 -- OpenVox Server starts on what openvox-ca left\n'
 
 start_ovs || bail "Phase 3: OpenVox Server starts on the untouched cadir" \
-    "not ready after $OVS_READY_ATTEMPTS probes"
+    "$_START_INFO"
 pass "Phase 3: OpenVox Server starts on the untouched cadir"
 
 expect_ovs_listed 3 a2.example.com revoked
@@ -287,14 +318,14 @@ expect_ovs_listed 3 b1.example.com revoked
 expect_ovs_listed 3 b2.example.com signed
 expect_ovs_listed 3 b3.example.com signed
 expect_ovs_listed 3 a3.example.com ""
-ovs_revoke b2.example.com >/dev/null
-expect_ovs_listed 3 b2.example.com revoked
-ovs_clean b3.example.com >/dev/null
-expect_ovs_listed 3 b3.example.com ""
+_out=$(ovs_revoke b2.example.com)
+expect_ovs_listed 3 b2.example.com revoked "$_out"
+_out=$(ovs_clean b3.example.com)
+expect_ovs_listed 3 b3.example.com "" "$_out"
 for n in c1.example.com c2.example.com; do
-    ovs_generate "$n" \
+    _out=$(ovs_generate "$n") \
         && pass "Phase 3: OpenVox Server issues $n" \
-        || fail "Phase 3: OpenVox Server issues $n"
+        || fail "Phase 3: OpenVox Server issues $n" "$_out"
 done
 check_inventory 3 ovs
 stop ovs
@@ -326,7 +357,7 @@ _rebuild_rc=$?
             "exit $_rebuild_rc: $(printf '%s' "$_rebuild" | tail -5)"
 
 start_ovca || bail "Phase 4: openvox-ca starts after the rebuild" \
-    "not ready after $OVCA_READY_ATTEMPTS probes"
+    "$_START_INFO"
 pass "Phase 4: openvox-ca starts after the rebuild"
 
 expect_state 4 b2.example.com revoked
@@ -344,9 +375,9 @@ for n in c1.example.com d1.example.com; do
         && pass "Phase 4: openvox-ca revokes $n by name" \
         || fail "Phase 4: openvox-ca revokes $n by name" "status $_code"
 done
-ovca_crl_lists c1.example.com \
+_out=$(ovca_crl_lists c1.example.com) \
     && pass "Phase 4: the CRL lists the serial OpenVox Server gave c1.example.com" \
-    || fail "Phase 4: the CRL lists the serial OpenVox Server gave c1.example.com"
+    || fail "Phase 4: the CRL lists the serial OpenVox Server gave c1.example.com" "$_out"
 _code=$(ovca_clean c2.example.com)
 [ "$_code" = "204" ] && [ "$(ovca_cert_code c2.example.com)" = "404" ] \
     && pass "Phase 4: openvox-ca cleans c2.example.com, which OpenVox Server issued" \
