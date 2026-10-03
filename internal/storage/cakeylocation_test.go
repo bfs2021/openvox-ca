@@ -236,6 +236,48 @@ var _ = Describe("Filesystem CA key location", func() {
 		})
 	})
 
+	Context("when ca_key.pem is a link that leads nowhere", func() {
+		// A dangling link where the key is expected is a key that should be
+		// there. It must fail, never read as absent: that would hand every
+		// operation the private/ copy, or let a write or a delete remove it.
+		BeforeEach(func() {
+			Expect(os.Symlink(filepath.Join(dir, "gone.pem"), top)).To(Succeed())
+			Expect(os.WriteFile(legacy, []byte("old-key"), 0o600)).To(Succeed())
+		})
+
+		It("refuses to read either", func() {
+			_, err := store.GetCAKey(ctx)
+			Expect(err).To(MatchError(fs.ErrNotExist))
+		})
+
+		It("refuses to write, and leaves private/ca_key.pem alone", func() {
+			Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(MatchError(fs.ErrNotExist))
+			Expect(os.ReadFile(legacy)).To(Equal([]byte("old-key")))
+		})
+
+		It("refuses to delete, and leaves private/ca_key.pem alone", func() {
+			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(MatchError(fs.ErrNotExist))
+			Expect(os.ReadFile(legacy)).To(Equal([]byte("old-key")))
+		})
+	})
+
+	It("refuses when it cannot tell whether private/ca_key.pem is there", func() {
+		// Not knowing is not "absent": resolving to the top-level path would
+		// give a fresh key's location to a cadir that may already have one.
+		if os.Geteuid() == 0 {
+			Skip("root searches a directory whatever its mode")
+		}
+		Expect(os.WriteFile(legacy, []byte("old-key"), 0o600)).To(Succeed())
+		privDir := filepath.Dir(legacy)
+		Expect(os.Chmod(privDir, 0o600)).To(Succeed())
+		DeferCleanup(os.Chmod, privDir, os.FileMode(0o750))
+
+		_, err := store.GetCAKey(ctx)
+		Expect(err).To(MatchError(fs.ErrPermission))
+		Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(MatchError(fs.ErrPermission))
+		Expect(top).NotTo(BeAnExistingFile())
+	})
+
 	Describe("CheckKeyPermissions", func() {
 		It("reports a top-level CA key readable beyond its owner", func() {
 			Expect(os.WriteFile(top, []byte("key"), 0o644)).To(Succeed())

@@ -51,12 +51,11 @@ const fsLockDir = "locks"
 
 // fsLayout maps logical keys to paths relative to the backend's baseDir.
 // Keys of the form "csr/<subject>" and "cert/<subject>" are handled
-// explicitly in pathFor, as is KeyCAKey, which caKeyLocation resolves; its
-// entry here records the location a fresh cadir gets.
+// explicitly in pathFor, as is KeyCAKey, which caKeyLocation resolves (a fresh
+// cadir gets fsCAKeyPath).
 var fsLayout = map[string]string{
 	KeyCACert:        "ca_crt.pem",
 	KeyCAPubKey:      "ca_pub.pem",
-	KeyCAKey:         fsCAKeyPath,
 	KeyCRL:           "ca_crl.pem",
 	KeySerial:        "serial",
 	KeyInventory:     "inventory.txt",
@@ -205,19 +204,13 @@ func (b *FilesystemBackend) caKeyLocation() (string, error) {
 func (b *FilesystemBackend) checkCAKeyConflict() error {
 	top := filepath.Join(b.baseDir, fsCAKeyPath)
 	legacy := filepath.Join(b.baseDir, fsLegacyCAKeyPath)
-	topData, err := os.ReadFile(top)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
+	topData, present, err := readCAKeyCopy(top)
+	if err != nil || !present {
 		return err
 	}
 	defer clear(topData)
-	legacyData, err := os.ReadFile(legacy)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
+	legacyData, present, err := readCAKeyCopy(legacy)
+	if err != nil || !present {
 		return err
 	}
 	defer clear(legacyData)
@@ -333,6 +326,23 @@ func (b *FilesystemBackend) Delete(ctx context.Context, key string) error {
 		}
 	}
 	return os.Remove(p)
+}
+
+// readCAKeyCopy reads one copy of the CA key, reporting it absent only when
+// nothing at all is at p. A link there that leads nowhere is an error, as
+// caKeyLocation treats it: read as absent, it would pass the conflict check and
+// let a write or a delete remove the other copy, which may be the only key.
+func readCAKeyCopy(p string) (data []byte, present bool, err error) {
+	if _, err := os.Lstat(p); errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	} else if err != nil {
+		return nil, false, err
+	}
+	data, err = os.ReadFile(p)
+	if err != nil {
+		return nil, true, err
+	}
+	return data, true, nil
 }
 
 // removeLegacyCAKeyCopy prepares a write or a delete of the CA key at p. It
