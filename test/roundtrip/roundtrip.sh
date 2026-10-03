@@ -146,7 +146,12 @@ start_ovs() {
 }
 start_ovca() { start ovca "$OVCA_READY_ATTEMPTS" "curl -sf ${OVCA_URL}/healthz/ready"; }
 
-stop() { "${_COMPOSE[@]}" stop "$1" >/dev/null 2>&1; }
+# stop ends the run if a CA does not stop: the next phase would otherwise run
+# beside it on the same cadir, or reuse it and call that a fresh start.
+stop() {
+    local _out
+    _out=$("${_COMPOSE[@]}" stop "$1" 2>&1) || bail "$1 stops for the hand-over" "$_out"
+}
 
 # The inventory as the directory holds it, read through whichever service is up.
 inventory() { "${_COMPOSE[@]}" exec -T "$1" cat "$CADIR/inventory.txt"; }
@@ -154,17 +159,28 @@ inventory() { "${_COMPOSE[@]}" exec -T "$1" cat "$CADIR/inventory.txt"; }
 # check_inventory asserts inventory.txt only grew since the last phase, and is
 # in OpenVox Server's format throughout.
 check_inventory() {  # phase service
-    local _now="$WORK_DIR/inventory.$1" _prev="$WORK_DIR/inventory.$(( $1 - 1 ))"
-    inventory "$2" > "$_now" 2>&1
+    local _now="$WORK_DIR/inventory.$1" _prev="$WORK_DIR/inventory.$(( $1 - 1 ))" _err _rc
+    # Read failures end the run: the snapshot is the next phase's baseline,
+    # and error text saved as one would fail two phases for one fault.
+    _err=$(inventory "$2" 2>&1 > "$_now") \
+        || bail "Phase $1: inventory.txt can be read" "$_err"
     if [ -f "$_prev" ]; then
         head -c "$(wc -c < "$_prev")" "$_now" > "$_now.prefix"
-        if diff -q "$_prev" "$_now.prefix" >/dev/null 2>&1; then
+        # diff's exit status read in full, as assert_files_identical in
+        # test/fixture-commands.sh does (this host-side suite does not source
+        # it): 1 is a difference, 2 or more is a diff that could not answer.
+        _err=$(diff "$_prev" "$_now.prefix" 2>&1)
+        _rc=$?
+        if [ "$_rc" -eq 0 ]; then
             pass "Phase $1: inventory.txt kept every earlier line byte for byte"
-        else
+        elif [ "$_rc" -eq 1 ]; then
             # The lines that changed, not both files whole: a whole file is
             # cut off by fail() long before the difference.
             fail "Phase $1: inventory.txt kept every earlier line byte for byte" \
-                 "$(diff "$_prev" "$_now.prefix" 2>&1 | head -6) (snapshots in $WORK_DIR)"
+                 "$(printf '%s' "$_err" | head -6) (snapshots in $WORK_DIR)"
+        else
+            fail "Phase $1: inventory.txt kept every earlier line byte for byte" \
+                 "diff could not run (exit $_rc): $_err"
         fi
     fi
     local _bad
@@ -196,9 +212,10 @@ ovs_listed() {
 }
 
 # -- openvox-ca operations ---------------------------------------------------
-ovca_issue() {  # certname -> HTTP status of the CSR submission
+ovca_issue() {  # certname -> HTTP status of the CSR submission, or openssl's error
     ovca_sh "set -e; d=\$(mktemp -d)
-        openssl req -new -newkey rsa:2048 -nodes -keyout \$d/k -subj /CN=$1 -out \$d/csr 2>/dev/null
+        openssl req -new -newkey rsa:2048 -nodes -keyout \$d/k -subj /CN=$1 -out \$d/csr 2>\$d/err \
+            || { echo \"openssl: \$(cat \$d/err)\"; exit 1; }
         curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: text/plain' \
             --data-binary @\$d/csr ${OVCA_URL}/puppet-ca/v1/certificate_request/$1"
 }
@@ -213,9 +230,15 @@ ovca_clean() {  # certname -> HTTP status
 ovca_cert_code() {  # certname -> HTTP status of fetching its certificate
     ovca_sh "curl -s -o /dev/null -w '%{http_code}' ${OVCA_URL}/puppet-ca/v1/certificate/$1"
 }
-ovca_state() {  # certname -> "signed" / "revoked" / response
-    ovca_sh "curl -s ${OVCA_URL}/puppet-ca/v1/certificate_status/$1" 2>&1 \
-        | grep -o '"state":"[a-z]*"' | cut -d'"' -f4
+ovca_state() {  # certname -> "signed" / "revoked", or the response when it has no state
+    local _body _state
+    _body=$(ovca_sh "curl -sS -w ' (HTTP %{http_code})' ${OVCA_URL}/puppet-ca/v1/certificate_status/$1" 2>&1)
+    _state=$(printf '%s' "$_body" | grep -o '"state":"[a-z]*"' | cut -d'"' -f4)
+    if [ -n "$_state" ]; then
+        printf '%s' "$_state"
+    else
+        printf 'no state in: %s' "$(printf '%s' "$_body" | head -c 200)"
+    fi
 }
 # ovca_crl_lists reports whether the CRL openvox-ca serves lists $1's serial,
 # saying which serial it looked for either way. The serial, not the words
@@ -229,6 +252,30 @@ ovca_crl_lists() {  # certname
             | openssl crl -noout -text | grep -qi \"serial number: *0*\${s#0}\\b\" \
             || { echo \"serial \$s not in the CRL\"; exit 1; }
         echo \"serial \$s\""
+}
+
+# expect_issued and expect_cleaned check both halves of an operation, and say
+# what each half returned: reporting only the first would describe a failure
+# of the second as "status 200".
+expect_issued() {  # phase certname
+    local _code _state
+    _code=$(ovca_issue "$2")
+    _state=$(ovca_state "$2")
+    if [ "$_code" = "200" ] && [ "$_state" = "signed" ]; then
+        pass "Phase $1: openvox-ca issues $2"
+    else
+        fail "Phase $1: openvox-ca issues $2" "CSR submission: $_code; state: $_state"
+    fi
+}
+expect_cleaned() {  # phase certname what
+    local _code _fetch
+    _code=$(ovca_clean "$2")
+    _fetch=$(ovca_cert_code "$2")
+    if [ "$_code" = "204" ] && [ "$_fetch" = "404" ]; then
+        pass "Phase $1: openvox-ca cleans $2, $3"
+    else
+        fail "Phase $1: openvox-ca cleans $2, $3" "clean: $_code; certificate fetch afterwards: $_fetch"
+    fi
 }
 
 expect_state() {  # phase certname want
@@ -283,10 +330,7 @@ pass "Phase 2: openvox-ca starts on OpenVox Server's cadir with no import"
 expect_state 2 a1.example.com revoked
 expect_state 2 a2.example.com signed
 for n in b1.example.com b2.example.com b3.example.com; do
-    _code=$(ovca_issue "$n")
-    [ "$_code" = "200" ] && [ "$(ovca_state "$n")" = "signed" ] \
-        && pass "Phase 2: openvox-ca issues $n" \
-        || fail "Phase 2: openvox-ca issues $n" "CSR submission status $_code"
+    expect_issued 2 "$n"
 done
 for n in a2.example.com b1.example.com; do
     _code=$(ovca_revoke "$n")
@@ -297,10 +341,7 @@ done
 _out=$(ovca_crl_lists a2.example.com) \
     && pass "Phase 2: the CRL lists the serial OpenVox Server gave a2.example.com" \
     || fail "Phase 2: the CRL lists the serial OpenVox Server gave a2.example.com" "$_out"
-_code=$(ovca_clean a3.example.com)
-[ "$_code" = "204" ] && [ "$(ovca_cert_code a3.example.com)" = "404" ] \
-    && pass "Phase 2: openvox-ca cleans a3.example.com, which OpenVox Server issued" \
-    || fail "Phase 2: openvox-ca cleans a3.example.com, which OpenVox Server issued" "status $_code"
+expect_cleaned 2 a3.example.com "which OpenVox Server issued"
 check_inventory 2 ovca
 stop ovca
 
@@ -362,13 +403,12 @@ pass "Phase 4: openvox-ca starts after the rebuild"
 
 expect_state 4 b2.example.com revoked
 expect_state 4 c1.example.com signed
-[ "$(ovca_cert_code b3.example.com)" = "404" ] \
+_fetch=$(ovca_cert_code b3.example.com)
+[ "$_fetch" = "404" ] \
     && pass "Phase 4: openvox-ca no longer serves b3.example.com, which OpenVox Server cleaned" \
-    || fail "Phase 4: openvox-ca no longer serves b3.example.com, which OpenVox Server cleaned"
-_code=$(ovca_issue d1.example.com)
-[ "$_code" = "200" ] && [ "$(ovca_state d1.example.com)" = "signed" ] \
-    && pass "Phase 4: openvox-ca issues d1.example.com" \
-    || fail "Phase 4: openvox-ca issues d1.example.com" "CSR submission status $_code"
+    || fail "Phase 4: openvox-ca no longer serves b3.example.com, which OpenVox Server cleaned" \
+            "certificate fetch: $_fetch"
+expect_issued 4 d1.example.com
 for n in c1.example.com d1.example.com; do
     _code=$(ovca_revoke "$n")
     [ "$_code" = "204" ] \
@@ -378,10 +418,7 @@ done
 _out=$(ovca_crl_lists c1.example.com) \
     && pass "Phase 4: the CRL lists the serial OpenVox Server gave c1.example.com" \
     || fail "Phase 4: the CRL lists the serial OpenVox Server gave c1.example.com" "$_out"
-_code=$(ovca_clean c2.example.com)
-[ "$_code" = "204" ] && [ "$(ovca_cert_code c2.example.com)" = "404" ] \
-    && pass "Phase 4: openvox-ca cleans c2.example.com, which OpenVox Server issued" \
-    || fail "Phase 4: openvox-ca cleans c2.example.com, which OpenVox Server issued" "status $_code"
+expect_cleaned 4 c2.example.com "which OpenVox Server issued"
 check_inventory 4 ovca
 
 finish
