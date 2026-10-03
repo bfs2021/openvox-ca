@@ -331,7 +331,12 @@ Two conditions apply, and neither is about the directory's contents.
    key OpenVox Server created group-readable for `puppet`, and the files
    openvox-ca creates are private to its own user, so OpenVox Server could not
    read them. Run openvox-ca as `puppet` with a systemd drop-in (`User=puppet`,
-   `Group=puppet`) for as long as the two share a cadir.
+   `Group=puppet`, and `SupplementaryGroups=puppet-ca` so it can still read
+   its `0640 root:puppet-ca` configuration) for as long as the two share a
+   cadir. That gives up the dedicated-user isolation [the shipped unit's
+   hardening](systemd.md#hardening) describes: OpenVox Server, still running as
+   `puppet`, can read openvox-ca's `private/` files, including the inventory
+   integrity key.
 2. **The CA key must be a plain PEM file in the cadir**, because that is the
    only kind OpenVox Server can use. With `encrypt_ca_key`, `ca_key_file`
    pointing elsewhere, or the [OpenBao Transit](openbao-transit.md) key

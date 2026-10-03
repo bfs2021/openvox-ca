@@ -81,7 +81,19 @@ override it while the two share a cadir:
 [Service]
 User=puppet
 Group=puppet
+SupplementaryGroups=puppet-ca
 ```
+
+`SupplementaryGroups=puppet-ca` keeps `/etc/puppet-ca/config.yaml` readable:
+[running under systemd](systemd.md) installs it `0640 root:puppet-ca`, and
+without the group the service cannot read its own configuration.
+
+This gives up the dedicated `puppet-ca` user that [the shipped unit's
+hardening](systemd.md#hardening) relies on. OpenVox Server keeps running as
+`puppet` after step 6, so it can read what openvox-ca keeps in the cadir's
+`private/`: the inventory integrity key and any server-generated keys, as well
+as the CA key, which it could read already. Importing into a separate directory
+instead (step 5) keeps the two users apart.
 
 ## Step 4: Point openvox-ca at the CA directory
 
@@ -259,8 +271,8 @@ openvox-ca \
   --puppet-server puppet-master.example.com
 ```
 
-If migrating in-place (same hostname and port), agents will connect to the
-new CA without any reconfiguration.
+Whether agents need `ca_server` changed depends on where openvox-ca runs; see
+[Agent configuration](#agent-configuration).
 
 For a permanent installation, run it as a service rather than from a shell —
 see [running under systemd](systemd.md), which ships a hardened unit. One thing

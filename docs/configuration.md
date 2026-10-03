@@ -2313,6 +2313,8 @@ See [the status response](api.md#certificate-status) for the exact rendering.
 ```text
 <cadir>/
   ca_crt.pem          CA certificate
+  ca_key.pem          CA private key (mode 0600; encrypted PEM when --encrypt-ca-key;
+                      private/ca_key.pem instead where an existing cadir keeps it there)
   ca_pub.pem          CA public key
   ca_crl.pem          Certificate Revocation List
   inventory.txt       Signed certificate log (hex serial, dates, subject per line)
@@ -2323,7 +2325,6 @@ See [the status response](api.md#certificate-status) for the exact rendering.
   locks/              Same-host lock files (mode 0600; empty but for the store-wide
                       instance lock, which records its holder) — see below
   private/
-    ca_key.pem              CA private key (mode 0600; encrypted PEM when --encrypt-ca-key)
     {subject}_key.pem       Server-side generated private keys (mode 0600)
 ```
 

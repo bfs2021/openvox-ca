@@ -891,6 +891,11 @@ is the one preparation step for returning to openvox-ca:
    directory, and nothing else.
 3. Run it again with `--yes-re-bless`, then start openvox-ca.
 
+Run both as the user OpenVox Server and openvox-ca share
+(`sudo -u puppet openvox-ca rebuild-inventory-hmac …`), not as root and not as
+`puppet-ca`. The rebuild does no `chown`, as described below, so a file it
+writes as anyone else is one the server cannot read.
+
 Nothing else in the directory needs changing: openvox-ca reads OpenVox Server's
 inventory lines as they are.
 
