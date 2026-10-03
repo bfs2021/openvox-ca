@@ -250,6 +250,11 @@ var _ = Describe("Filesystem CA key location", func() {
 			Expect(err).To(MatchError(fs.ErrNotExist))
 		})
 
+		It("names the link, not private/ca_key.pem, as the key's location", func() {
+			// What diagnostics report, and the file a fix belongs in.
+			Expect(store.CAKeyPath()).To(Equal(top))
+		})
+
 		It("refuses to write, and leaves private/ca_key.pem alone", func() {
 			Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(MatchError(fs.ErrNotExist))
 			Expect(os.ReadFile(legacy)).To(Equal([]byte("old-key")))
