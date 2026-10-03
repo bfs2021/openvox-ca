@@ -24,10 +24,11 @@ FROM quay.io/centos/centos:stream10
 # docker/puppet/ca-entrypoint-redis.sh, and test/fixture-commands.sh itself,
 # which uses mktemp, rm, sort, tr and sed -- though the suites call those
 # heavily too, so the helper is an additional consumer rather than the reason
-# any of them is declared. Two more --
-# test/puppet/puppet-stack.sh and test/backends/redis-stack.sh -- run on the
-# host and reach in with `compose exec`, which is why `sh` matters below even
-# though nothing in the image's own scripts uses it.
+# any of them is declared. Three more --
+# test/puppet/puppet-stack.sh, test/backends/redis-stack.sh and
+# test/roundtrip/roundtrip.sh -- run on the host and reach in with
+# `compose exec`, which is why `sh` matters below even though nothing in the
+# image's own scripts uses it.
 #
 #   bash             the interpreter every in-container script is invoked with,
 #                    and the owner of /bin/sh, which the two host-side suites

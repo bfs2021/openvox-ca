@@ -5582,9 +5582,12 @@ func (Test) MigrationHelpers() error {
 }
 
 // Migration builds the openvox-ca image and runs the migration integration test
-// suite: imports a genuine VoxPupuli Puppet Server CA into openvox-ca, then
-// verifies that the migrated CA can serve old certs, sign new ones, revoke,
-// and clean.
+// suites. The first imports a genuine VoxPupuli Puppet Server CA into
+// openvox-ca, then verifies that the migrated CA can serve old certs, sign new
+// ones, revoke, and clean. The second hands one cadir between OpenVox Server
+// and openvox-ca and back twice, with each issuing and revoking on what the
+// other left (test/roundtrip/roundtrip.sh). It runs even when the first fails,
+// so a red job reports both.
 //
 // Requires a container runtime and network access to pull
 // docker.io/voxpupuli/puppetserver:latest on first run.
@@ -5603,7 +5606,12 @@ func (Test) Migration() error {
 	fmt.Println("Tearing down migration stack...")
 	_ = runCompose(nil, "-f", "test/compose-migration.yml", "down", "--volumes")
 
-	return err
+	// The round trip uses the image built above, under the same tag; it
+	// stops and starts its two services itself and tears its stack down.
+	fmt.Println("Running OpenVox Server round-trip tests...")
+	rtErr := sh.RunV("bash", "test/roundtrip/roundtrip.sh")
+
+	return errors.Join(err, rtErr)
 }
 
 // BackendsRedis builds the openvox-ca image and runs the full Puppet stack
