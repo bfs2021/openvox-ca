@@ -250,10 +250,10 @@ func (s CertSpec) Validate() error {
 			"(%d > %d)", s.Subject, n, maxDNSAltNames)
 	}
 	if s.TTL < 0 {
-		return fmt.Errorf("managed certificate %s: TTL must not be negative", s.Subject)
+		return fmt.Errorf("managed certificate %s: ttl must not be negative", s.Subject)
 	}
 	if s.RenewBefore <= 0 {
-		return fmt.Errorf("managed certificate %s: RenewBefore must be positive, "+
+		return fmt.Errorf("managed certificate %s: renew_before must be positive, "+
 			"or the certificate is only replaced after it has already expired", s.Subject)
 	}
 	// Refused here as well as at generation. issueLeafLocked enforces the
@@ -265,7 +265,7 @@ func (s CertSpec) Validate() error {
 		return fmt.Errorf("managed certificate %s: %w", s.Subject, err)
 	}
 	if s.SupersedeAfter != nil && *s.SupersedeAfter < 0 {
-		return fmt.Errorf("managed certificate %s: SupersedeAfter must not be negative "+
+		return fmt.Errorf("managed certificate %s: revoke_after must not be negative "+
 			"(zero revokes the predecessor inside the reconcile pass)", s.Subject)
 	}
 	return nil
