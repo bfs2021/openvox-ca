@@ -31,8 +31,8 @@ FROM quay.io/centos/centos:stream10
 # image's own scripts uses it.
 #
 #   bash             the interpreter every in-container script is invoked with,
-#                    and the owner of /bin/sh, which the two host-side suites
-#                    exec into this image
+#                    and the owner of /bin/sh, which the three host-side
+#                    suites exec into this image
 #   coreutils-single basename cat chmod cp cut date dirname head ls mkdir
 #                    mktemp rm seq sleep sort tail touch tr wc
 #   curl             HTTP API exercise, and the `curl` healthcheck of every

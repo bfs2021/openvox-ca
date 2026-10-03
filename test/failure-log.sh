@@ -3,7 +3,9 @@
 #
 # Sourced by test/backends/redis-stack.sh and test/puppet/puppet-stack.sh,
 # both of which need a failing service's own account of what went wrong before
-# teardown makes it unrecoverable.
+# teardown makes it unrecoverable, and by test/roundtrip/roundtrip.sh. That one
+# restarts its services deliberately, once per phase, so for it the "start
+# attempt" this file counts is a phase, and its failure is in the tail.
 #
 # Sourced, where those two harnesses deliberately keep independent *copies* of
 # their engine detection, argument parsing and TAP helpers: each of those is

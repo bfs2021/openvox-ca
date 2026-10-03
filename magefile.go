@@ -5512,7 +5512,8 @@ func (Test) Bench() error {
 //
 // Runs on the host in under a second and needs no container runtime, so it is
 // a separate target rather than a step inside Puppet or BackendsRedis -- both
-// of which it covers, since both harnesses share the helper. CI runs it in the
+// of which it covers, since both harnesses share the helper, as does the
+// round-trip suite Migration runs. CI runs it in the
 // unit job, in parallel with those two rather than gating them; the note on
 // that step in ci.yml says why gating would be the wrong trade here.
 func (Test) FailureLogHelpers() error {
