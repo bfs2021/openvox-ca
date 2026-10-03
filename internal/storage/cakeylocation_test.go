@@ -116,6 +116,20 @@ var _ = Describe("Filesystem CA key location", func() {
 			Expect(store.GetCAKey(ctx)).To(Equal([]byte("new-key")))
 		})
 
+		It("changes nothing when the private/ copy cannot be removed", func() {
+			// The old copy goes first, so a failure there leaves the pair
+			// as it was rather than a new key beside an old one.
+			if os.Geteuid() == 0 {
+				Skip("root removes a file whatever the directory's mode")
+			}
+			privDir := filepath.Dir(legacy)
+			Expect(os.Chmod(privDir, 0o500)).To(Succeed())
+			DeferCleanup(os.Chmod, privDir, os.FileMode(0o750))
+
+			Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(MatchError(fs.ErrPermission))
+			Expect(store.GetCAKey(ctx)).To(Equal([]byte("same-key")))
+		})
+
 		It("removes both copies when the key is deleted", func() {
 			// Left behind, the second copy would be found and used.
 			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(Succeed())
@@ -139,9 +153,11 @@ var _ = Describe("Filesystem CA key location", func() {
 			Expect(err).To(MatchError(ContainSubstring(legacy)), "the error must name both files")
 		})
 
-		It("refuses to say whether a key exists", func() {
-			_, err := store.HasCAKey(ctx)
-			Expect(err).To(MatchError(storage.ErrCAKeyConflict))
+		It("still says a key exists, which needs neither file read", func() {
+			// The refusal belongs to the operations that handle the key:
+			// answering "is there a key" must not read it (see the
+			// "without reading the key" Context below).
+			Expect(store.HasCAKey(ctx)).To(BeTrue())
 		})
 
 		It("refuses to overwrite either, and changes neither", func() {
@@ -175,9 +191,8 @@ var _ = Describe("Filesystem CA key location", func() {
 
 			_, err := store.GetCAKey(ctx)
 			Expect(err).To(MatchError(fs.ErrPermission))
-			_, err = store.HasCAKey(ctx)
-			Expect(err).To(MatchError(fs.ErrPermission))
 			Expect(store.SaveCAKey(ctx, []byte("third-key"))).To(MatchError(fs.ErrPermission))
+			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(MatchError(fs.ErrPermission))
 			Expect(os.ReadFile(legacy)).To(Equal([]byte("another-key")))
 		})
 
@@ -189,6 +204,35 @@ var _ = Describe("Filesystem CA key location", func() {
 
 			_, err := store.GetCAKey(ctx)
 			Expect(err).To(MatchError(fs.ErrPermission))
+		})
+	})
+
+	// The network-facing frontend never has the CA key in its address space
+	// (docs/ca-key-security.md), yet it runs CheckKeyPermissions at startup
+	// and reaches HasCAKey from Init. Neither may read the key to answer. A
+	// key at mode 0044 tells the two apart: its owner cannot read it, while
+	// the mode is visible to stat. Code that read the file would see a
+	// permission error and report nothing, or refuse.
+	Context("answering without reading the key", func() {
+		BeforeEach(func() {
+			if os.Geteuid() == 0 {
+				Skip("root reads a file whatever its mode")
+			}
+			Expect(os.WriteFile(top, []byte("one-key"), 0o600)).To(Succeed())
+			Expect(os.WriteFile(legacy, []byte("another-key"), 0o600)).To(Succeed())
+			Expect(os.Chmod(top, 0o044)).To(Succeed())
+			Expect(os.Chmod(legacy, 0o044)).To(Succeed())
+			DeferCleanup(os.Chmod, top, os.FileMode(0o600))
+			DeferCleanup(os.Chmod, legacy, os.FileMode(0o600))
+		})
+
+		It("reports the key's permissions", func() {
+			Expect(store.CheckKeyPermissions()).To(ContainElement(
+				storage.KeyPermWarning{Path: top, Mode: 0o044}))
+		})
+
+		It("says a key exists", func() {
+			Expect(store.HasCAKey(ctx)).To(BeTrue())
 		})
 	})
 
