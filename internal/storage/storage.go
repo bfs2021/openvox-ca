@@ -543,12 +543,20 @@ var ErrMalformedSerial = errors.New("malformed serial")
 // canonical form this CA stores and logs: uppercase hex, no leading zeros, and
 // no separators. It rejects anything that is not a non-negative hexadecimal
 // integer, so it doubles as the input validator for operator-supplied serials.
+// One leading "0x" or "0X" is accepted: OpenVox Server writes its inventory
+// serials that way, and the filesystem backend now does too, so it is the form
+// an operator copying a serial from inventory.txt will have.
 //
 // It is the storage-layer twin of the ca package's serialHexStr, which
 // canonicalises a *big.Int that has already been parsed; this one starts from
 // text.
 func NormaliseSerial(serial string) (string, error) {
 	trimmed := strings.TrimSpace(serial)
+	if rest, ok := strings.CutPrefix(trimmed, "0x"); ok {
+		trimmed = rest
+	} else if rest, ok := strings.CutPrefix(trimmed, "0X"); ok {
+		trimmed = rest
+	}
 	n, ok := new(big.Int).SetString(trimmed, 16)
 	if trimmed == "" || !ok || n.Sign() < 0 {
 		return "", fmt.Errorf("%w: %q is not a hexadecimal serial number", ErrMalformedSerial, serial)
@@ -1629,18 +1637,11 @@ func openVoxInventoryLine(e InventoryEntry, raw string) string {
 // inventorySerial normalises a blob inventory serial to NormaliseSerial's
 // canonical form, which is also serialHexStr's in the ca package, so that
 // OpenVox Server's "0x0002" and a zero-padded "0002" both read as "2" and
-// compare numerically. The "0x" prefix is stripped here rather than accepted by
-// NormaliseSerial, which validates operator input and deliberately refuses it.
-// A serial that is not hexadecimal is returned unchanged, so the readers that
-// already report malformed serials still see, and report, the original text.
+// compare numerically. A serial that is not hexadecimal is returned unchanged,
+// so the readers that already report malformed serials still see, and report,
+// the original text.
 func inventorySerial(raw string) string {
-	hex := raw
-	if rest, ok := strings.CutPrefix(raw, "0x"); ok {
-		hex = rest
-	} else if rest, ok := strings.CutPrefix(raw, "0X"); ok {
-		hex = rest
-	}
-	if n, err := NormaliseSerial(hex); err == nil {
+	if n, err := NormaliseSerial(raw); err == nil {
 		return n
 	}
 	return raw

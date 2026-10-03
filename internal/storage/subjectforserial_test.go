@@ -118,6 +118,7 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		Entry("query lowercase, entry padded uppercase", "ff", "second"),
 		Entry("query uppercase, entry lowercase", "1B", "third"),
 		Entry("query surrounded by whitespace", "  0A\n", "first"),
+		Entry("query 0x-prefixed, as inventory.txt writes it", "0x000A", "first"),
 	)
 
 	It("wraps fs.ErrNotExist for a serial no entry carries", func() {
@@ -177,7 +178,7 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		Entry("non-hex letters", "nope"),
 		Entry("interior newline", "0A\nforged"),
 		Entry("interior U+2028", "0A\u2028forged"),
-		Entry("0x prefix", "0x1A"),
+		Entry("a bare 0x", "0x"),
 		Entry("negative", "-1A"),
 		Entry("empty", ""),
 	)
@@ -190,7 +191,7 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		Entry("empty", ""),
 		Entry("whitespace only", "   "),
 		Entry("non-hex letters", "nope"),
-		Entry("0x prefix", "0x0A"),
+		Entry("two 0x prefixes", "0x0x0A"),
 		Entry("negative", "-1"),
 		Entry("embedded space", "0 A"),
 	)
