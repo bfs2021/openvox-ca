@@ -54,23 +54,29 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 	// `openbao:` block is `openbao.tls_cert_file` rather than a bare
 	// `tls_cert_file` that could be mistaken for the serving pair.
 	notReserved := map[string]string{
-		// Client TLS material for reaching a storage backend or a key provider.
-		// Overwriting one breaks this CA's connection to its own backend, which
-		// is loud and recoverable -- the file is re-copyable from wherever it
-		// was provisioned. That is a different class from the CA key, which is
+		// CLIENT TLS material for reaching a storage backend or a key provider:
+		// the certificate and key this CA presents, not the anchor it verifies
+		// with. Overwriting one breaks this CA's connection to its own backend,
+		// which is loud and recoverable -- the file is re-copyable from wherever
+		// it was provisioned. That is a different class from the CA key, which is
 		// not reconstructible from anything. Reserving them is defensible and
 		// may happen later; the decision today is that the check stays a
 		// backstop over material that cannot be replaced.
-		"etcd_tls_ca_file":               "backend client credential, replaceable",
+		//
+		// The four *_tls_ca_file settings used to be in this list, under this
+		// same reason, and that was wrong: "loud and recoverable" does not
+		// describe a trust anchor. Writing this CA's chain over one is silent
+		// whenever the backend's serving certificate was issued by this CA, and
+		// it leaves the backend link anchored here. They are now reserved by
+		// caOwnedPaths, consistently with client_ca[].file, which was always
+		// reserved for exactly that reason -- the two lists had been applying
+		// opposite rules to the same kind of file.
 		"etcd_tls_cert_file":             "backend client credential, replaceable",
 		"etcd_tls_key_file":              "backend client credential, replaceable",
-		"redis_tls_ca_file":              "backend client credential, replaceable",
 		"redis_tls_cert_file":            "backend client credential, replaceable",
 		"redis_tls_key_file":             "backend client credential, replaceable",
-		"sql_tls_ca_file":                "backend client credential, replaceable",
 		"sql_tls_cert_file":              "backend client credential, replaceable",
 		"sql_tls_key_file":               "backend client credential, replaceable",
-		"openbao.tls_ca_file":            "key-provider client credential, replaceable",
 		"openbao.tls_cert_file":          "key-provider client credential, replaceable",
 		"openbao.tls_key_file":           "key-provider client credential, replaceable",
 		"openbao.approle_role_id_file":   "key-provider credential, replaceable",
@@ -481,4 +487,47 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		Expect(store("/etc/anchors/partner-crl.pem").CheckReservedPaths(reserved)).
 			To(MatchError(ContainSubstring("crl_file")))
 	})
+
+	// The backend and key-provider trust anchors, which belong with the
+	// client_ca case above rather than with the client credentials they used to
+	// be exempted alongside. The `ca` path is the one that matters: a managed
+	// certificate's store writes this CA's own chain there, and if the backend's
+	// serving certificate was issued by this CA the connection keeps verifying
+	// -- so the overwrite is silent, and the backend link ends up anchored to
+	// this CA for anything it later issues for that hostname. "Loud and
+	// recoverable", the reason they were exempt under, describes the client
+	// certificate and key, not the anchor.
+	DescribeTable("reserves the trust anchor of every backend connection",
+		func(apply func(*serverConfig), setting, path string) {
+			cfg := &serverConfig{}
+			apply(cfg)
+
+			reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")
+			Expect(err).NotTo(HaveOccurred())
+
+			// Collided on `ca` rather than cert or key, because that is the
+			// field whose contents are this CA's chain and so the field that
+			// makes the overwrite silent rather than merely destructive.
+			entry := certstore.Config{{
+				Certname:    "a.example.com",
+				Names:       []string{"a"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/etc/a.pem", Key: "/etc/a-key.pem", CA: path,
+				}},
+			}}
+
+			err = entry.CheckReservedPaths(reserved)
+			Expect(err).To(MatchError(ContainSubstring("is " + setting)))
+			Expect(err).To(MatchError(ContainSubstring(path)))
+		},
+		Entry("etcd", func(c *serverConfig) { c.EtcdTLSCAFile = "/etc/anchors/etcd-ca.pem" },
+			"etcd_tls_ca_file", "/etc/anchors/etcd-ca.pem"),
+		Entry("redis", func(c *serverConfig) { c.RedisTLSCAFile = "/etc/anchors/redis-ca.pem" },
+			"redis_tls_ca_file", "/etc/anchors/redis-ca.pem"),
+		Entry("sql", func(c *serverConfig) { c.SQLTLSCAFile = "/etc/anchors/sql-ca.pem" },
+			"sql_tls_ca_file", "/etc/anchors/sql-ca.pem"),
+		Entry("openbao", func(c *serverConfig) { c.OpenBao.TLSCAFile = "/etc/anchors/bao-ca.pem" },
+			"openbao.tls_ca_file", "/etc/anchors/bao-ca.pem"),
+	)
 })
