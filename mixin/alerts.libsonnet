@@ -695,18 +695,16 @@
             // `state!="revoked"` on the right-hand side, which the other
             // leaf-expiry rules also carry but for a different reason.
             //
-            // The first version left it off, so that an entry whose certificate
-            // had just been revoked and was awaiting reissue stayed silent
-            // inside one reconcile interval. That reasoning was wrong about
-            // what it was silencing. A store write that fails does not leave
-            // the certificate alone: ReconcileManaged revokes the certificate
-            // it has just issued and puts the predecessor back, precisely
-            // because nothing ever saw the new key. So the RBAC refusal, the
+            // Without the matcher this rule could not fire for the failures it
+            // describes. A store write that fails does not leave the
+            // certificate alone: ReconcileManaged revokes the certificate it
+            // has just issued and puts the predecessor back, precisely because
+            // nothing ever saw the new key. So the RBAC refusal, the
             // unadoptable Secret and the missing directory -- the three causes
             // this rule's own annotation sends an operator to check -- each
-            // leave a revoked series behind, and a revoked series was enough to
-            // cancel the rule. It could never fire for the failures it
-            // describes.
+            // leave a revoked series behind, and for an entry that has never
+            // issued that series is the only one there is. A revoked series on
+            // its own must therefore not cancel the rule.
             //
             // With the matcher, the two cases separate properly. An entry with
             // a live certificate keeps its signed series whatever else it has,
@@ -759,8 +757,8 @@
             'for': $._config.managedCertNeverIssuedFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'A managed certificate has never been issued.',
-              description: 'The Puppet CA on {{ $labels.instance }} has {{ $labels.subject }} configured in managed_certs but no certificate for it exists after %(managedCertNeverIssuedFor)s. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else\'s material, or a directory that does not exist.' % { managedCertNeverIssuedFor: $._config.managedCertNeverIssuedFor },
+              summary: 'A managed certificate has never been issued, or holds only revoked ones.',
+              description: 'The Puppet CA on {{ $labels.instance }} has {{ $labels.subject }} configured in managed_certs but no usable certificate for it after %(managedCertNeverIssuedFor)s: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else\'s material, or a directory that does not exist.' % { managedCertNeverIssuedFor: $._config.managedCertNeverIssuedFor },
             },
           },
         ],

@@ -92,11 +92,14 @@ alerting rules for the openvox-ca exporter. It alerts on:
 - **Kubernetes export** targets whose applies keep failing, and targets that are
   configured but never attempted at all (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
-- **Managed certificates** that are configured but have never been issued at all
-  (only when [`managed_certs`](../docs/configuration.md#managed-certificates) is
-  in use). It covers an entry whose store has never accepted a write, not one
-  that is failing to renew — once a certificate exists, the leaf expiry alerts
-  above cover it with no new series.
+- **Managed certificates** with no usable certificate — never issued at all, or
+  holding only revoked ones (only when
+  [`managed_certs`](../docs/configuration.md#managed-certificates) is in use).
+  It covers an entry whose store has never accepted a write, and an entry whose
+  live certificate was revoked and not yet reissued; both leave the component
+  with nothing to present, which is why they page under one name. It does not
+  cover an entry that is failing to renew — once a signed certificate exists,
+  the leaf expiry alerts above cover it with no new series.
 
 All thresholds and the target selector live in [`config.libsonnet`](config.libsonnet)
 and can be overridden without editing the rules.

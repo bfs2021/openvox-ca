@@ -47,16 +47,20 @@ import (
 // value rather than an absence. PuppetCAManagedCertificateNeverIssued in
 // mixin/alerts.libsonnet is the rule.
 //
-// It is not the only gap, and the other one is left open deliberately. An entry
-// whose certificate was revoked and whose reissue then keeps failing still has
-// a leaf series -- a revoked certificate emits one -- so the never-issued rule
-// stays silent, and the expiry alerts do not fire until the certificate nears
-// its NotAfter. Between those two the component is presenting a revoked
-// certificate and nothing pages. Closing it needs a series this mechanism does
-// not publish: a per-entry reconcile-failure counter, which is the shape the
-// exporter's puppetca_k8s_export_last_error_timestamp_seconds takes.
-// That is worth doing and is not in #243; the reconcile failure is logged every
-// pass in the meantime.
+// It is not the only gap, and the other one is left open deliberately: an entry
+// that has issued before, whose reissue then keeps failing. That one is not
+// silent for want of a series. A failed store write revokes the certificate it
+// has just signed and puts the predecessor back, precisely because nothing ever
+// saw the new key -- so a signed series remains, the component keeps working,
+// and the never-issued rule is right to stay quiet. The expiry alerts take over
+// as that predecessor ages. What is missing between the failure and that point
+// is any series saying "this entry's last reconcile failed". Closing it needs
+// one this mechanism does not publish: a per-entry reconcile-failure counter,
+// which is the shape the exporter's
+// puppetca_k8s_export_last_error_timestamp_seconds takes. That is worth doing
+// and is not in #243; in the meantime the failure is in the logs, once and then
+// as withholding notices carrying retry_in, which is what docs/metrics.md tells
+// an operator to grep for.
 //
 // puppetca_managed_certificate_configured is deliberately general -- one label,
 // the subject, and nothing about the store -- so that the CA's own serving
