@@ -260,7 +260,22 @@ func (b *FilesystemBackend) Put(ctx context.Context, key string, data []byte, ki
 	if err := os.MkdirAll(filepath.Dir(p), DirPerm); err != nil {
 		return err
 	}
-	return AtomicWriteFile(p, data, permFor(kind))
+	if err := AtomicWriteFile(p, data, permFor(kind)); err != nil {
+		return err
+	}
+	if key == KeyCAKey {
+		// caKeyPath resolved to the top-level file, so any private/ copy
+		// held the same bytes as the key just replaced. Left behind, it
+		// would now differ from the new key and every later read would
+		// refuse; it is a copy of the old key, which goes with it, as in
+		// Delete.
+		if legacy := filepath.Join(b.baseDir, fsLegacyCAKeyPath); legacy != p {
+			if err := os.Remove(legacy); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (b *FilesystemBackend) Delete(ctx context.Context, key string) error {

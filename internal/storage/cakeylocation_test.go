@@ -107,6 +107,15 @@ var _ = Describe("Filesystem CA key location", func() {
 			Expect(store.GetCAKey(ctx)).To(Equal([]byte("same-key")))
 		})
 
+		It("replaces both copies when a new key is written", func() {
+			// Written to the top-level file alone, the private/ copy would
+			// still hold the old key, and every later read would refuse.
+			Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(Succeed())
+			Expect(os.ReadFile(top)).To(Equal([]byte("new-key")))
+			Expect(legacy).NotTo(BeAnExistingFile())
+			Expect(store.GetCAKey(ctx)).To(Equal([]byte("new-key")))
+		})
+
 		It("removes both copies when the key is deleted", func() {
 			// Left behind, the second copy would be found and used.
 			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(Succeed())
@@ -148,6 +157,41 @@ var _ = Describe("Filesystem CA key location", func() {
 		})
 	})
 
+	Context("when a key file cannot be read", func() {
+		BeforeEach(func() {
+			if os.Geteuid() == 0 {
+				Skip("root reads a file whatever its mode")
+			}
+		})
+
+		// Unreadable is not absent. Read as absent, an unreadable ca_key.pem
+		// would hand every operation the private/ copy instead, which may
+		// not be the key this CA signs with.
+		It("refuses rather than fall back to private/ca_key.pem", func() {
+			Expect(os.WriteFile(top, []byte("one-key"), 0o600)).To(Succeed())
+			Expect(os.WriteFile(legacy, []byte("another-key"), 0o600)).To(Succeed())
+			Expect(os.Chmod(top, 0o000)).To(Succeed())
+			DeferCleanup(os.Chmod, top, os.FileMode(0o600))
+
+			_, err := store.GetCAKey(ctx)
+			Expect(err).To(MatchError(fs.ErrPermission))
+			_, err = store.HasCAKey(ctx)
+			Expect(err).To(MatchError(fs.ErrPermission))
+			Expect(store.SaveCAKey(ctx, []byte("third-key"))).To(MatchError(fs.ErrPermission))
+			Expect(os.ReadFile(legacy)).To(Equal([]byte("another-key")))
+		})
+
+		It("refuses when private/ca_key.pem cannot be read either", func() {
+			Expect(os.WriteFile(top, []byte("one-key"), 0o600)).To(Succeed())
+			Expect(os.WriteFile(legacy, []byte("another-key"), 0o600)).To(Succeed())
+			Expect(os.Chmod(legacy, 0o000)).To(Succeed())
+			DeferCleanup(os.Chmod, legacy, os.FileMode(0o600))
+
+			_, err := store.GetCAKey(ctx)
+			Expect(err).To(MatchError(fs.ErrPermission))
+		})
+	})
+
 	Describe("CheckKeyPermissions", func() {
 		It("reports a top-level CA key readable beyond its owner", func() {
 			Expect(os.WriteFile(top, []byte("key"), 0o644)).To(Succeed())
@@ -155,6 +199,33 @@ var _ = Describe("Filesystem CA key location", func() {
 
 			Expect(store.CheckKeyPermissions()).To(ConsistOf(
 				storage.KeyPermWarning{Path: top, Mode: 0o644}))
+		})
+
+		It("reports a top-level CA key when another key is overridden", func() {
+			// ca_cert_file alone wraps the backend in an overlay; the CA key
+			// is still the cadir's own and still checked.
+			certFile := filepath.Join(GinkgoT().TempDir(), "ca_crt.pem")
+			overlay, err := storage.NewOverlayBackend(storage.NewFilesystemBackend(dir),
+				map[string]string{storage.KeyCACert: certFile})
+			Expect(err).NotTo(HaveOccurred())
+			wrapped := storage.NewWithBackend(overlay, filepath.Join(dir, "private"))
+			Expect(os.WriteFile(top, []byte("key"), 0o644)).To(Succeed())
+			Expect(os.Chmod(top, 0o644)).To(Succeed())
+
+			Expect(wrapped.CheckKeyPermissions()).To(ConsistOf(
+				storage.KeyPermWarning{Path: top, Mode: 0o644}))
+		})
+
+		It("does not report the cadir's key file when the CA key itself is overridden", func() {
+			keyFile := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
+			overlay, err := storage.NewOverlayBackend(storage.NewFilesystemBackend(dir),
+				map[string]string{storage.KeyCAKey: keyFile})
+			Expect(err).NotTo(HaveOccurred())
+			wrapped := storage.NewWithBackend(overlay, filepath.Join(dir, "private"))
+			Expect(os.WriteFile(top, []byte("stale"), 0o644)).To(Succeed())
+			Expect(os.Chmod(top, 0o644)).To(Succeed())
+
+			Expect(wrapped.CheckKeyPermissions()).To(BeEmpty())
 		})
 
 		It("reports a key kept in private/ once, not twice", func() {
