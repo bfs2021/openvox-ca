@@ -775,28 +775,29 @@ func (s *StorageService) PruneInventory(ctx context.Context, keep func(Inventory
 	// recompute the whole-blob HMAC. This matches their (non-atomic) append path
 	// and is correct for the single-node filesystem backend, the only blob
 	// backend without distributed appends.
-	entries, err := s.inventoryEntriesLocked(ctx)
+	//
+	// Every line that survives is written back byte for byte, never re-rendered.
+	// A filesystem inventory is shared with OpenVox Server, which a rollback
+	// hands the same directory to, and its lines are in OpenVox Server's own
+	// format: reformatting them would make them unreadable to it. Lines that do
+	// not parse are kept for the same reason; deciding they are not entries is
+	// this reader's view, not the file's.
+	data, err := s.readInventoryForHMAC(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	kept := make([]InventoryEntry, 0, len(entries))
+	var buf strings.Builder
 	var removed []InventoryEntry
-	for _, e := range entries {
-		if keep(e) {
-			kept = append(kept, e)
-		} else {
+	for _, line := range strings.SplitAfter(string(data), "\n") {
+		if e, ok := parseInventoryEntry(line); ok && !keep(e) {
 			removed = append(removed, e)
+			continue
 		}
+		buf.WriteString(line)
 	}
 	if len(removed) == 0 {
 		return nil, nil
-	}
-
-	var buf strings.Builder
-	for _, e := range kept {
-		buf.WriteString(canonicalInventoryLine(e))
-		buf.WriteByte('\n')
 	}
 	if err := s.backend.Put(ctx, KeyInventory, []byte(buf.String()), BlobPrivate); err != nil {
 		return nil, fmt.Errorf("rewriting inventory: %w", err)

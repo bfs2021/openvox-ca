@@ -143,6 +143,41 @@ var _ = Describe("PruneInventory", func() {
 					"the stale head must surface as a verification failure, not silently")
 			})
 
+			It("writes every surviving filesystem line back byte for byte", func() {
+				if name != "filesystem" {
+					Skip("blob-fallback path only")
+				}
+				// A filesystem inventory is shared with OpenVox Server, so it
+				// holds lines in OpenVox Server's format beside openvox-ca's,
+				// including OpenVox Server's own CA certificate, whose subject
+				// has spaces in it. Re-rendering a survivor through the
+				// canonical line truncated that subject to "/CN=Puppet", and a
+				// line that does not parse was dropped outright. Neither is
+				// this CA's to rewrite.
+				ctx := context.Background()
+				svc := New(GinkgoT().TempDir())
+				Expect(svc.EnsureDirs(ctx)).To(Succeed())
+				caLine := "0x0001 2026-01-01T00:00:00UTC 2041-01-01T00:00:00UTC /CN=Puppet CA: puppet.example.com\n"
+				ovsLine := "0x0002 2026-01-02T00:00:00UTC 2031-01-02T00:00:00UTC /CN=agent.example.com\n"
+				expired := "0x0003 2020-01-01T00:00:00UTC 2021-01-01T00:00:00UTC /CN=gone.example.com\n"
+				oursLine := "9F3C 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /node1\n"
+				junk := "this line is not an inventory entry\n"
+				Expect(svc.Backend().Put(ctx, KeyInventory,
+					[]byte(caLine+ovsLine+expired+junk+oursLine), BlobPrivate)).To(Succeed())
+				Expect(svc.InitHMAC(ctx)).To(Succeed())
+
+				removed, err := svc.PruneInventory(ctx, func(e InventoryEntry) bool {
+					return e.NotAfter != "2021-01-01T00:00:00UTC"
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(removed).To(HaveLen(1))
+				Expect(removed[0].NotAfter).To(Equal("2021-01-01T00:00:00UTC"))
+
+				got, err := svc.ReadInventory(ctx)
+				Expect(err).NotTo(HaveOccurred(), "the head must be rewritten over the verbatim survivors")
+				Expect(string(got)).To(Equal(caLine + ovsLine + junk + oursLine))
+			})
+
 			It("no match leaves inventory and head untouched", func() {
 				ctx := context.Background()
 				svc := mk()
