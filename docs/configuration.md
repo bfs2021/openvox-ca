@@ -1110,10 +1110,18 @@ startup, naming both entries, because they would replace each other on every
 pass. **A managed certificate and an agent sharing one is not prevented**, and
 cannot be — an agent enrols whenever it likes, long after this configuration
 was read. They contend for the single inventory slot that certname has, and the
-one that issues last displaces the other; see [When something goes
-wrong](#when-something-goes-wrong) below for what the CA logs and how to retire
-the displaced certificate. Give a managed certificate a certname nothing else
-enrols under.
+one that issues last displaces the other.
+
+Only one direction is reported. A managed issuance that displaces an agent's
+certificate logs the displaced serial; see [When something goes
+wrong](#when-something-goes-wrong) below for that line and the command that
+retires it. **The reverse is silent.** Neither the renewal nor the auto-renewal
+path consults `managed_certs`, so an agent renewing under that certname takes
+`cert/<certname>` back with nothing logged at all, leaving the managed
+certificate reachable only by serial. What shows it is a second inventory row
+under the certname, and the component's own failure once its store is next
+reconciled over. Give a managed certificate a certname nothing else enrols
+under.
 
 **Displacement is reported, not prevented, and that is the one case `reuse_key`
 does not protect against.** The key-reuse check asks whether the stored key
@@ -1345,21 +1353,29 @@ therefore needs its directory named in `ReadWritePaths=`:
 ```ini
 # /etc/systemd/system/openvox-ca.service.d/managed-certs.conf
 [Service]
-ReadWritePaths=/etc/openvox/components
+ReadWritePaths=/etc/openvox/ssl
 ```
 
-Without it the write fails with a permission error the CA cannot distinguish
-from a genuine one; it is logged each pass, and
+Name the directory the entries actually write to — the example above uses
+`/etc/openvox/ssl` — and run `systemctl daemon-reload` before restarting, or the
+drop-in is not read. Without it the write fails with a permission error the CA
+cannot distinguish from a genuine one; it is logged each pass, and
 `PuppetCAManagedCertificateNeverIssued` fires an hour later. The unit already
 ships a commented `ReadWritePaths=` line for a migrated `cadir`; this is the
 same mechanism for a different directory.
+
+`ReadWritePaths=` lifts systemd's own read-only mount and nothing more. The
+shipped unit runs as `User=puppet-ca`, so the directory's ownership and mode
+still have to let that user create files in it: a root-owned `/etc/openvox/ssl`
+refuses the write whatever the drop-in says. Both are needed, and each fails the
+same way on its own.
 
 **Two entries may share a chain file, but nothing else.** `cert` and `key` are
 exclusive: two entries writing one certificate or key file would each read the
 other's material, find it failing their own spec, and reissue on every pass, for
 ever. `ca` is not, because every entry writes the same CA chain from the same
 source and no entry reads it back to decide anything — a shared
-`/etc/openvox/ca.pem` is the ordinary way to lay several components out on one
+`/etc/openvox/ssl/ca.pem` is the ordinary way to lay several components out on one
 host. What is refused is the cross pair, in either direction: a chain written
 over another entry's certificate or key, or a certificate or key written over
 another entry's chain. Within one entry, all three paths must differ.

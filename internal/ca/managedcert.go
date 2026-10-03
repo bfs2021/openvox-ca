@@ -1025,10 +1025,12 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 // means teaching both renewal paths about the managed set, which touches every
 // issuance path, in service of a case an operator reaches only by giving a
 // managed certificate a certname something else already renews. The
-// displacement is already reported with the serial and the remedy, and
-// docs/configuration.md now states plainly that a managed certificate and an
-// agent sharing a certname displace each other rather than being prevented from
-// doing so.
+// displacement this function reports -- the managed direction -- already
+// carries the serial and the remedy, and docs/configuration.md states plainly
+// that the two displace each other rather than being prevented from doing so,
+// that only this direction is logged, and that the reverse shows up as a second
+// inventory row. An operator who hits the silent direction is told where to
+// look, which is what makes leaving it open a cost rather than a trap.
 //
 // It is NOT filed as an issue. Whether it should be is a tracker decision.
 //
