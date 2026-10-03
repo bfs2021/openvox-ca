@@ -877,6 +877,23 @@ not verify or repair the inventory — it re-asserts integrity over whatever the
 inventory now contains, so any tampering present is signed over and becomes
 valid. Establish why verification failed first.
 
+One cause is expected rather than suspicious: OpenVox Server's CA having run on
+the same cadir, on the filesystem backend. OpenVox Server appends a line to
+`inventory.txt` for every certificate it signs and knows nothing of
+`.inventory.hmac`, so once it has signed anything on the directory openvox-ca
+will not start until the value is rebuilt. Revoking and cleaning on OpenVox
+Server do not touch the inventory, so they alone do not cause this. Rebuilding
+is the one preparation step for returning to openvox-ca:
+
+1. Stop OpenVox Server's CA, so nothing appends while you read.
+2. Run the report and check that the lines at the end of `inventory.txt`
+   account for the certificates OpenVox Server signed while it held the
+   directory, and nothing else.
+3. Run it again with `--yes-re-bless`, then start openvox-ca.
+
+Nothing else in the directory needs changing: openvox-ca reads OpenVox Server's
+inventory lines as they are.
+
 With no flags it reports and changes nothing, which is the safe way to inspect
 a CA that will not start.
 
