@@ -195,13 +195,13 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ```text
 <cadir>/
 ├── ca_crt.pem              CA certificate
+├── ca_key.pem              CA private key (see note)          0600
 ├── ca_pub.pem              CA public key
 ├── ca_crl.pem              Certificate Revocation List (see note)
 ├── inventory.txt           Issued/revoked certificate log
 ├── superseded.json         Certificates awaiting delayed
 │                           revocation (see note)              0600
 ├── private/
-│   ├── ca_key.pem          CA private key                    0600
 │   └── <subject>_key.pem   server-generated private keys     0600
 ├── requests/
 │   └── <subject>.pem       pending CSRs
@@ -211,6 +211,13 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
     └── <hash>.lock         same-host lock files              0600
 ```
 
+> **`ca_key.pem` is where OpenVox Server keeps its CA key**, so a cadir either
+> implementation has used has the key where the other looks. If the key is in
+> `private/ca_key.pem` instead, openvox-ca reads and writes it there. If both
+> files exist with different contents, openvox-ca refuses to start and names
+> both: either could be the key this CA signs with, and only you can say which.
+> Remove the other one.
+>
 > **`superseded.json` is absent until the first supersession.** It appears only
 > where [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession)
 > grants renewals an overlap window, and it holds the serials — with their
@@ -227,7 +234,8 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 > [storage internals](development/storage-internals.md).
 
 (The directory also holds small internal integrity files; leave them in place.)
-File permissions are fixed: `0600` for anything under `private/`, for the CRL,
+File permissions are fixed: `0600` for `ca_key.pem`, for anything under
+`private/`, for the CRL,
 for the pending-supersession list, for the inventory and for the lock files
 under `locks/`; `0644` for the public data — issued certificates and CSRs. The
 blob modes are set on each file as it is created and your umask cannot widen
@@ -236,17 +244,19 @@ tighter umask narrows them further.
 
 `openvox-ca` never changes the mode of a file it did not create, so anything
 already on disk is left as you have it — but it does check its key material at
-startup. That is every file under `private/` — the CA key, the per-subject
+startup. That is `ca_key.pem`, every file under `private/` — the per-subject
 `*_key.pem` keys and the inventory-integrity key alike, because that directory
-holds secrets by construction — plus a `ca_key_passphrase_file` you point it
-at. A file readable by every local account
+holds secrets by construction — and a `ca_key_passphrase_file` you point it at.
+A cadir that keeps its CA key in `private/ca_key.pem` has it checked there. A
+file readable by every local account
 makes it **refuse to start**, naming the file and the `chmod` that fixes it; one
 readable only by its group is reported at `Info` and does not stop the CA.
 
-Group access here is not something `openvox-ca` created. Everything it writes
-under `private/` on this backend is `0600`, so a group-readable key in a
-filesystem cadir came from the deployment — a Kubernetes `fsGroup` ORing group
-access into the mounted volume at every mount, or somebody's `chmod`. It is
+Group access here is not something `openvox-ca` created. Every key it writes on
+this backend is `0600`, so a group-readable key in a filesystem cadir came from
+outside it — a Kubernetes `fsGroup` ORing group access into the mounted volume
+at every mount, somebody's `chmod`, or the OpenVox Server that created the
+cadir. It is
 tolerated rather than expected, because those are legitimate deployments and the
 CA cannot tell from the inside whether that group has members other than itself.
 (On the SQLite backend the store genuinely is created group-accessible; that is
@@ -1054,7 +1064,7 @@ the logical key `ca_key`:
 
 | Backend | Where the key is | How to remove it |
 | --- | --- | --- |
-| `filesystem` (default) | `private/ca_key.pem` under the cadir | `rm` the file |
+| `filesystem` (default) | `ca_key.pem` under the cadir (or `private/ca_key.pem`, if that is where it is) | `rm` the file |
 | `ca_key_file` overlay | the configured path | `rm` the file |
 | `sqlite`, `postgres`, `mysql` | table `puppet_ca_blobs`, column `blob_key`, value `ca_key` | `DELETE FROM puppet_ca_blobs WHERE blob_key = 'ca_key';` |
 | `etcd` | `<prefix>/ca/key` | `etcdctl del <prefix>/ca/key` |

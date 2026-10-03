@@ -253,9 +253,9 @@ _import_tree=$(find "$NEW_CA_DIR" -maxdepth 2 2>&1 | diag_oneline)
 [ -f "$NEW_CA_DIR/ca_crt.pem" ] \
     && pass "Import: CA cert at ca_crt.pem" \
     || fail "Import: CA cert at ca_crt.pem" "$NEW_CA_DIR holds: $_import_tree"
-[ -f "$NEW_CA_DIR/private/ca_key.pem" ] \
-    && pass "Import: CA key at private/ca_key.pem" \
-    || fail "Import: CA key at private/ca_key.pem" "$NEW_CA_DIR holds: $_import_tree"
+[ -f "$NEW_CA_DIR/ca_key.pem" ] \
+    && pass "Import: CA key at ca_key.pem" \
+    || fail "Import: CA key at ca_key.pem" "$NEW_CA_DIR holds: $_import_tree"
 [ -f "$NEW_CA_DIR/ca_crl.pem" ] \
     && pass "Import: CRL at ca_crl.pem" \
     || fail "Import: CRL at ca_crl.pem" "$NEW_CA_DIR holds: $_import_tree"

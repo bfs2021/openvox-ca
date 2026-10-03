@@ -1120,13 +1120,13 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 // group access is wider than 0600 and is tolerated, so what comes back is a
 // list of findings to judge rather than a list of faults. The caller draws the
 // line -- KeyPermWarning.WorldAccessible is refused, group access is logged, and
-// a mode that could not be read is refused on its own terms. Three sources:
-// every file in the local
-// private-key directory, which for the filesystem backend also contains the CA
-// key; any files the backend itself declares through KeyFileLister — the SQLite
-// database and its sidecars, which hold the CA key as a blob; and any extra
-// paths the caller names, for secrets it configures that the store knows
-// nothing about.
+// a mode that could not be read is refused on its own terms. Four sources:
+// every file in the local private-key directory; the filesystem backend's CA
+// key, which sits at the top of the cadir unless the cadir predates that and
+// keeps it in private/ (see caKeyFiler); any files the backend itself declares
+// through KeyFileLister — the SQLite database and its sidecars, which hold the
+// CA key as a blob; and any extra paths the caller names, for secrets it
+// configures that the store knows nothing about.
 //
 // The private-key directory is judged whole rather than by filename. It is the
 // directory the CA keeps its secrets in, so its contents are secret by
@@ -1156,11 +1156,12 @@ func (s *StorageService) CheckKeyPermissions(extra ...string) []KeyPermWarning {
 		warnings = append(warnings, KeyPermWarning{Path: path, Unreadable: true, Err: err})
 	}
 
-	// One finding per path. The three sources overlap by construction: a
-	// ca_key_file pinned inside <cadir>/private is both a directory entry and an
-	// overlay override, and a ca_key_passphrase_file can be named there too. A
-	// path reported twice doubles it in the refusal's chmod remedy and inflates
-	// the group-access count, which is a number an operator reads.
+	// One finding per path. The sources overlap by construction: a CA key the
+	// cadir keeps in private/ is both a directory entry and the backend's CA key
+	// file, a ca_key_file pinned inside <cadir>/private is both a directory entry
+	// and an overlay override, and a ca_key_passphrase_file can be named there
+	// too. A path reported twice doubles it in the refusal's chmod remedy and
+	// inflates the group-access count, which is a number an operator reads.
 	seen := make(map[string]bool)
 
 	check := func(path string) {
@@ -1223,6 +1224,14 @@ func (s *StorageService) CheckKeyPermissions(extra ...string) []KeyPermWarning {
 				}
 				check(filepath.Join(s.localPrivateKeyDir, e.Name()))
 			}
+		}
+	}
+
+	// The filesystem backend's CA key. In a cadir that keeps it in private/,
+	// the scan above has already judged it, and check skips a path it has seen.
+	if f, ok := s.backend.(caKeyFiler); ok {
+		if p := f.CAKeyFile(); p != "" {
+			check(filepath.Clean(p))
 		}
 	}
 

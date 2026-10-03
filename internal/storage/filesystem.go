@@ -19,6 +19,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -54,7 +55,7 @@ const fsLockDir = "locks"
 var fsLayout = map[string]string{
 	KeyCACert:        "ca_crt.pem",
 	KeyCAPubKey:      "ca_pub.pem",
-	KeyCAKey:         "private/ca_key.pem",
+	KeyCAKey:         fsCAKeyPath,
 	KeyCRL:           "ca_crl.pem",
 	KeySerial:        "serial",
 	KeyInventory:     "inventory.txt",
@@ -62,6 +63,21 @@ var fsLayout = map[string]string{
 	KeyHMACKey:       "private/.inventory_hmac_key",
 	KeySuperseded:    "superseded.json",
 }
+
+// fsCAKeyPath is where OpenVox Server keeps its CA key, and so where this
+// backend keeps it: a cadir handed back to OpenVox Server has to have the key
+// where it looks. fsLegacyCAKeyPath is where this backend kept it before, and a
+// cadir with the key only there goes on using it there. See caKeyPath.
+const (
+	fsCAKeyPath       = "ca_key.pem"
+	fsLegacyCAKeyPath = "private/ca_key.pem"
+)
+
+// ErrCAKeyConflict is returned for every CA key operation on a cadir holding
+// both ca_key.pem and private/ca_key.pem with different contents. Either could
+// be the key this CA signs with, and picking one would sign with a key the
+// operator may not have meant, or hand OpenVox Server one this CA never used.
+var ErrCAKeyConflict = errors.New("two different CA keys in the cadir")
 
 // FilesystemBackend stores blobs as files under a single base directory.
 // It is the default Backend implementation and preserves the exact on-disk
@@ -117,9 +133,61 @@ func (b *FilesystemBackend) Path(key string) string {
 	return p
 }
 
+// caKeyFiler is implemented by a backend that keeps the CA key in a local file
+// outside the private-key directory CheckKeyPermissions scans.
+type caKeyFiler interface {
+	CAKeyFile() string
+}
+
+// CAKeyFile returns the path of the CA key file this backend would read, or ""
+// when there is none or it cannot be resolved (ErrCAKeyConflict is reported by
+// the read itself, which refuses).
+func (b *FilesystemBackend) CAKeyFile() string {
+	p, err := b.caKeyPath()
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Stat(p); err != nil {
+		return ""
+	}
+	return p
+}
+
+// caKeyPath resolves where the CA key is: ca_key.pem, OpenVox Server's
+// location, unless only private/ca_key.pem exists, which is where a cadir this
+// backend created before it moved keeps it. The key is read and written where it
+// is found rather than moved, so neither kind of cadir is rearranged by starting
+// on it, and a fresh one gets OpenVox Server's layout. Both present is accepted
+// only when they hold the same bytes; otherwise it is ErrCAKeyConflict, naming
+// both paths, and the operator decides which one is the CA's key.
+func (b *FilesystemBackend) caKeyPath() (string, error) {
+	top := filepath.Join(b.baseDir, fsCAKeyPath)
+	legacy := filepath.Join(b.baseDir, fsLegacyCAKeyPath)
+	topData, topErr := os.ReadFile(top)
+	if topErr != nil && !errors.Is(topErr, fs.ErrNotExist) {
+		return "", topErr
+	}
+	legacyData, legacyErr := os.ReadFile(legacy)
+	switch {
+	case errors.Is(legacyErr, fs.ErrNotExist):
+		return top, nil
+	case legacyErr != nil:
+		return "", legacyErr
+	case errors.Is(topErr, fs.ErrNotExist):
+		return legacy, nil
+	case !bytes.Equal(topData, legacyData):
+		return "", fmt.Errorf("%w: %s and %s differ; remove the one that is not this CA's key",
+			ErrCAKeyConflict, top, legacy)
+	}
+	return top, nil
+}
+
 func (b *FilesystemBackend) pathFor(key string) (string, error) {
 	if err := validateKey(key); err != nil {
 		return "", err
+	}
+	if key == KeyCAKey {
+		return b.caKeyPath()
 	}
 	if rel, ok := fsLayout[key]; ok {
 		return filepath.Join(b.baseDir, rel), nil
@@ -203,7 +271,20 @@ func (b *FilesystemBackend) Delete(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	return os.Remove(p)
+	if err := os.Remove(p); err != nil {
+		return err
+	}
+	if key == KeyCAKey {
+		// caKeyPath resolved to one copy of two identical ones, or to the only
+		// one. Removing the key means removing every copy of it: left behind,
+		// the other would be found and used on the next read.
+		if legacy := filepath.Join(b.baseDir, fsLegacyCAKeyPath); legacy != p {
+			if err := os.Remove(legacy); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (b *FilesystemBackend) Exists(ctx context.Context, key string) (bool, error) {

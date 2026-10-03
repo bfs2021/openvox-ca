@@ -345,7 +345,7 @@ openvox-ca-ctl migrate --source-config live.yaml --dest-config scratch.yaml
 # --cert-bundle and --private-key are the copies the first leg just wrote there.
 openvox-ca-ctl import --cadir "$SCRATCH" \
   --cert-bundle "$SCRATCH/ca_crt.pem" \
-  --private-key "$SCRATCH/private/ca_key.pem" \
+  --private-key "$SCRATCH/ca_key.pem" \
   --crl-chain refreshed-chain.pem
 
 # Back up the live backend before the return leg: --force overwrites a CA that
