@@ -249,26 +249,94 @@ var _ = Describe("FileStore", func() {
 	Describe("the order the pair is written in", func() {
 		It("has the key and chain on disk by the time the certificate is written", func() {
 			// Root ignores directory permissions, so this spec's mechanism for
-			// making the certificate write fail does not work as root. The
-			// neighbouring internal/ca specs guard the same way.
+			// A directory standing where the certificate file goes, rather than
+			// an unwritable parent. The parent must stay writable, because
+			// checkDir now refuses an unwritable one before anything is written
+			// -- which is the point of that guard and makes the old fixture for
+			// this spec unusable. Here the parent is fine, the key and chain
+			// land, and the final rename fails because the target is a
+			// directory. That isolates the ordering from the pre-flight.
+			//
+			// Works as root too, unlike the mode-based fixture it replaces: root
+			// ignores permissions but cannot rename a file over a directory.
+			cfg = certstore.FilesConfig{
+				Cert: filepath.Join(dir, "cert.pem"),
+				Key:  filepath.Join(dir, "key.pem"),
+				CA:   filepath.Join(dir, "ca.pem"),
+			}
+			Expect(os.Mkdir(cfg.Cert, 0o700)).To(Succeed())
+
+			Expect(store().Save(ctx, []byte("CERT"), []byte("KEY"))).NotTo(Succeed())
+
+			Expect(cfg.Key).To(BeAnExistingFile())
+			Expect(cfg.CA).To(BeAnExistingFile())
+			info, err := os.Stat(cfg.Cert)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.IsDir()).To(BeTrue(),
+				"the certificate was never written, so the directory is still there")
+		})
+	})
+
+	// The renewal case, which is what made the write order a defect rather than
+	// a detail. On a first issuance a failed certificate write leaves a key
+	// beside nothing, which the next pass replaces. On a renewal it left the NEW
+	// key beside the PREVIOUS certificate: a pair that fails every handshake,
+	// does not heal -- the next pass sees a key that is not the certificate's,
+	// generates another and fails on the same write -- and takes a
+	// still-valid certificate out of service at the component's next reload.
+	//
+	// checkDir's writability probe is what makes this refusable, so this spec
+	// asserts the old pair survives BYTE FOR BYTE rather than merely that Save
+	// failed. "Save returned an error" was already true before the fix.
+	Describe("a renewal it cannot complete", func() {
+		It("replaces nothing when the certificate's directory is not writable", func() {
 			if os.Geteuid() == 0 {
 				Skip("root ignores directory permissions")
 			}
-			certDir := filepath.Join(dir, "readonly")
-			Expect(os.Mkdir(certDir, 0o500)).To(Succeed())
-			DeferCleanup(func() { _ = os.Chmod(certDir, 0o700) })
 
+			certDir := filepath.Join(dir, "component")
+			Expect(os.Mkdir(certDir, 0o700)).To(Succeed())
 			cfg = certstore.FilesConfig{
 				Cert: filepath.Join(certDir, "cert.pem"),
 				Key:  filepath.Join(dir, "key.pem"),
 				CA:   filepath.Join(dir, "ca.pem"),
 			}
 
-			Expect(store().Save(ctx, []byte("CERT"), []byte("KEY"))).NotTo(Succeed())
+			// A working pair already in place, as a renewal finds it.
+			Expect(store().Save(ctx, []byte("OLD-CERT"), []byte("OLD-KEY"))).To(Succeed())
 
-			Expect(cfg.Key).To(BeAnExistingFile())
-			Expect(cfg.CA).To(BeAnExistingFile())
-			Expect(cfg.Cert).NotTo(BeAnExistingFile())
+			// Now the component's directory loses write permission.
+			Expect(os.Chmod(certDir, 0o500)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(certDir, 0o700) })
+
+			Expect(store().Save(ctx, []byte("NEW-CERT"), []byte("NEW-KEY"))).NotTo(Succeed())
+
+			Expect(os.ReadFile(cfg.Key)).To(Equal([]byte("OLD-KEY")),
+				"the previous key must survive: replacing it beside the previous "+
+					"certificate is the mismatch this refusal exists to prevent")
+			Expect(os.ReadFile(cfg.Cert)).To(Equal([]byte("OLD-CERT")))
+			Expect(os.ReadFile(cfg.CA)).To(Equal([]byte("CA-CHAIN-PEM")))
+		})
+
+		It("names the directory and says what it holds", func() {
+			if os.Geteuid() == 0 {
+				Skip("root ignores directory permissions")
+			}
+			certDir := filepath.Join(dir, "component")
+			Expect(os.Mkdir(certDir, 0o500)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(certDir, 0o700) })
+
+			cfg = certstore.FilesConfig{
+				Cert: filepath.Join(certDir, "cert.pem"),
+				Key:  filepath.Join(dir, "key.pem"),
+			}
+
+			err := store().Save(ctx, []byte("CERT"), []byte("KEY"))
+
+			Expect(err).To(MatchError(ContainSubstring("not writable by this process")))
+			Expect(err).To(MatchError(ContainSubstring(certDir)))
+			Expect(err).To(MatchError(ContainSubstring("private key")),
+				"the message has to say why the mode matters, not just that it is wrong")
 		})
 	})
 })

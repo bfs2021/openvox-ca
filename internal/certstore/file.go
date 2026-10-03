@@ -83,6 +83,16 @@ const (
 // between the two renames leaves a mismatch that the next reconcile pass sees
 // as a key that is not the certificate's, and replaces.
 //
+// "Microseconds later" assumes the last rename happens at all, and that
+// assumption used to be unguarded: a certificate directory that existed but
+// could not be written turned the window into a permanent mismatch, since the
+// key had already been replaced. checkDir now probes writability on every path
+// before the first write, so that case is refused with the previous pair
+// untouched. Two residues remain, and neither is covered by that probe: a
+// directory whose permissions change between the probe and the write, and
+// running out of space partway through. Both still leave the window this
+// paragraph describes, which is why the paragraph stays.
+//
 // The certificate is renamed last, deliberately. A component watching this
 // directory for a renewal almost always watches the certificate -- it is the
 // file with an expiry -- so landing it last means the watcher fires on a pair
@@ -208,6 +218,35 @@ func checkDir(path string) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("the directory for %s is not a directory: %s", path, dir)
+	}
+
+	// Writable, not merely present. Existence alone was not enough to keep the
+	// promise this function's own doc comment makes, and the gap only shows on a
+	// RENEWAL rather than a first write: Save replaces the key, then the chain,
+	// and the certificate last, so a certificate directory that exists but
+	// cannot be written left the new key on disk beside the PREVIOUS
+	// certificate. That pair fails every handshake, and it does not heal -- the
+	// next pass reads the old certificate against the new key, sees a mismatch,
+	// generates another key and fails on the same write, once per pass until an
+	// operator fixes the mode. A still-valid certificate becomes unusable at the
+	// component's next reload.
+	//
+	// Probed by creating and removing a file rather than by reading the mode,
+	// because the mode is not the question: the question is whether THIS process
+	// can write there, which depends on uid, gid, ACLs and whether the
+	// filesystem is mounted read-only. AtomicWriteFile creates its temporary
+	// file in this same directory, so this probe is the same operation the write
+	// will perform.
+	probe, err := os.CreateTemp(dir, ".openvox-ca-writable-*")
+	if err != nil {
+		return fmt.Errorf("the directory for %s is not writable by this process: %s "+
+			"(it will hold a private key, so check ownership and mode rather than "+
+			"widening it): %w", path, dir, err)
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("removing the write probe %s: %w", name, err)
 	}
 	return nil
 }
