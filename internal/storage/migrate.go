@@ -161,11 +161,16 @@ func Migrate(ctx context.Context, src, dst Backend, opts MigrateOptions) (Migrat
 		logf = func(string, ...any) {}
 	}
 
-	// copyKey copies one blob; a key absent in the source is skipped (not an
-	// error) so partially-populated CAs migrate cleanly.
+	// Whether each end keeps the inventory as structured records or as the
+	// whole blob; copyKey converts the inventory when they differ.
 	_, srcStructured := asInventoryStore(src)
 	_, dstStructured := asInventoryStore(dst)
 
+	// copyKey copies one blob; a key absent in the source is skipped (not an
+	// error) so partially-populated CAs migrate cleanly. The inventory is the
+	// one blob it converts: from the filesystem's OpenVox Server form to the
+	// structured backends' canonical form (canonicaliseBlobInventory), or the
+	// other way (openVoxBlobInventory).
 	copyKey := func(key string, kind BlobKind) (bool, error) {
 		data, err := src.Get(ctx, key)
 		if err != nil {

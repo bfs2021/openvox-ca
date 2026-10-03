@@ -64,6 +64,7 @@ var _ = Describe("runCertCleaner", func() {
 	It("prunes at startup and returns after context cancellation", func() {
 		c, store := newRefresherTestCA()
 		seedExpiredInventoryEntry(store, "expired-node")
+		Expect(inventoryHas(store, "/CN=expired-node")).To(BeTrue(), "precondition: expired-node should be in the inventory")
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})

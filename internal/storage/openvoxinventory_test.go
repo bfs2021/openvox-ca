@@ -205,8 +205,8 @@ var _ = Describe("Reading a filesystem inventory written by OpenVox Server", fun
 		It("reads the mixed file without changing a byte of it", func() {
 			before, err := svc.ReadInventory(ctx)
 			Expect(err).NotTo(HaveOccurred())
-			_, _ = svc.LatestSerialForSubject(ctx, "agent.example.com")
-			_, _ = svc.InventoryEntries(ctx)
+			Expect(svc.LatestSerialForSubject(ctx, "agent.example.com")).To(Equal("9F3C"))
+			Expect(svc.InventoryEntries(ctx)).To(HaveLen(5))
 			after, err := svc.ReadInventory(ctx)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(after).To(Equal(before))

@@ -93,7 +93,13 @@ var _ = Describe("PruneInventory", func() {
 				removed, err := svc.PruneInventory(ctx, keepNotSerial("0002"))
 				Expect(err).NotTo(HaveOccurred(), "PruneInventory")
 				Expect(removed).To(HaveLen(1), "want one entry serial 0002 subject node2")
-				Expect(inventorySerial(removed[0].Serial)).To(Equal("2"), "want one entry serial 0002 subject node2")
+				// The filesystem backend reads its serials normalised; the
+				// structured backends hand back what they stored.
+				wantSerial := "0002"
+				if name == "filesystem" {
+					wantSerial = "2"
+				}
+				Expect(removed[0].Serial).To(Equal(wantSerial), "want one entry serial 0002 subject node2")
 				Expect(removed[0].Subject).To(Equal("node2"), "want one entry serial 0002 subject node2")
 
 				// ReadInventory verifies the integrity head before returning, so a
@@ -140,7 +146,7 @@ var _ = Describe("PruneInventory", func() {
 				Expect(err).To(MatchError(ContainSubstring("updating inventory HMAC after prune")),
 					"the head-write failure must surface")
 				Expect(removed).To(HaveLen(1), "the durably removed entry must be returned with the error")
-				Expect(inventorySerial(removed[0].Serial)).To(Equal("2"))
+				Expect(removed[0].Serial).To(Equal("2"))
 
 				// The honest aftermath: the rewrite is durable, the head lags
 				// it, and the next verified read reports the mismatch.

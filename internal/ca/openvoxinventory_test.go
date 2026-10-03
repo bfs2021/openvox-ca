@@ -226,7 +226,7 @@ var _ = Describe("A filesystem inventory written by OpenVox Server", func() {
 
 		_, err := myCA.ImportCertificate(ctx, "agent.example.com",
 			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ca.ErrSerialExists))
 		inv, err := store.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(strings.Count(string(inv), "\n")).To(Equal(1), "no second line for the same serial")
