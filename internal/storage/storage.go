@@ -372,11 +372,12 @@ func (s *StorageService) AppendInventoryRecord(ctx context.Context, entry string
 	if err != nil {
 		return err
 	}
+	want := inventorySerial(parsed.Serial)
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if e, ok := parseBlobInventoryEntry(line); ok && e.Serial == inventorySerial(parsed.Serial) {
+		if e, ok := parseBlobInventoryEntry(line); ok && e.Serial == want {
 			return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
 		}
 	}
@@ -1530,9 +1531,11 @@ func chainInventoryMAC(key, prev []byte, line string) []byte {
 // UTC time records its wall-clock digits and parsing yields them back as UTC.
 const InventoryTimeFormat = "2006-01-02T15:04:05UTC"
 
-// canonicalInventoryLine renders e to its inventory.txt line (without the
-// trailing newline). It is the single source of truth for the on-disk blob
-// format and the input to the integrity hash chain, so the two cannot drift.
+// canonicalInventoryLine renders e to its canonical inventory line (without the
+// trailing newline): the form issuance builds through FormatInventoryLine, the
+// structured backends store and render, and their integrity hash chain is
+// folded over, so those cannot drift. The filesystem backend's inventory.txt is
+// OpenVox Server's file and is written in its format by openVoxInventoryLine.
 func canonicalInventoryLine(e InventoryEntry) string {
 	return fmt.Sprintf("%s %s %s /%s", e.Serial, e.NotBefore, e.NotAfter, e.Subject)
 }

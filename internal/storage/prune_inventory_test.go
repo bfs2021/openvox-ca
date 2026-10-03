@@ -173,7 +173,7 @@ var _ = Describe("PruneInventory", func() {
 				ovsLine := "0x0002 2026-01-02T00:00:00UTC 2031-01-02T00:00:00UTC /CN=agent.example.com\n"
 				expired := "0x0003 2020-01-01T00:00:00UTC 2021-01-01T00:00:00UTC /CN=gone.example.com\n"
 				oursLine := "9F3C 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /node1\n"
-				junk := "this line is not an inventory entry\n"
+				junk := "half a line\n"
 				Expect(svc.Backend().Put(ctx, KeyInventory,
 					[]byte(caLine+ovsLine+expired+junk+oursLine), BlobPrivate)).To(Succeed())
 				Expect(svc.InitHMAC(ctx)).To(Succeed())

@@ -242,6 +242,22 @@ var _ = Describe("Reading a filesystem inventory written by OpenVox Server", fun
 			Expect(dst.LatestSerialForSubject(ctx, "agent.example.com")).To(Equal("2"))
 		})
 
+		It("refuses a line it cannot read rather than dropping it", func() {
+			// The filesystem backend keeps a line it cannot parse, and
+			// migration is where such a line meets a structured store. It
+			// must fail loudly there, never arrive without it.
+			ctx := context.Background()
+			src := New(GinkgoT().TempDir())
+			Expect(src.EnsureDirs(ctx)).To(Succeed())
+			Expect(src.Backend().Put(ctx, KeyCACert, []byte("ca-cert-pem"), BlobPublic)).To(Succeed())
+			Expect(src.Backend().Put(ctx, KeyInventory,
+				[]byte(ovsAgentLine+"\nhalf a line\n"+ovsWebLine+"\n"), BlobPrivate)).To(Succeed())
+
+			dst := NewWithBackend(newSQLiteBackend(), "")
+			_, err := MigrateService(ctx, src, dst, MigrateOptions{})
+			Expect(err).To(MatchError(ContainSubstring("malformed inventory line")))
+		})
+
 		It("copies a filesystem-to-filesystem inventory byte for byte", func() {
 			ctx := context.Background()
 			src := New(GinkgoT().TempDir())
