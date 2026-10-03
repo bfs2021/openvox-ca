@@ -1114,14 +1114,16 @@ with an explicit resourceNames list.
 {{- end }}
 {{- if and .Values.managedCerts.rbac.create (eq (include "openvox-ca.configFileKnown" .) "false") }}
 
-NOTE: the chart cannot read the configuration{{ if .Values.existingConfigMap }} (existingConfigMap){{ else }} (args, or a --config in
-extraArgs){{ end }}, so no Role was created for managed certificates. If your
-config.yaml has a managed_certs entry with a Secret store, openvox-ca will be
-refused by RBAC when it tries to write that Secret — while readiness stays
-green. Create a Role yourself, in each of those namespaces, with two rules: one
-granting create on secrets, which cannot be narrowed because an object has no
-name at admission time, and a second granting get and patch narrowed by
-resourceNames to the Secrets it names.
+NOTE: if your config.yaml has a managed_certs entry with a Secret store, you
+have to create its Role by hand. The chart cannot read the configuration{{ if .Values.existingConfigMap }} (existingConfigMap){{ else }} (args, or a --config in
+extraArgs){{ end }}, so no Role was created for managed certificates, and openvox-ca
+will be refused by RBAC when it tries to write that Secret — while readiness
+stays green. Create a Role yourself, in each of those namespaces, with two
+rules: one granting create on secrets, which cannot be narrowed because an
+object has no name at admission time, and a second granting get and patch
+narrowed by resourceNames to the Secrets it names. If you do not use
+managed_certs, set managedCerts.rbac.create: false to silence this — the chart
+cannot tell the two apart from here.
 {{- end }}
 {{- if eq (include "openvox-ca.managedCertRBACRendered" .) "true" }}
 

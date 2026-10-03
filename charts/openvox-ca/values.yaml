@@ -359,7 +359,11 @@ managedCerts:
     #
     # Nothing is rendered when no managed certificate uses a Secret store, or
     # when the chart cannot read the configuration (existingConfigMap, args, or
-    # a --config in extraArgs); manage the Role yourself in that case.
+    # a --config in extraArgs); manage the Role yourself in that case. That
+    # second case also prints an install NOTE, and it cannot be conditioned on
+    # the feature being in use, for the same reason it fires: the chart cannot
+    # see the configuration. Set this to false to silence it if you do not use
+    # managed certificates.
     create: true
 
 # -- Workload ------------------------------------------------------------------

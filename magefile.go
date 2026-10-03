@@ -2920,6 +2920,15 @@ config:
 				// in the failure this NOTE is warning about.
 				"cannot be narrowed",
 				"(existingConfigMap)",
+				// The NOTE cannot be gated on the feature being in use --
+				// that is the same thing it is reporting it cannot see -- so
+				// it fires for every unreadable-config install, managed
+				// certificates or not. It therefore has to open
+				// conditionally and offer the way to silence it, or an
+				// operator who does not use the feature learns to skip a
+				// warning that matters to the operators who do.
+				"NOTE: if your config.yaml has a managed_certs entry",
+				"managedCerts.rbac.create: false to silence this",
 			},
 			notWants: []string{"name: openvox-ca-managed-certs"},
 		},
