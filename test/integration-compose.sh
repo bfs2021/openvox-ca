@@ -1941,13 +1941,15 @@ _mig_import_out=$("${_mig_import_args[@]}" 2>&1) && _mig_import_rc=$? || _mig_im
     || fail "Migration: CRL exists after import"
 
 # --- 19c: Copy pre-existing signed cert into the migrated CA ---
-# This simulates Step 4 of the migration guide.
 mkdir -p "$_MIG_DIR/signed"
 cp "$_MIG_OLD/${_MIG_EXISTING}.pem" "$_MIG_DIR/signed/${_MIG_EXISTING}.pem"
 
-# Rebuild inventory from the copied cert (simulates Step 5 of migration guide).
-# openvox-ca inventory format: SERIAL NOT_BEFORE NOT_AFTER /SUBJECT
-# Dates must be in Go's 2006-01-02T15:04:05UTC format (no spaces).
+# Write the cert's inventory line in the form an earlier openvox-ca wrote:
+# bare-hex SERIAL NOT_BEFORE NOT_AFTER /SUBJECT, not OpenVox Server's 0x and
+# /CN= form. Deliberately: a cadir an earlier openvox-ca left must keep
+# working, and this is that form's coverage here. (The migration guide copies
+# OpenVox Server's inventory instead; test/migration/migration-test.sh covers
+# that.) Dates must be in Go's 2006-01-02T15:04:05UTC format (no spaces).
 _mig_serial=$(openssl x509 -noout -serial -in "$_MIG_DIR/signed/${_MIG_EXISTING}.pem" \
     | cut -d= -f2)
 _mig_nb=$(date -u -d "$(openssl x509 -noout -startdate -in "$_MIG_DIR/signed/${_MIG_EXISTING}.pem" \

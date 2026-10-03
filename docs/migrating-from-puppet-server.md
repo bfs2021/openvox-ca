@@ -245,7 +245,12 @@ openvox-ca generate \
   >/dev/null
 ```
 
-This runs before the server starts, against the cadir from step 4 or 5.
+This runs before the server starts, against the cadir from step 4 or 5. Run it,
+and the start below, as the user that owns the cadir: `puppet` when it is
+OpenVox Server's own (step 3), as `sudo -u puppet openvox-ca generate …`. Run as
+root, they leave files and lock files in the cadir that the service cannot use;
+see [file permissions](configuration.md#file-permissions).
+
 Earlier versions of this guide had to start the
 CA temporarily on loopback without TLS to mint this certificate through the API,
 then restart it with TLS; that is no longer necessary.
