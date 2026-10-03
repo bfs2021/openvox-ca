@@ -29,7 +29,7 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
-var _ = Describe("Init on a cadir with the CA key in two places", func() {
+var _ = Describe("Init and where the cadir keeps the CA key", func() {
 	var (
 		ctx   = context.Background()
 		dir   string
@@ -54,6 +54,24 @@ var _ = Describe("Init on a cadir with the CA key in two places", func() {
 
 		err := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test").Init(ctx)
 		Expect(err).To(MatchError(storage.ErrCAKeyConflict))
+	})
+
+	It("starts, signs and revokes on a cadir with the key only in private/, and leaves it there", func() {
+		// A cadir an earlier openvox-ca created. It keeps working where it
+		// is: nothing moves the key to the top of the cadir.
+		Expect(os.WriteFile(filepath.Join(dir, "private", "ca_key.pem"), cachedKeyPEM, 0o600)).To(Succeed())
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		csrPEM, _ := buildCSR("legacy-node")
+		_, err := myCA.SaveRequest(ctx, "legacy-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.Sign(ctx, "legacy-node")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(myCA.Revoke(ctx, "legacy-node")).To(Succeed())
+
+		Expect(filepath.Join(dir, "ca_key.pem")).NotTo(BeAnExistingFile())
+		Expect(os.ReadFile(filepath.Join(dir, "private", "ca_key.pem"))).To(Equal(cachedKeyPEM))
 	})
 
 	It("starts when both hold the same key", func() {
