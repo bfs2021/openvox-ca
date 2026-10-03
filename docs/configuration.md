@@ -1115,6 +1115,16 @@ wrong](#when-something-goes-wrong) below for what the CA logs and how to retire
 the displaced certificate. Give a managed certificate a certname nothing else
 enrols under.
 
+**Displacement is reported, not prevented, and that is the one case `reuse_key`
+does not protect against.** The key-reuse check asks whether the stored key
+belongs to a certificate this CA issued for this certname — so another
+subject's material is rejected, but a certificate this CA issued for *this*
+certname which the entry did not issue satisfies it. If such a certificate and
+its key are in the store, `reuse_key` will reuse that key. The CA logs the
+displaced serial and the command that retires it rather than revoking anything
+on its own, because the certificate is a legitimate one for that name and the
+CA cannot tell an operator's deliberate hand-off from a mistake.
+
 **A certificate can be named four ways**, and at least one name of some kind is
 required. `names` carries the DNS entries, and `ip_addresses`,
 `email_addresses` and `uris` carry the other three subjectAltName types. An IP

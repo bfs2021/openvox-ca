@@ -252,16 +252,28 @@ type Entry struct {
 	//
 	//   - SECURITY: it does not mean "reuse whatever key is in the store". The
 	//     key is reused only when it is the private half of a certificate this
-	//     CA issued for this certname, which internal/ca establishes with
-	//     CheckSignatureFrom and a public-key comparison before any other
-	//     reasoning. Anything else -- a key someone else put there, a key that
-	//     does not match the stored certificate, a self-consistent pair minted
-	//     by another CA -- is replaced with a fresh one and warned about.
-	//     Without that, write access to the store alone would be enough to have
-	//     a key of your choosing certified under this certname, which is a far
-	//     weaker capability than holding a CA-signed credential. Note it is
-	//     write access that matters: anyone who can *read* the store already
-	//     holds the key the CA put there.
+	//     CA issued FOR THIS CERTNAME -- both halves, established by internal/ca
+	//     before any other reasoning. Anything else is replaced with a fresh key
+	//     and warned about: a key someone else put there, a key that does not
+	//     match the certificate beside it, a pair minted by another CA, or a
+	//     legitimate certificate and key this CA issued for some OTHER subject.
+	//
+	//     That last case is why "issued by this CA" is not sufficient on its
+	//     own. Every agent in the fleet holds such a pair for its own certname,
+	//     and certificates are public, so a gate asking only for the CA's
+	//     signature admits the whole fleet's material. Planting an agent's pair
+	//     here would otherwise have this certname's certificate signed over a
+	//     key that agent already holds -- an admin credential, for a certname
+	//     listed in `puppet_server`.
+	//
+	//     The comparison is on the Common Name, not on the full name set: a
+	//     stored certificate missing a name the entry has since gained is an
+	//     ordinary renewal, and keeping the pinned key through it is the point
+	//     of this setting. The question is identity, not currency.
+	//
+	//     Write access is the capability that matters. Anyone who can *read*
+	//     the store already holds the key the CA put there and gains nothing;
+	//     it is the writer who would otherwise get a chosen key certified.
 	//   - A revoked certificate is replaced with a new key whatever this says,
 	//     and the CA warns. Reissuing over the same key would hand back, on a
 	//     fresh serial with a full lifetime and on no CRL, exactly the material

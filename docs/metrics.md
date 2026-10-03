@@ -486,10 +486,21 @@ found to be wrong without it:
 **What this still does not cover.** An entry that has issued before, whose
 reissue then keeps failing, is not silent because of this rule: the CA restores
 the predecessor after a failed store write, so a signed certificate remains and
-the component keeps working. The failure is logged every pass, and the ordinary
+the component keeps working. Something is logged on every pass and the ordinary
 expiry alerts take over as that predecessor ages — but there is no series that
 says "this entry's last reconcile failed", so between those two there is a
-window where only the logs show it. Closing that needs a per-entry
+window where only the logs show it.
+
+What gets logged changes after the first failure, so the log line to grep for
+changes with it. The first failure is free and logs the failure itself. From the
+second, the CA withholds the entry's passes — 15m, then 30m, doubling to a cap
+of 24h, cleared outright by any successful write — and each withheld pass logs
+at `WARN` with the subject, the issue reason and `retry_in`. So a persistently
+failing entry produces withholding notices rather than repeated failures, and
+`retry_in` is what tells an operator when to look again. The backoff exists
+because every failed attempt revokes the serial it had just signed: without it a
+refused store cost one revoked serial per interval, and each stays on the CRL
+until its certificate's `NotAfter` — five years for an entry with no `ttl`. Closing that needs a per-entry
 reconcile-failure series, of the shape
 `puppetca_k8s_export_last_error_timestamp_seconds` takes for the
 exporter; it is not in this release.
