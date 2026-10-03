@@ -366,27 +366,19 @@ Whether any managed certificate stores its material in a Kubernetes Secret, and
 so whether the pod needs to talk to the API server for one.
 
 False for a file-only configuration, which is the systemd shape and must not be
-given a projected token it has no use for. "unknown" from managedCertSecrets is
-not this predicate's problem: needsAPIAccess already answers true for an
-unreadable configuration, before it reaches here.
-*/}}
-{{/*
-The "unknown" arm below is currently UNREACHABLE from both call sites, and is
-kept deliberately rather than deleted.
+given a projected token it has no use for.
 
-needsAPIAccess returns true from its own configFullyKnown test before it reaches
-this predicate, and the NOTES gate at the other call site is guarded by
-`and (eq configFileKnown "true") …` — and configFileKnown true is exactly the
-condition under which managedCertSecrets returns JSON rather than "unknown". So
-no caller can observe it today, which means no test can either: an assertion
-aimed at it passes whether the arm is present or absent, as one written for it
-demonstrated.
+The "unknown" arm answers true, and no caller can reach it today: needsAPIAccess
+returns true from its own configFullyKnown test before it gets here, and the
+NOTES gate is guarded by `and (eq configFileKnown "true") …` — which is exactly
+the condition under which managedCertSecrets returns JSON rather than "unknown".
+A test aimed at that arm therefore passes whether the arm is present or absent.
 
 It stays because this is a general predicate about a feature, not about a
-caller. A future consumer that asks "do managed certificates need the API?"
-without first establishing that the config is readable would get the
+caller. A future consumer asking "do managed certificates need the API?" without
+first establishing that the config is readable would otherwise get the
 fail-closed answer from an empty list, which is the wrong direction for a
-question about granting access. Deleting the arm would move that hazard into
+question about granting access. Deleting the arm would move that hazard to
 whoever writes the next caller.
 */}}
 {{- define "openvox-ca.managedCertsNeedAPI" -}}

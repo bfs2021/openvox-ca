@@ -63,12 +63,6 @@ import (
 // certificate (#326) can use it for a store with quite different failure
 // semantics.
 //
-// Named rather than "that series", which is what it said: the paragraph above
-// about a reconcile-failure counter that does not exist was inserted between
-// the gauge's introduction and this sentence, leaving the pronoun pointing at
-// the nearest antecedent instead of the intended one. A referent two topics
-// away should be a name.
-//
 // Displacement is NOT a second such outcome, though it reads like one. When a
 // managed issuance replaces a certificate the CA already held for that name,
 // the subject keeps its expiry series without interruption -- the new

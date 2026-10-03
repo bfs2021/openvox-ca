@@ -30,11 +30,6 @@
 // either, and docs/kubernetes-export.md publishes it to operators. Both
 // packages previously held their own copy, each asserting in a comment that it
 // matched the other, with nothing making it so.
-//
-// This paragraph exists because the doc said "It holds no policy of its own"
-// while the package owned that label -- a description that stopped being true
-// when the label moved here, and which would have told the next reader this was
-// the wrong home for it.
 package k8sclient
 
 import (

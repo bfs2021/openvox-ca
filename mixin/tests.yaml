@@ -35,13 +35,9 @@
 #     beside a signed certificate, PAGES for a subject whose only certificate is
 #     revoked, and stays quiet during a storage outage.
 #
-#     That fifth clause used to read "stays quiet for a revoked certificate
-#     awaiting reissue", which was the behaviour before `state!="revoked"` was
-#     added to the rule. The case below flipped to expect the opposite and this
-#     summary did not, so the file's own header described the defect the matcher
-#     exists to fix. A header that lists what the cases assert is prose that
-#     goes stale silently; it is kept because the list is how a reader finds the
-#     case they want, but it has to be corrected in step.
+#     This list is how a reader finds the case they want, and it goes stale
+#     silently: it says what the cases assert, so a case whose expectation
+#     changes has to change the line above with it.
 #
 # The firing behaviour is the contract here; the annotation prose is not, so
 # repeating it below is a maintenance cost rather than an assertion worth

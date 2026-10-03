@@ -94,9 +94,10 @@ var exemptPackages = map[string]string{
 	"../metrics": "exposes only a Prometheus collector, with no issuance surface. " +
 		"If that changes it belongs in guardedPackages rather than here",
 	"../signer/openbao": "signs with a CA key it holds; it issues nothing and serves nothing",
-	// These two reasons were written the wrong way round, and the mistake is
-	// worth leaving a mark: an exemption is only as good as the fact it rests
-	// on, and both of these rested on a false one while reading as settled.
+	// The two binaries, and they are exempt on opposite grounds -- one because
+	// it DOES mint and that is the case the gate confines minting to, the other
+	// because it reaches no grant constructor at all. An exemption is only as
+	// good as the fact it rests on, so each states its own.
 	"../../cmd/openvox-ca": "the server binary, and the ONE caller that mints an admin " +
 		"credential: `openvox-ca generate --pp-cli-auth` reaches ca.PpCliAuth() and " +
 		"ca.GenerateOptions in cmd/openvox-ca/generate.go. That is exactly the " +
