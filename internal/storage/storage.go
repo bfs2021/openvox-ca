@@ -1516,7 +1516,7 @@ func wholeBlobInventoryMAC(key, blob []byte) []byte {
 //
 //	mac_i = HMAC-SHA256(key, mac_{i-1} ‖ line_i)
 //
-// where line_i is the canonical inventory.txt line (no trailing newline) and
+// where line_i is the canonical inventory line (no trailing newline) and
 // prev is the previous head (nil/empty for the first entry).
 func chainInventoryMAC(key, prev []byte, line string) []byte {
 	mac := hmac.New(sha256.New, key)
@@ -1540,11 +1540,12 @@ func canonicalInventoryLine(e InventoryEntry) string {
 	return fmt.Sprintf("%s %s %s /%s", e.Serial, e.NotBefore, e.NotAfter, e.Subject)
 }
 
-// FormatInventoryLine builds the canonical inventory.txt line (without the
-// trailing newline) from the semantic fields, formatting the timestamps in UTC
-// via InventoryTimeFormat. Issuance paths (signing, import) must construct
-// inventory lines through this single constructor so they cannot drift from the
-// reader/writer/HMAC format owned by canonicalInventoryLine.
+// FormatInventoryLine builds the canonical inventory line (without the trailing
+// newline) from the semantic fields, formatting the timestamps in UTC via
+// InventoryTimeFormat. Issuance paths (signing, import) must construct
+// inventory lines through this single constructor so they cannot drift from
+// canonicalInventoryLine, which the structured backends store and chain over.
+// The filesystem's inventory.txt is written from it by openVoxInventoryLine.
 func FormatInventoryLine(serial string, notBefore, notAfter time.Time, subject string) string {
 	return canonicalInventoryLine(InventoryEntry{
 		Serial:    serial,

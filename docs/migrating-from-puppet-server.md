@@ -141,6 +141,7 @@ openvox-ca-ctl import \
 cp "$PUPPET_SSL/ca/signed/"*.pem "$NEW_CADIR/signed/"
 cp "$PUPPET_SSL/ca/inventory.txt" "$NEW_CADIR/inventory.txt"
 cp "$PUPPET_SSL/ca/serial" "$NEW_CADIR/serial"
+chown -R puppet-ca:puppet-ca "$NEW_CADIR"
 ```
 
 Copy `inventory.txt` rather than rebuilding it from `signed/`: openvox-ca reads
@@ -148,7 +149,9 @@ it as OpenVox Server wrote it, and a rebuild loses every entry whose certificate
 is no longer in `signed/`. Copy `serial` too, over the `0001` that `import`
 writes. openvox-ca does not use it, since it generates random serial numbers,
 but OpenVox Server issues from it, and given this directory with a counter of
-`0001` it would issue serial numbers it has already used.
+`0001` it would issue serial numbers it has already used. The last line gives
+the directory to the user the shipped unit runs openvox-ca as, since the
+commands above ran as root.
 
 `--cert-bundle` must be a **complete chain, ordered nearest first**: the CA's own
 certificate, each issuer after it, ending with a self-signed root. A self-signed
@@ -253,7 +256,8 @@ openvox-ca generate \
 
 This runs before the server starts, against the cadir from step 4 or 5. Run it,
 and the start below, as the user that owns the cadir: `puppet` when it is
-OpenVox Server's own (step 3), as `sudo -u puppet openvox-ca generate …`. Run as
+OpenVox Server's own (step 3), as `sudo -u puppet openvox-ca generate …`, and
+`puppet-ca` after an import into a separate directory (step 5). Run as
 root, they leave files and lock files in the cadir that the service cannot use;
 see [file permissions](configuration.md#file-permissions).
 
@@ -436,7 +440,7 @@ the exported copies.
 | `ssl/ca/signed/*.pem` | `<cadir>/signed/*.pem` | Same structure |
 | `ssl/ca/inventory.txt` | `<cadir>/inventory.txt` | Same format; read and appended to in place |
 | `ssl/ca/serial` | (not used) | Left alone; openvox-ca uses random 128-bit serials |
-| `ssl/certificate_requests/*.pem` | `<cadir>/requests/*.pem` | Directory renamed |
+| `ssl/ca/requests/*.pem` | `<cadir>/requests/*.pem` | Same structure |
 | `ssl/certs/ca.pem` | (not needed) | Symlink; agents fetch CA cert via API |
 | `ssl/crl.pem` | (not needed) | Symlink; agents fetch CRL via API |
 
@@ -749,8 +753,13 @@ If openvox-ca is using OpenVox Server's directory in place (step 4), rolling
 back changes nothing in it:
 
 ```bash
-# Stop openvox-ca
-systemctl stop openvox-ca
+# Keep a copy of the inventory as openvox-ca leaves it, outside the cadir, for
+# the check before any return to openvox-ca (see below)
+cp "$NEW_CADIR/inventory.txt" /root/inventory-at-handback.txt
+
+# Stop openvox-ca, and keep it stopped: the unit is enabled, and would start
+# again at the next boot on the directory OpenVox Server now holds
+systemctl disable --now openvox-ca
 
 # Re-enable the built-in CA in OpenVox Server (or Puppet Server)
 sed -i \
@@ -781,7 +790,8 @@ file. Retire pending ones with `openvox-ca-ctl revoke --serial <hex>` before
 stopping openvox-ca if they must be in force under OpenVox Server.
 
 To return to openvox-ca afterwards, stop OpenVox Server's CA and, if it signed
-anything in the meantime, run [`openvox-ca rebuild-inventory-hmac`](operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity)
-before starting openvox-ca. That is the only preparation.
+anything in the meantime, run [`openvox-ca rebuild-inventory-hmac`](operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity),
+checking the inventory against the copy kept above, before
+`systemctl enable --now openvox-ca`. That is the only preparation.
 
 The backup from step 1 remains the way back from anything else.

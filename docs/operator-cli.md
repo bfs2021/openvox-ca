@@ -146,10 +146,11 @@ openvox-ca-ctl revoke --serial 472C95FAA0DAE424BD7E911E26066010 --force
 # while no replacement has been issued for that name, and `revoke --serial
 # <hex>` (above) is what is needed once one has. The WARN line names the serial
 # only when the revocation got as far as the CRL; otherwise take it from the
-# inventory. See docs/api.md for which is which. The deletes are best-effort
-# too and still report success: a "Clean: delete cert failed" or "Clean: delete
-# CSR failed" WARN means the subject still holds it and still refuses the
-# node's CSR, so run clean again once storage is healthy.
+# inventory (without the 0x the filesystem inventory writes before it). See
+# docs/api.md for which is which. The deletes are best-effort too and still
+# report success: a "Clean: delete cert failed" or "Clean: delete CSR failed"
+# WARN means the subject still holds it and still refuses the node's CSR, so
+# run clean again once storage is healthy.
 openvox-ca-ctl clean --certname agent.example.com
 
 # Re-sign the CRL with a fresh validity window (preserves all revocations)
@@ -739,7 +740,8 @@ get wrong:
 3. **Check the inventory for other live serials for that name.** With
    `revoke_on_auto_renew: false`, or after a renewal whose best-effort revoke
    failed, more than one can be valid. Step 1 retires only the newest; retire
-   each of the others with `openvox-ca-ctl revoke --serial <serial>`, which
+   each of the others with `openvox-ca-ctl revoke --serial <serial>` (the hex
+   digits only: drop the `0x` the filesystem inventory writes before them), which
    needs `--force` where the serial is still the certificate stored for its
    subject. Step 2 applies to each of them: a revocation is not honoured by a
    replica until it reloads.
@@ -886,9 +888,15 @@ Server do not touch the inventory, so they alone do not cause this. Rebuilding
 is the one preparation step for returning to openvox-ca:
 
 1. Stop OpenVox Server's CA, so nothing appends while you read.
-2. Run the report and check that the lines at the end of `inventory.txt`
-   account for the certificates OpenVox Server signed while it held the
-   directory, and nothing else.
+2. Run the report and check what changed. openvox-ca never rewrites a line and
+   OpenVox Server only appends, so if you kept a copy of `inventory.txt` when
+   you stopped openvox-ca, it must be a byte prefix of the current file
+   (`cmp -n "$(stat -c %s saved.txt)" saved.txt inventory.txt`), and the lines
+   after it must account for the certificates OpenVox Server signed while it
+   held the directory, and nothing else. The value covers the whole file, not
+   the lines after the copy: without a copy, the earlier lines cannot be
+   checked this way, so compare them with the step-1 backup of the migration
+   guide or accept them as a stated risk.
 3. Run it again with `--yes-re-bless`, then start openvox-ca.
 
 Run both as the user OpenVox Server and openvox-ca share

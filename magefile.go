@@ -5607,8 +5607,10 @@ func (Test) Migration() error {
 	fmt.Println("Tearing down migration stack...")
 	_ = runCompose(nil, "-f", "test/compose-migration.yml", "down", "--volumes")
 
-	// The round trip uses the image built above, under the same tag; it
-	// stops and starts its two services itself and tears its stack down.
+	// The round trip builds the same openvox-ca-integ:latest image itself
+	// (cached after the build above), so it does not depend on this target
+	// having run; it stops and starts its two services itself and tears its
+	// stack down.
 	fmt.Println("Running OpenVox Server round-trip tests...")
 	rtErr := sh.RunV("bash", "test/roundtrip/roundtrip.sh")
 

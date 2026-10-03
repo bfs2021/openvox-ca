@@ -323,8 +323,11 @@ directory as it stands.
 
 - **To start openvox-ca on OpenVox Server's cadir**, stop OpenVox Server's CA
   and point `cadir` at the directory. There is no import step.
-- **To go back to OpenVox Server**, stop openvox-ca and start OpenVox Server's
-  CA on the same directory. Nothing in it needs changing first. One thing does
+- **To go back to OpenVox Server**, stop openvox-ca (and disable its unit, or
+  it starts again at the next boot) and start OpenVox Server's CA on the same
+  directory. Nothing in it needs changing first. Keep a copy of `inventory.txt`
+  somewhere outside it if you may come back: it is what lets you check, before
+  returning, that OpenVox Server only appended. One thing does
   not carry over: a [delayed revocation](configuration.md#delayed-supersession)
   still pending in `superseded.json`. OpenVox Server ignores that file, so a
   certificate openvox-ca replaced within the last
@@ -1250,7 +1253,7 @@ Notes:
 > merely the better way to keep ancestor CRLs current, it is the only one that
 > does not require stopping the CA. On a non-`filesystem` backend there is a
 > `migrate` round trip if you cannot deliver a file to the pod — see
-> [re-importing a chain](migrating-from-puppet-server.md#step-3-import-the-ca)
+> [re-importing a chain](migrating-from-puppet-server.md#refreshing-ancestor-crls)
 > for it, and for the limits. Under `encrypt_ca_key` or
 > `ca_key_provider: openbao` there is **no** fallback: `import` cannot parse an
 > encrypted key, feeding it the plaintext one silently replaces your encrypted

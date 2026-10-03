@@ -2328,9 +2328,10 @@ See [the status response](api.md#certificate-status) for the exact rendering.
     {subject}_key.pem       Server-side generated private keys (mode 0600)
 ```
 
-> **Note:** Serial numbers are cryptographically random (128-bit). The `serial`
-> file used by older Puppet CAs for sequential serial tracking is no longer
-> written or read by this server.
+> **Note:** Serial numbers are cryptographically random (128-bit). openvox-ca
+> never reads the `serial` file older Puppet CAs track sequential serials in.
+> It writes `0001` there when the file is absent and otherwise leaves it alone,
+> because OpenVox Server issues from it if the cadir is handed back.
 
 The full on-disk layout, including the inventory HMAC files, is documented in
 [storage backends](storage-backends.md#filesystem-backend-default). Other backends
