@@ -308,6 +308,14 @@ printf '# Phase 1 -- OpenVox Server creates the CA\n'
 start_ovs || bail "Phase 1: OpenVox Server starts" "$_START_INFO"
 pass "Phase 1: OpenVox Server starts and creates its CA"
 
+# compose-roundtrip.yml runs openvox-ca as OpenVox Server's uid, written there
+# as a number. A bumped image that changed it would make the hand-over fail
+# for a reason far from its cause, so check the two still agree.
+_ovs_uid=$(ovs_sh 'id -u' 2>&1)
+[ "$_ovs_uid" = "64604" ] \
+    || bail "Phase 1: OpenVox Server runs as the uid compose-roundtrip.yml gives openvox-ca" \
+            "the image runs as uid [$_ovs_uid]; update ovca's user: in test/compose-roundtrip.yml"
+
 for n in a1.example.com a2.example.com a3.example.com; do
     _out=$(ovs_generate "$n") \
         && pass "Phase 1: OpenVox Server issues $n" \
@@ -338,6 +346,9 @@ for n in a2.example.com b1.example.com; do
         && pass "Phase 2: openvox-ca revokes $n by name" \
         || fail "Phase 2: openvox-ca revokes $n by name" "status $_code"
 done
+# openvox-ca has now re-signed a CRL OpenVox Server created: the revocation
+# OpenVox Server made itself must have survived it.
+expect_state 2 a1.example.com revoked
 _out=$(ovca_crl_lists a2.example.com) \
     && pass "Phase 2: the CRL lists the serial OpenVox Server gave a2.example.com" \
     || fail "Phase 2: the CRL lists the serial OpenVox Server gave a2.example.com" "$_out"
@@ -354,6 +365,7 @@ start_ovs || bail "Phase 3: OpenVox Server starts on the untouched cadir" \
     "$_START_INFO"
 pass "Phase 3: OpenVox Server starts on the untouched cadir"
 
+expect_ovs_listed 3 a1.example.com revoked
 expect_ovs_listed 3 a2.example.com revoked
 expect_ovs_listed 3 b1.example.com revoked
 expect_ovs_listed 3 b2.example.com signed
@@ -402,6 +414,7 @@ start_ovca || bail "Phase 4: openvox-ca starts after the rebuild" \
 pass "Phase 4: openvox-ca starts after the rebuild"
 
 expect_state 4 b2.example.com revoked
+expect_state 4 a2.example.com revoked
 expect_state 4 c1.example.com signed
 _fetch=$(ovca_cert_code b3.example.com)
 [ "$_fetch" = "404" ] \

@@ -79,5 +79,9 @@ var _ = Describe("Init and where the cadir keeps the CA key", func() {
 		Expect(os.WriteFile(filepath.Join(dir, "private", "ca_key.pem"), cachedKeyPEM, 0o600)).To(Succeed())
 
 		Expect(ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test").Init(ctx)).To(Succeed())
+
+		// Starting rearranges nothing: both copies are still there, unchanged.
+		Expect(os.ReadFile(filepath.Join(dir, "ca_key.pem"))).To(Equal(cachedKeyPEM))
+		Expect(os.ReadFile(filepath.Join(dir, "private", "ca_key.pem"))).To(Equal(cachedKeyPEM))
 	})
 })
