@@ -62,7 +62,8 @@ const (
 //
 // # Where it differs from a Secret store, and why
 //
-// Two differences, both of them properties of a filesystem rather than choices:
+// Three differences, each of them a property of a filesystem rather than a
+// choice:
 //
 //   - There is no adoption. A file carries no record of who wrote it, so there
 //     is nothing for `adopt_existing` to consult -- which is why that field
@@ -75,6 +76,12 @@ const (
 //     but two renames are two operations, and a reader between them sees one
 //     issuance's certificate with another's key. A Secret has no such window,
 //     because server-side apply carries all three keys in one request.
+//   - The CA chain is optional. `ca` may be left unset, which writes no chain
+//     at all; a Secret's `ca.crt` is mandatory. Same cause as the atomicity
+//     difference, read the other way: a Secret's keys move together, so
+//     omitting one that the store previously owned deletes it, while leaving a
+//     file alone costs nothing. Right for a component that already trusts this
+//     CA by some other route -- see [FilesConfig].
 //
 // The window is bounded and self-healing rather than harmless. A mismatched
 // pair fails every handshake made against it, and a component that loaded one

@@ -42,7 +42,8 @@
 // so rather than quietly supporting one: `adopt_existing` is a field of the
 // Secret store and not of the entry, because server-side apply has no
 // filesystem equivalent and a file carries no record of who wrote it. See
-// [FileStore] for the one other difference, which is atomicity.
+// [FileStore] for the two others: a write is not atomic across the pair, and
+// the CA chain is optional in a file store where a Secret must carry it.
 //
 // # The private key
 //
@@ -347,9 +348,10 @@ type FilesConfig struct {
 	// chain at all, which is right for a component that already trusts this CA
 	// by some other route.
 	//
-	// Optional here and mandatory in a Secret, which is the one asymmetry worth
-	// knowing about: a Secret's keys have to move together because omitting a
-	// previously-owned key removes it, and files have no such coupling.
+	// Optional here and mandatory in a Secret: a Secret's keys have to move
+	// together because omitting a previously-owned key removes it, and files
+	// have no such coupling. [FileStore] lists this beside the other two
+	// differences between the stores.
 	CA string `yaml:"ca"`
 }
 
