@@ -750,6 +750,11 @@ sed -i \
 systemctl restart puppetserver
 ```
 
+Then undo the `ca_server` change from step 6, on the server and on every agent
+you pointed at openvox-ca (see [Agent configuration](#agent-configuration)), so
+they use OpenVox Server's CA again. Until you do, certificate requests, renewals
+and CRL refreshes go to a CA that is no longer running.
+
 OpenVox Server finds the certificates openvox-ca issued and revoked, and can
 list, revoke and clean them. That holds while openvox-ca has run as OpenVox
 Server's user and kept the CA key as a plain file in the directory; see

@@ -94,7 +94,8 @@ mage test:puppet
 
 It then runs a second suite, `test/roundtrip/roundtrip.sh` on `test/compose-roundtrip.yml`, even when the first fails, and reports both. That one hands a single cadir between OpenVox Server's CA and openvox-ca four times, from the host: OpenVox Server creates the CA, openvox-ca starts on it with no import, OpenVox Server starts on what openvox-ca left, and openvox-ca returns after `rebuild-inventory-hmac --yes-re-bless`, which it must refuse to start without. Each phase issues certificates and revokes and cleans by name ones the other issued, and checks that `inventory.txt` only grew, in OpenVox Server's format. openvox-ca runs as OpenVox Server's uid, as [sharing the cadir](../storage-backends.md#sharing-the-cadir-with-openvox-server) requires. Each phase's inventory snapshot is kept under `.test-output/roundtrip/`.
 
-Every assertion in that suite reports why it failed, and every HTTP request
+Every assertion in the import-path suite (`test/migration/migration-test.sh`)
+reports why it failed, and every HTTP request
 goes through `test/migration/http-helpers.sh` so that curl's exit status, the
 HTTP status code, the byte count and curl's own error text survive into the TAP
 diagnostic. That is not decoration: the suite runs unattended against

@@ -58,9 +58,12 @@ itself, which nothing else would write again.
 
 `ca_key` is the one key whose path is resolved rather than fixed. It is
 `ca_key.pem`, where OpenVox Server keeps it, unless only `private/ca_key.pem`
-exists, in which case that file is read and written in place. Both present with
-different contents is `ErrCAKeyConflict` on every operation (see `caKeyPath` in
-`internal/storage/filesystem.go`).
+exists, in which case that file is read and written in place. The location is
+decided from the files' existence alone (`caKeyLocation` in
+`internal/storage/filesystem.go`), so `Exists` and the startup permission check
+never read the key, which the frontend process must not hold. Both present with
+different contents is `ErrCAKeyConflict` from `Get`, `Put` and `Delete`, the
+operations that handle the key itself (`checkCAKeyConflict`).
 
 `locks/` is the exception to the mapping above: its files are not blobs and have
 no logical key, so `Get`/`Put`/`List`/`Migrate` never touch them. They are the

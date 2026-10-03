@@ -234,13 +234,15 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 > [storage internals](development/storage-internals.md).
 
 (The directory also holds small internal integrity files; leave them in place.)
-File permissions are fixed: `0600` for `ca_key.pem`, for anything under
-`private/`, for the CRL,
-for the pending-supersession list, for the inventory and for the lock files
-under `locks/`; `0644` for the public data — issued certificates and CSRs. The
-blob modes are set on each file as it is created and your umask cannot widen
-them; the lock files and the directories are created at these modes and a
-tighter umask narrows them further.
+File permissions are fixed: `0600` for `ca_key.pem`, `inventory.txt`, the
+integrity files, `ca_crl.pem` and `superseded.json`, for anything under
+`private/` and for the lock files under `locks/`; `0644` for certificates,
+CSRs, `ca_crt.pem`, `ca_pub.pem` and `serial`. A file openvox-ca rewrites gets
+its mode, so a cleanup that drops expired lines from an `inventory.txt` OpenVox
+Server created leaves it `0600` where it was `0640`. The blob modes are set on
+each file as it is created and your umask cannot widen them; the lock files and
+the directories are created at these modes and a tighter umask narrows them
+further.
 
 `openvox-ca` never changes the mode of a file it did not create, so anything
 already on disk is left as you have it — but it does check its key material at
