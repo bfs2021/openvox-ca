@@ -5590,8 +5590,8 @@ func (Test) MigrationHelpers() error {
 // other left (test/roundtrip/roundtrip.sh). It runs even when the first fails,
 // so a red job reports both.
 //
-// Requires a container runtime and network access to pull
-// docker.io/voxpupuli/puppetserver:latest on first run.
+// Requires a container runtime and network access to pull the pinned
+// ghcr.io/openvoxproject/openvoxserver image both compose files name, on first run.
 func (Test) Migration() error {
 	mg.Deps(Build{}.All)
 	fmt.Println("Building compose images for migration test...")

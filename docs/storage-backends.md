@@ -315,10 +315,23 @@ four hex digits, and `/CN=<certname>`. It reads every line in that format and in
 the one it used before (`<serial> ... /<certname>`), in the same file, and never
 rewrites a line except to drop an expired one during cleanup.
 
+That covers a cadir OpenVox Server created and one this version of openvox-ca
+created. A cadir an earlier openvox-ca created keeps its key in
+`private/ca_key.pem`, where openvox-ca goes on reading and writing it; OpenVox
+Server looks for the key at the top of the cadir, so it cannot take that
+directory as it stands.
+
 - **To start openvox-ca on OpenVox Server's cadir**, stop OpenVox Server's CA
   and point `cadir` at the directory. There is no import step.
 - **To go back to OpenVox Server**, stop openvox-ca and start OpenVox Server's
-  CA on the same directory. Nothing in it needs changing first.
+  CA on the same directory. Nothing in it needs changing first. One thing does
+  not carry over: a [delayed revocation](configuration.md#delayed-supersession)
+  still pending in `superseded.json`. OpenVox Server ignores that file, so a
+  certificate openvox-ca replaced within the last
+  `superseded_cert_revoke_after_sec` stays valid until it expires, or until
+  openvox-ca takes the directory back and its sweep resumes. To have those
+  revocations in force under OpenVox Server, retire them first with
+  `openvox-ca-ctl revoke --serial <hex>`, or let the sweep empty the file.
 - **To return to openvox-ca after OpenVox Server has signed anything**, rebuild
   the inventory integrity value first. OpenVox Server appends to
   `inventory.txt` without updating `.inventory.hmac`, so openvox-ca will not
@@ -333,9 +346,10 @@ Two conditions apply, and neither is about the directory's contents.
    key OpenVox Server created group-readable for `puppet`, and the files
    openvox-ca creates are private to its own user, so OpenVox Server could not
    read them. Run openvox-ca as `puppet` with a systemd drop-in (`User=puppet`,
-   `Group=puppet`, and `SupplementaryGroups=puppet-ca` so it can still read
-   its `0640 root:puppet-ca` configuration) for as long as the two share a
-   cadir. That gives up the dedicated-user isolation [the shipped unit's
+   `Group=puppet`, `SupplementaryGroups=puppet-ca`) for as long as the two
+   share a cadir, and add `puppet` to the `puppet-ca` group
+   (`usermod -a -G puppet-ca puppet`) so that `sudo -u puppet openvox-ca …`
+   can read the `0640 root:puppet-ca` configuration too. That gives up the dedicated-user isolation [the shipped unit's
    hardening](systemd.md#hardening) describes: OpenVox Server, still running as
    `puppet`, can read openvox-ca's `private/` files, including the inventory
    integrity key.
@@ -1186,7 +1200,12 @@ The migration copies the whole CA — certificate, keys, CRL, serial, the
 inventory (its integrity value is recomputed under the destination's own
 scheme, so tamper detection continues to work there — but a mismatch present
 before the copy does not survive it), every pending CSR and every
-signed certificate. Per-subject generated private keys are **not** copied: they
+signed certificate. The inventory's lines are converted when exactly one end is
+the filesystem backend: into a database they are read in either form and stored
+in the canonical one, and onto the filesystem they are written in OpenVox
+Server's format, so the result can be [shared with OpenVox
+Server](#sharing-the-cadir-with-openvox-server). Between two backends of the
+same kind they are copied unchanged. Per-subject generated private keys are **not** copied: they
 always live on the local filesystem under `cadir`, so on a remote backend they
 stay put across a migration. The `ca_cert_file` / `ca_key_file` overrides are
 honoured on both ends.

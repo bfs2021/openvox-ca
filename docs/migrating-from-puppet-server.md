@@ -84,9 +84,14 @@ Group=puppet
 SupplementaryGroups=puppet-ca
 ```
 
-`SupplementaryGroups=puppet-ca` keeps `/etc/puppet-ca/config.yaml` readable:
-[running under systemd](systemd.md) installs it `0640 root:puppet-ca`, and
-without the group the service cannot read its own configuration.
+```bash
+usermod -a -G puppet-ca puppet
+```
+
+Both keep `/etc/puppet-ca/config.yaml` readable: [running under
+systemd](systemd.md) installs it `0640 root:puppet-ca`. The drop-in covers the
+service, and the group membership covers the `sudo -u puppet openvox-ca …`
+commands later in this guide.
 
 This gives up the dedicated `puppet-ca` user that [the shipped unit's
 hardening](systemd.md#hardening) relies on. OpenVox Server keeps running as
@@ -135,14 +140,15 @@ openvox-ca-ctl import \
 
 cp "$PUPPET_SSL/ca/signed/"*.pem "$NEW_CADIR/signed/"
 cp "$PUPPET_SSL/ca/inventory.txt" "$NEW_CADIR/inventory.txt"
+cp "$PUPPET_SSL/ca/serial" "$NEW_CADIR/serial"
 ```
 
 Copy `inventory.txt` rather than rebuilding it from `signed/`: openvox-ca reads
 it as OpenVox Server wrote it, and a rebuild loses every entry whose certificate
-is no longer in `signed/`. The new directory is then laid out as OpenVox
-Server's is, so it can be handed to OpenVox Server just the same. `import`
-initialises `serial`, which openvox-ca does not use; it generates random serial
-numbers.
+is no longer in `signed/`. Copy `serial` too, over the `0001` that `import`
+writes. openvox-ca does not use it, since it generates random serial numbers,
+but OpenVox Server issues from it, and given this directory with a counter of
+`0001` it would issue serial numbers it has already used.
 
 `--cert-bundle` must be a **complete chain, ordered nearest first**: the CA's own
 certificate, each issuer after it, ending with a self-signed root. A self-signed
@@ -764,8 +770,15 @@ OpenVox Server finds the certificates openvox-ca issued and revoked, and can
 list, revoke and clean them. That holds while openvox-ca has run as OpenVox
 Server's user and kept the CA key as a plain file in the directory; see
 [Sharing the cadir with OpenVox Server](storage-backends.md#sharing-the-cadir-with-openvox-server).
-After an import into a separate directory (step 5), point OpenVox Server's
-`cadir` at that one, or copy it back over the original.
+After an import into a separate directory (step 5), that directory belongs to
+openvox-ca's own user and its key and inventory are `0600`. Give it to
+OpenVox Server's user first (`chown -R puppet:puppet "$NEW_CADIR"`), then
+point OpenVox Server's `cadir` at it or copy it back over the original.
+
+Either way, a [delayed revocation](configuration.md#delayed-supersession) still
+pending in `superseded.json` does not carry over: OpenVox Server ignores that
+file. Retire pending ones with `openvox-ca-ctl revoke --serial <hex>` before
+stopping openvox-ca if they must be in force under OpenVox Server.
 
 To return to openvox-ca afterwards, stop OpenVox Server's CA and, if it signed
 anything in the meantime, run [`openvox-ca rebuild-inventory-hmac`](operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity)

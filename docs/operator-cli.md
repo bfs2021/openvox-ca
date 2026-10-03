@@ -894,7 +894,10 @@ is the one preparation step for returning to openvox-ca:
 Run both as the user OpenVox Server and openvox-ca share
 (`sudo -u puppet openvox-ca rebuild-inventory-hmac …`), not as root and not as
 `puppet-ca`. The rebuild does no `chown`, as described below, so a file it
-writes as anyone else is one the server cannot read.
+writes as anyone else is one the server cannot read. `puppet` must be in the
+`puppet-ca` group to read the server's configuration, which the [migration
+guide's step 3](migrating-from-puppet-server.md#step-3-run-openvox-ca-as-the-directorys-owner)
+sets up.
 
 Nothing else in the directory needs changing: openvox-ca reads OpenVox Server's
 inventory lines as they are.
