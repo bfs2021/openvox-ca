@@ -18,6 +18,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -390,6 +392,46 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		Entry("mixed case", "SQLite"),
 		Entry("padded", "  sqlite  "),
 	)
+
+	// A relative or padded setting, resolved against the working directory,
+	// because that is what the same value means to the server reading the same
+	// config. Every other spec in this file feeds absolute, unpadded paths, so
+	// dropping the filepath.Abs or the TrimSpace leaves all of them green.
+	//
+	// What it costs is not a bypass but a total refusal to start: certstore's
+	// own check rejects a reserved path that is not absolute, so every CA whose
+	// config writes a relative tls_key or logfile and configures a file store
+	// would fail at startup. Fail-closed, and so an availability fault rather
+	// than a security one -- which is also why nothing else would notice.
+	It("resolves a relative or padded reserved path against the working directory", func() {
+		cwd, err := os.Getwd()
+		Expect(err).NotTo(HaveOccurred())
+
+		cfg := &serverConfig{TLSKey: "tls/key.pem", LogFile: "  logs/ca.log  "}
+		reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")
+		Expect(err).NotTo(HaveOccurred())
+
+		bySetting := map[string]string{}
+		for _, r := range reserved {
+			bySetting[r.Setting] = r.Path
+		}
+		Expect(bySetting).To(HaveKeyWithValue("tls_key", filepath.Join(cwd, "tls", "key.pem")))
+		Expect(bySetting).To(HaveKeyWithValue("logfile", filepath.Join(cwd, "logs", "ca.log")))
+
+		// And that the resolved form is what the check then refuses, which is
+		// the half that matters: an unresolved "tls/key.pem" has nothing an
+		// entry's absolute path could ever match.
+		entry := certstore.Config{{
+			Certname:    "a.example.com",
+			Names:       []string{"a"},
+			RenewBefore: certstore.Duration(720 * time.Hour),
+			Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+				Cert: "/etc/a.pem", Key: filepath.Join(cwd, "tls", "key.pem"),
+			}},
+		}}
+		Expect(entry.CheckReservedPaths(reserved)).
+			To(MatchError(ContainSubstring("is tls_key")))
+	})
 
 	It("reserves the SQLite database, and only when SQLite is the backend", func() {
 		cfg := &serverConfig{StorageBackend: "sqlite", SQLDSN: "file:/var/lib/puppet-ca/ca.db"}

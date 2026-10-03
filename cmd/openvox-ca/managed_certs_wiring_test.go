@@ -196,15 +196,26 @@ managed_certs:
 			// function's doc comment promises, and the exact outcome the
 			// guard exists to prevent. The guard was written to catch a
 			// dropped call and silently accepted a swallowed error.
+			//
+			// Any mention of the identifier in a return result counts, not
+			// just the bare `return err`. `return fmt.Errorf("managed_certs:
+			// %w", err)` propagates it just as well, and a guard that
+			// insisted on the bare form would fail a correct change with a
+			// message saying the error is dropped -- a false accusation about
+			// the one call site this file guards, which is how a guard gets
+			// loosened or deleted rather than read.
 			for _, st := range stmt.Body.List {
 				ret, ok := st.(*ast.ReturnStmt)
 				if !ok {
 					continue
 				}
 				for _, res := range ret.Results {
-					if id, ok := res.(*ast.Ident); ok && id.Name == assigned.Name {
-						propagated = true
-					}
+					ast.Inspect(res, func(n ast.Node) bool {
+						if id, ok := n.(*ast.Ident); ok && id.Name == assigned.Name {
+							propagated = true
+						}
+						return !propagated
+					})
 				}
 			}
 			return true
@@ -219,9 +230,9 @@ managed_certs:
 				"certificate would ever be issued, and every other spec in this "+
 				"file would still pass")
 		Expect(propagated).To(BeTrue(),
-			"main.go compares attachManagedCerts's error against nil but does not "+
-				"return it, so a configuration that can never issue would be noted "+
-				"and then started anyway")
+			"main.go compares attachManagedCerts's error against nil but no return "+
+				"in that branch mentions it, wrapped or otherwise, so a configuration "+
+				"that can never issue would be noted and then started anyway")
 		Expect(checked).To(BeTrue(),
 			"main.go calls attachManagedCerts without checking the error it "+
 				"returns, so a configuration that can never issue would start "+

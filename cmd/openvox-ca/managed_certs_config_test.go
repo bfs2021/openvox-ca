@@ -247,12 +247,19 @@ managed_certs:
 })
 
 var _ = Describe("the export targets a managed certificate is checked against", func() {
-	It("lists Secret targets, whatever case the kind was written in", func() {
+	// Padded as well as miscased, because this runs before the export config's
+	// own Validate and Validate trims the kind too. A quoted `kind: " Secret "`
+	// therefore passes export validation and would slip past the overlap check
+	// if the trim were dropped here -- leaving two writers taking the same
+	// Secret's keys from each other, which is the fault the check exists to
+	// refuse.
+	It("lists Secret targets, whatever case or padding the kind was written in", func() {
 		cfg := k8sexport.Config{Targets: []k8sexport.Target{
 			{Kind: "secret", Metadata: k8sexport.Metadata{Name: "a", Namespace: "ns"}},
 			{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "b"}},
+			{Kind: " Secret ", Metadata: k8sexport.Metadata{Name: "c", Namespace: "ns"}},
 		}}
-		Expect(exportSecretTargets(cfg)).To(Equal([][2]string{{"ns", "a"}, {"", "b"}}))
+		Expect(exportSecretTargets(cfg)).To(Equal([][2]string{{"ns", "a"}, {"", "b"}, {"ns", "c"}}))
 	})
 
 	// A ConfigMap cannot be a managed certificate's store, so an overlap with

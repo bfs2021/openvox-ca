@@ -86,15 +86,31 @@ var _ = Describe("FileStore", func() {
 		// Absence is an input to the decision; a read failure is not. A store
 		// that reported "unreadable" as "absent" would reissue on every pass
 		// for as long as the filesystem was unhappy.
-		It("fails on a read error that is not absence", func() {
-			// A directory where a file is expected: os.ReadFile fails with
-			// EISDIR, which is not fs.ErrNotExist.
-			Expect(os.Mkdir(cfg.Cert, 0o755)).To(Succeed())
+		//
+		// Both reads, because they are two checks and only one of them was
+		// witnessed. Load reads the certificate first, so the certificate's
+		// arm is reached whichever path is broken, and the key's error check
+		// could have been deleted with the suite staying green -- leaving an
+		// unreadable key reported as absent, which is exactly the
+		// reissue-every-pass loop above. The key's arm is reached here because
+		// an absent certificate is not an error: the pass gets past the first
+		// read and fails on the second.
+		DescribeTable("fails on a read error that is not absence",
+			func(pathOf func() string) {
+				// A directory where a file is expected: os.ReadFile fails
+				// with EISDIR, which is not fs.ErrNotExist.
+				path := pathOf()
+				Expect(os.Mkdir(path, 0o755)).To(Succeed())
 
-			_, _, err := store().Load(ctx)
-			Expect(err).To(HaveOccurred())
-			Expect(err).To(MatchError(ContainSubstring(cfg.Cert)))
-		})
+				_, _, err := store().Load(ctx)
+				Expect(err).To(HaveOccurred())
+				Expect(err).To(MatchError(ContainSubstring(path)),
+					"the error has to name the unreadable path, or an operator "+
+						"has two files to choose between")
+			},
+			Entry("the certificate", func() string { return cfg.Cert }),
+			Entry("the key", func() string { return cfg.Key }),
+		)
 	})
 
 	Describe("Save", func() {

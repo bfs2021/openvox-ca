@@ -29,6 +29,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"go.yaml.in/yaml/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -109,7 +110,14 @@ managed_certs:
     store: {files: {cert: /c.pem, key: /k.pem}}
 `)
 			Expect(err).To(MatchError(ContainSubstring("missing unit")))
-			Expect(err).To(MatchError(ContainSubstring("2160h")))
+			// The line number and the operator's own value, not the hint. The
+			// format string's hint text contains "2160h", so asserting that
+			// substring matched a constant: it passed whether or not the error
+			// carried the offending value or the `line N:` prefix at all. Both
+			// are the point of this arm -- a managed_certs block has several
+			// durations in it, and nothing else in the message says which one
+			// was refused. The scalar arm is pinned this way already.
+			Expect(err).To(MatchError(MatchRegexp(`line \d+: "2160" is not a duration`)))
 		})
 	})
 
@@ -808,6 +816,63 @@ managed_certs:
 			Expect(sec.Data).To(HaveKeyWithValue("tls.key", []byte("KEY")))
 		})
 
+		// The two sources in competition, which neither spec above reaches:
+		// one sets DefaultNamespace for an entry that omits a namespace, the
+		// other sets no default at all. Build picks the entry's namespace when
+		// it has one and the default otherwise, and a mutation that inverted
+		// that precedence -- `if deps.DefaultNamespace != "" { ns = ... }` --
+		// passes both of them, because in each the two sources agree.
+		//
+		// What it would cost is a component's private key written into the CA
+		// pod's namespace instead of the component's own. The NotFound half is
+		// as much of the assertion as the Get: a build that wrote the Secret
+		// into BOTH namespaces satisfies the Get alone.
+		It("prefers the namespace an entry names over the CA pod's", func() {
+			cfg := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: a-tls, namespace: openvox}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {secret: {name: b-tls}}
+`)
+			Expect(cfg.Validate()).To(Succeed())
+			client := fake.NewClientset()
+			managed, err := cfg.Build(certstore.Deps{
+				CACerts:          stubCA{pem: []byte("CA")},
+				Client:           client,
+				DefaultNamespace: "ca-system",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(managed).To(HaveLen(2))
+			for _, m := range managed {
+				Expect(m.Save(context.Background(), []byte("CERT"), []byte("KEY"))).To(Succeed())
+			}
+
+			secrets := client.CoreV1()
+			byEntry, err := secrets.Secrets("openvox").
+				Get(context.Background(), "a-tls", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred(),
+				"the entry names namespace openvox, so its key belongs there and "+
+					"not in the CA's own namespace")
+			Expect(byEntry.Data).To(HaveKeyWithValue("tls.key", []byte("KEY")))
+
+			_, err = secrets.Secrets("ca-system").
+				Get(context.Background(), "a-tls", metav1.GetOptions{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+				"DefaultNamespace must not reach an entry that names its own; got %v", err)
+
+			byDefault, err := secrets.Secrets("ca-system").
+				Get(context.Background(), "b-tls", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred(),
+				"the second entry omits a namespace, so the default still applies "+
+					"to it -- the precedence is per entry, not per configuration")
+			Expect(byDefault.Data).To(HaveKeyWithValue("tls.key", []byte("KEY")))
+		})
+
 		// The file store's half of the same wiring, at the same depth. The
 		// Secret spec above builds, saves through the returned closure and
 		// reads the object back; the file side was asserted only as "Load and
@@ -971,6 +1036,16 @@ managed_certs:
 			Expect(decode(minimal).CheckExportOverlap([][2]string{{"openvox", "ca-trust"}})).To(Succeed())
 		})
 
+		// The positive counterpart the refusals need, and the only one that
+		// varies the namespace alone. The spec above varies the name, so a
+		// check that compared names and ignored namespaces entirely would
+		// satisfy it and every refusal below -- and would then refuse this
+		// perfectly ordinary layout, one Secret name per namespace, which is
+		// how the same component is laid out in two environments.
+		It("allows the same Secret name in a different, spelled-out namespace", func() {
+			Expect(decode(minimal).CheckExportOverlap([][2]string{{"puppet", "puppetserver-tls"}})).To(Succeed())
+		})
+
 		// The collision the check used to miss, and the ordinary shape rather
 		// than an exotic one: the export's own documentation shows `namespace`
 		// as optional, so one side spelling it out and the other omitting it is
@@ -986,6 +1061,10 @@ managed_certs:
 `)
 			err := cfg.CheckExportOverlap([][2]string{{"ca-system", "shared-tls"}})
 			Expect(err).To(MatchError(ContainSubstring("shared-tls")))
+			Expect(err).To(MatchError(ContainSubstring("omits its namespace")),
+				"the remedy has to name the cause: the two sides are spelled "+
+					"differently and collide only once resolved, which is not "+
+					"apparent from the configuration an operator is looking at")
 		})
 
 		It("refuses it the other way round too, with the export target omitting one", func() {
@@ -998,6 +1077,7 @@ managed_certs:
 `)
 			err := cfg.CheckExportOverlap([][2]string{{"", "shared-tls"}})
 			Expect(err).To(MatchError(ContainSubstring("shared-tls")))
+			Expect(err).To(MatchError(ContainSubstring("omits its namespace")))
 		})
 
 		It("has nothing to say about a file store", func() {

@@ -22,8 +22,10 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -90,6 +92,12 @@ var guardedPackages = []string{".", "../certstore"}
 // below fails on an importer that is in neither list.
 //
 // Paths are relative to this directory, matching guardedPackages.
+//
+// Every reason here except mintingExemption's is a claim that the package
+// reaches no forbidden identifier, and the exempt table below asserts exactly
+// that -- so the claims are checked rather than merely recorded, and a new
+// exemption is covered by being added. See mintingExemption for why that one is
+// the only entry the assertion has to step around.
 var exemptPackages = map[string]string{
 	"../metrics": "exposes only a Prometheus collector, with no issuance surface. " +
 		"If that changes it belongs in guardedPackages rather than here",
@@ -98,7 +106,7 @@ var exemptPackages = map[string]string{
 	// it DOES mint and that is the case the gate confines minting to, the other
 	// because it reaches no grant constructor at all. An exemption is only as
 	// good as the fact it rests on, so each states its own.
-	"../../cmd/openvox-ca": "the server binary, and the ONE caller that mints an admin " +
+	mintingExemption: "the server binary, and the ONE caller that mints an admin " +
 		"credential: `openvox-ca generate --pp-cli-auth` reaches ca.PpCliAuth() and " +
 		"ca.GenerateOptions in cmd/openvox-ca/generate.go. That is exactly the " +
 		"operator-at-a-terminal case the gate exists to confine minting to -- an " +
@@ -110,6 +118,18 @@ var exemptPackages = map[string]string{
 		"at all: it imports internal/ca for its types and talks to a running CA over " +
 		"HTTP. It is exempt because there is nothing here to confine",
 }
+
+// mintingExemption is the one exemptPackages key whose reason is NOT "it
+// reaches nothing". It is exempt because it DOES mint, deliberately, and that
+// case is what the gate confines minting to.
+//
+// It is a named constant rather than a literal because two places depend on
+// which key it is: the map entry, and the exempt table, which asserts that
+// every OTHER exempt package references nothing. Spelling it twice would let
+// the table quietly stop stepping around the right one -- and the failure
+// shape, a table that skips a package it should assert, is not visible in a
+// green run.
+const mintingExemption = "../../cmd/openvox-ca"
 
 // caImporters returns every package directory in the module whose non-test
 // source imports internal/ca, at any depth, relative to this directory.
@@ -496,36 +516,49 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 	// The entries are generated from guardedPackages rather than written out,
 	// so adding a package to that list cannot be half-done: there is no second
 	// place to remember to update.
+	// scanForbidden parses every non-test .go file in dir and reports the
+	// forbidden identifiers they reference, with the number of files it
+	// examined. Shared by the two tables below so they cannot drift into
+	// looking differently: they differ in what they conclude from a reference,
+	// not in how they find one.
+	scanForbidden := func(dir string) (refs []string, checked int, readErr error) {
+		fset := token.NewFileSet()
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			checked++
+
+			path := filepath.Join(dir, name)
+			file, err := parser.ParseFile(fset, path, nil, 0)
+			Expect(err).NotTo(HaveOccurred(), path)
+			refs = append(refs, forbiddenRefs(fset, file)...)
+		}
+		return refs, checked, nil
+	}
+
 	tableArgs := []any{
 		func(dir string) {
-			fset := token.NewFileSet()
-			entries, err := os.ReadDir(dir)
+			refs, checked, err := scanForbidden(dir)
 			Expect(err).NotTo(HaveOccurred(),
 				"guardedPackages names %s, which cannot be read. If that package moved or "+
 					"was renamed, follow it -- do not delete the entry, or its issuance "+
 					"surface stops being guarded silently", dir)
 
-			var checked int
-			for _, entry := range entries {
-				name := entry.Name()
-				if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-					continue
-				}
-				checked++
-
-				path := filepath.Join(dir, name)
-				file, err := parser.ParseFile(fset, path, nil, 0)
-				Expect(err).NotTo(HaveOccurred(), path)
-
-				for _, ref := range forbiddenRefs(fset, file) {
-					refName := strings.SplitN(ref, "@", 2)[0]
-					Fail(strings.Join([]string{
-						strings.SplitN(ref, "@", 2)[1] + " references " + refName,
-						"Reason it is forbidden: " + forbidden[refName] + ".",
-						"If this is deliberate, the security argument in internal/ca/authgrant.go",
-						"has to be revisited first -- not this test.",
-					}, "\n"))
-				}
+			for _, ref := range refs {
+				refName := strings.SplitN(ref, "@", 2)[0]
+				Fail(strings.Join([]string{
+					strings.SplitN(ref, "@", 2)[1] + " references " + refName,
+					"Reason it is forbidden: " + forbidden[refName] + ".",
+					"If this is deliberate, the security argument in internal/ca/authgrant.go",
+					"has to be revisited first -- not this test.",
+				}, "\n"))
 			}
 
 			// Per package, not once for the walk as a whole. A single count
@@ -541,6 +574,59 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 		tableArgs = append(tableArgs, Entry(dir, dir))
 	}
 	DescribeTable("is not reachable from any of the guarded packages", tableArgs...)
+
+	// The exempt half. Every exemption but mintingExemption's rests on a claim
+	// of fact -- "no issuance surface", "issues nothing and serves nothing",
+	// "reaches no grant constructor at all" -- and a reason nothing checks is
+	// how a gate goes quietly green: internal/metrics holds a *ca.CA and
+	// serves HTTP, so a call to ca.PpCliAuth() added there would keep every
+	// other spec in this file passing. The claims are true today; this is what
+	// makes them stay checked.
+	//
+	// Entries are derived by excluding mintingExemption rather than listed, so
+	// a package added to exemptPackages is asserted by being added. If its
+	// exemption genuinely rests on minting, this table fails and says so --
+	// which is the right outcome, because a second minting caller is a change
+	// to the security argument, not to a list.
+	exemptArgs := []any{
+		func(dir string) {
+			refs, checked, err := scanForbidden(dir)
+			Expect(err).NotTo(HaveOccurred(),
+				"exemptPackages names %s, which cannot be read. If that package moved or "+
+					"was renamed, follow it -- deleting the entry would make its reason "+
+					"unverifiable while the sweep below still accepted it as known", dir)
+
+			for _, ref := range refs {
+				refName := strings.SplitN(ref, "@", 2)[0]
+				Fail(strings.Join([]string{
+					strings.SplitN(ref, "@", 2)[1] + " references " + refName,
+					"",
+					dir + " is exempt from the gate on this ground:",
+					"  " + exemptPackages[dir],
+					"",
+					"That reason is now false. Either move " + dir + " into guardedPackages,",
+					"or -- if the reference is deliberate -- revisit the security argument in",
+					"internal/ca/authgrant.go first and then rewrite the exemption to rest on",
+					"something true. Do not leave a reason that reads as settled while naming",
+					refName + ".",
+				}, "\n"))
+			}
+
+			// Same reason as the guarded table's count: an exemption whose
+			// directory had been emptied or renamed would reference nothing and
+			// pass, with its claim unexamined.
+			Expect(checked).To(BeNumerically(">", 0),
+				"no non-test source files were examined in %s, so its exemption reason "+
+					"was not checked against anything", dir)
+		},
+	}
+	for _, dir := range slices.Sorted(maps.Keys(exemptPackages)) {
+		if dir == mintingExemption {
+			continue
+		}
+		exemptArgs = append(exemptArgs, Entry(dir, dir))
+	}
+	DescribeTable("is absent from every exempt package that claims to reach nothing", exemptArgs...)
 
 	// What makes guardedPackages authoritative rather than remembered.
 	//
@@ -696,6 +782,11 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 
 			Expect(failures).NotTo(BeEmpty(),
 				"an unreadable directory must fail the sweep rather than reading as empty")
+			Expect(strings.Join(failures, "\n")).To(ContainSubstring("does-not-exist"),
+				"the failure must name the directory, as the unparseable-file case "+
+					"names the file: importsCA annotates both with the path it was "+
+					"given, and dropping the annotation on this arm alone would "+
+					"otherwise go unnoticed")
 		})
 	})
 })

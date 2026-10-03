@@ -72,9 +72,9 @@ func WithManagedByLabel(configured map[string]string) map[string]string {
 	return labels
 }
 
-// NamespaceFile is the standard in-cluster path holding the pod's own
+// namespaceFile is the standard in-cluster path holding the pod's own
 // namespace, mounted from its ServiceAccount.
-const NamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+const namespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 // InClusterClientset builds a Kubernetes clientset from the in-cluster
 // ServiceAccount credentials (token, CA, and KUBERNETES_SERVICE_HOST/PORT).
@@ -111,12 +111,12 @@ func InClusterClientset(feature string) (kubernetes.Interface, error) {
 // file, so a caller must not turn this error into a claim about where the
 // process is running. Both errors name the path, which is what an operator
 // needs either way.
-func PodNamespace() (string, error) { return podNamespaceFrom(NamespaceFile) }
+func PodNamespace() (string, error) { return podNamespaceFrom(namespaceFile) }
 
 // podNamespaceFrom is PodNamespace against a caller-supplied path, so the
 // read-failure, all-whitespace and success arms can be driven directly.
 //
-// A seam rather than a var: making NamespaceFile writable to reach these
+// A seam rather than a var: making namespaceFile writable to reach these
 // branches would leave the real path mutable at runtime for the benefit of a
 // test, and this value decides which namespace a Secret store writes into when
 // an entry does not name one. That is worth keeping constant.
