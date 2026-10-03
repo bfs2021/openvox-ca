@@ -120,6 +120,34 @@ var _ = Describe("A filesystem inventory written by OpenVox Server", func() {
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 	})
 
+	It("writes a line OpenVox Server's own reader resolves when it signs", func() {
+		// The reader is OpenVox Server's, transcribed: find-matching-valid-
+		// serial-numbers splits the line on " ", compares the subject with
+		// its leading "/" dropped against "CN=<certname>", and parses the
+		// serial with base-16-str->biginteger, which drops the first two
+		// characters unconditionally. A line this CA writes must survive all
+		// three, or OpenVox Server cannot revoke what this CA issued by name.
+		Expect(myCA.Init(ctx)).To(Succeed())
+		csrPEM, _ := buildCSR("agent.example.com")
+		_, err := myCA.SaveRequest(ctx, "agent.example.com", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := myCA.Sign(ctx, "agent.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(certPEM)
+		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		inv, err := store.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		row := strings.Split(strings.TrimSuffix(string(inv), "\n"), " ")
+		Expect(row).To(HaveLen(4))
+		Expect(row[3][1:]).To(Equal("CN=agent.example.com"), "is-subject-in-inventory-row?")
+		serial, ok := new(big.Int).SetString(row[0][2:], 16)
+		Expect(ok).To(BeTrue(), "base-16-str->biginteger")
+		Expect(serial).To(Equal(cert.SerialNumber))
+		Expect(row[2]).To(Equal(cert.NotAfter.UTC().Format(storage.InventoryTimeFormat)), "is-not-expired?")
+	})
+
 	It("revokes by name a certificate OpenVox Server issued", func() {
 		leaf := issuedByOVS(2, "agent.example.com", lastYear, nextYear, true)
 		Expect(myCA.Init(ctx)).To(Succeed())

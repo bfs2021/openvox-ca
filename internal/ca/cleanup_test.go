@@ -173,15 +173,15 @@ var _ = Describe("CA CleanupExpiredCerts", func() {
 		// Precondition: the seeded cert is revoked and present everywhere.
 		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(HaveLen(1))
 		Expect(store.HasCert(ctx, "expired-node")).To(BeTrue())
-		Expect(inventoryString()).To(ContainSubstring("/expired-node"))
+		Expect(inventoryString()).To(ContainSubstring("/CN=expired-node"))
 
 		removed, err := myCA.CleanupExpiredCerts(ctx, time.Hour)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(removed).To(Equal(1))
 
 		inv := inventoryString()
-		Expect(inv).NotTo(ContainSubstring("/expired-node"))
-		Expect(inv).To(ContainSubstring("/live-node"))
+		Expect(inv).NotTo(ContainSubstring("/CN=expired-node"))
+		Expect(inv).To(ContainSubstring("/CN=live-node"))
 		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(BeEmpty())
 		Expect(store.HasCert(ctx, "expired-node")).To(BeFalse())
 		Expect(store.HasCert(ctx, "live-node")).To(BeTrue())
@@ -224,7 +224,7 @@ var _ = Describe("CA CleanupExpiredCerts", func() {
 		removed, err := myCA.CleanupExpiredCerts(ctx, 30*24*time.Hour)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(removed).To(Equal(0))
-		Expect(inventoryString()).To(ContainSubstring("/recent-node"))
+		Expect(inventoryString()).To(ContainSubstring("/CN=recent-node"))
 		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(HaveLen(1))
 	})
 
@@ -245,7 +245,7 @@ var _ = Describe("CA CleanupExpiredCerts", func() {
 		removed, err := myCA.CleanupExpiredCerts(ctx, 0)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(removed).To(Equal(0))
-		Expect(inventoryString()).To(ContainSubstring("/weird-node"))
+		Expect(inventoryString()).To(ContainSubstring("/CN=weird-node"))
 	})
 
 	It("cleans up returned entries and reports the count even when the prune errors", func() {
@@ -282,7 +282,7 @@ var _ = Describe("CA CleanupExpiredCerts", func() {
 
 		// The cleanup for the returned entry ran despite the error: nothing
 		// is orphaned.
-		Expect(inventoryString()).NotTo(ContainSubstring("/expired-node"))
+		Expect(inventoryString()).NotTo(ContainSubstring("/CN=expired-node"))
 		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(BeEmpty(),
 			"the CRL entry must be dropped despite the prune error")
 		Expect(store.HasCert(ctx, "expired-node")).To(BeFalse(),
@@ -324,7 +324,7 @@ var _ = Describe("CA CleanupExpiredCerts", func() {
 			"the CRL failure must surface")
 		Expect(removed).To(Equal(1), "the durably removed entry must still be counted")
 
-		Expect(inventoryString()).NotTo(ContainSubstring("/expired-node"))
+		Expect(inventoryString()).NotTo(ContainSubstring("/CN=expired-node"))
 		Expect(store.HasCert(ctx, "expired-node")).To(BeFalse(),
 			"the stored cert must be deleted despite the CRL failure")
 		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(HaveLen(1),
@@ -399,7 +399,7 @@ var _ = Describe("CA CleanupExpiredCerts", func() {
 		Expect(err).To(MatchError(context.DeadlineExceeded), "the prune's deadline error must surface")
 		Expect(removed).To(Equal(1))
 
-		Expect(inventoryString()).NotTo(ContainSubstring("/expired-node"))
+		Expect(inventoryString()).NotTo(ContainSubstring("/CN=expired-node"))
 		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(BeEmpty(),
 			"the CRL entry must be dropped even though the prune consumed the deadline")
 		Expect(store.HasCert(ctx, "expired-node")).To(BeFalse(),
@@ -434,8 +434,8 @@ var _ = Describe("CA CleanupExpiredCerts", func() {
 		Expect(liveCertAfter).To(Equal(liveCertBefore))
 
 		inv := inventoryString()
-		Expect(inv).To(ContainSubstring("/renewed-node"))
-		Expect(strings.Count(inv, "/renewed-node")).To(Equal(1))
+		Expect(inv).To(ContainSubstring("/CN=renewed-node"))
+		Expect(strings.Count(inv, "/CN=renewed-node")).To(Equal(1))
 	})
 })
 

@@ -20,6 +20,7 @@ package storage
 import (
 	"context"
 	"io/fs"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -65,6 +66,56 @@ var _ = Describe("Reading a filesystem inventory written by OpenVox Server", fun
 		Entry("a bare 0x", "0x 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /a",
 			"0x", "a"),
 	)
+
+	DescribeTable("openVoxInventoryLine reproduces OpenVox Server's own lines byte for byte",
+		func(line string) {
+			e, ok := parseBlobInventoryEntry(line)
+			Expect(ok).To(BeTrue())
+			Expect(openVoxInventoryLine(e, "unused")).To(Equal(line))
+		},
+		Entry("an agent's certificate", ovsAgentLine),
+		Entry("its own CA certificate", ovsCALine),
+		Entry("a serial wider than the padding", "0x1A2B3C4D5E6F708192A3B4C5D6E7F801 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /CN=web.example.com"),
+	)
+
+	DescribeTable("openVoxInventoryLine renders this CA's canonical line in OpenVox Server's form",
+		func(canonical, want string) {
+			e, ok := parseInventoryEntry(canonical)
+			Expect(ok).To(BeTrue())
+			Expect(openVoxInventoryLine(e, canonical)).To(Equal(want))
+		},
+		Entry("a small serial is padded to four digits",
+			"2F 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /agent.example.com",
+			"0x002F 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /CN=agent.example.com"),
+		Entry("a random 128-bit serial is not truncated",
+			"9F3C4D5E6F708192A3B4C5D6E7F80112 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /agent.example.com",
+			"0x9F3C4D5E6F708192A3B4C5D6E7F80112 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /CN=agent.example.com"),
+		Entry("a lower-case serial is upper-cased",
+			"9f3c 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /agent.example.com",
+			"0x9F3C 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /CN=agent.example.com"),
+		Entry("a subject already in X.500 form is not given a second CN",
+			"1 2026-01-01T00:00:00UTC 2041-01-01T00:00:00UTC /CN=Puppet CA: puppet.example.com",
+			ovsCALine),
+		Entry("a serial that is not hex is left as the caller wrote the line",
+			"NOTHEX 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /a",
+			"NOTHEX 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /a"),
+	)
+
+	It("appends to the filesystem inventory in OpenVox Server's format", func() {
+		ctx := context.Background()
+		svc := New(GinkgoT().TempDir())
+		Expect(svc.EnsureDirs(ctx)).To(Succeed())
+		Expect(svc.TouchInventory(ctx)).To(Succeed())
+		Expect(svc.InitHMAC(ctx)).To(Succeed())
+
+		Expect(svc.AppendInventory(ctx,
+			FormatInventoryLine("2F", time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC),
+				time.Date(2031, 1, 3, 0, 0, 0, 0, time.UTC), "agent.example.com"))).To(Succeed())
+
+		got, err := svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "the HMAC must cover the line as written")
+		Expect(string(got)).To(Equal("0x002F 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /CN=agent.example.com\n"))
+	})
 
 	It("leaves the structured backends' parser reading lines as written", func() {
 		// The structured backends store what parseInventoryEntry returns and

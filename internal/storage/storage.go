@@ -381,18 +381,22 @@ func (s *StorageService) AppendInventoryRecord(ctx context.Context, entry string
 		}
 	}
 
-	if err := s.backend.AppendLine(ctx, KeyInventory, []byte(entry+"\n"), BlobPrivate); err != nil {
+	// The whole-blob inventory is OpenVox Server's inventory.txt, which a
+	// rollback hands back to it, so the line goes in in its format rather than
+	// this CA's canonical one.
+	line := openVoxInventoryLine(parsed, entry)
+	if err := s.backend.AppendLine(ctx, KeyInventory, []byte(line+"\n"), BlobPrivate); err != nil {
 		return err
 	}
 
 	if s.hmacKey != nil {
 		// AppendLine is a literal byte-append, so the stored blob is now exactly
-		// data + entry + "\n". Hash that reconstruction directly instead of
+		// data + line + "\n". Hash that reconstruction directly instead of
 		// re-reading the blob (which computeInventoryHMAC would do), keeping the
 		// value byte-identical to a fresh whole-blob recompute.
-		newBlob := make([]byte, 0, len(data)+len(entry)+1)
+		newBlob := make([]byte, 0, len(data)+len(line)+1)
 		newBlob = append(newBlob, data...)
-		newBlob = append(newBlob, entry...)
+		newBlob = append(newBlob, line...)
 		newBlob = append(newBlob, '\n')
 		if err := s.backend.Put(ctx, KeyInventoryHMAC, wholeBlobInventoryMAC(s.hmacKey, newBlob), BlobPrivate); err != nil {
 			// The line is already durably appended, but the stored HMAC now
@@ -1588,6 +1592,34 @@ func parseBlobInventoryEntry(line string) (InventoryEntry, bool) {
 	e.Serial = inventorySerial(e.Serial)
 	e.Subject = inventorySubject(e.Subject)
 	return e, true
+}
+
+// openVoxInventoryLine renders e as OpenVox Server's own writer does
+// (write-cert-to-inventory-unlocked! in its certificate_authority.clj): the
+// serial as "0x" and upper-case hex zero-padded to four digits, and the subject
+// as "/" and its X.500 name, "/CN=<certname>" for a certname. It is the single
+// place that format is produced, and it is used only for the whole-blob
+// inventory, which on the filesystem backend is the file OpenVox Server reads.
+// The structured backends store canonicalInventoryLine's form, which their hash
+// chain is computed over.
+//
+// parseBlobInventoryEntry reads the result back as e. A serial that is not
+// hexadecimal cannot be rendered, and raw, the line as the caller gave it, is
+// returned instead: nothing this CA issues has one, so that is only ever a line
+// written deliberately, and it is stored as written, as it always was.
+func openVoxInventoryLine(e InventoryEntry, raw string) string {
+	n, ok := new(big.Int).SetString(inventorySerial(e.Serial), 16)
+	if !ok {
+		return raw
+	}
+	subject := e.Subject
+	if !strings.Contains(subject, "=") {
+		// A certname. A subject already in X.500 form, such as OpenVox
+		// Server's own CA certificate carried through a store and back, is
+		// written as it is.
+		subject = "CN=" + subject
+	}
+	return fmt.Sprintf("0x%04X %s %s /%s", n, e.NotBefore, e.NotAfter, subject)
 }
 
 // inventorySerial normalises a blob inventory serial to NormaliseSerial's

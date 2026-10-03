@@ -9,6 +9,12 @@ Puppet-style `inventory.txt`, with one line per issued certificate:
 SERIAL NOT_BEFORE NOT_AFTER /SUBJECT
 ```
 
+On the filesystem backend that file is OpenVox Server's own, so lines are
+written in its format (`0x0002 ... /CN=agent`) and read in either that or the
+canonical one (`2 ... /agent`). The structured backends store the canonical
+form, and their hash chain is folded over it; `openvox-ca-ctl migrate` converts
+between the two.
+
 It is addressed by the logical key `inventory` and manipulated through a handful
 of `StorageService` methods (`AppendInventory`, `ReadInventory`,
 `TouchInventory`, `HasInventory`). Integrity is provided by an HMAC-SHA256 over

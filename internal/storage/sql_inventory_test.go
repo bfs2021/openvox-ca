@@ -316,8 +316,12 @@ var _ = Describe("InventoryMigrationRoundTrip", func() {
 		_, err = MigrateService(ctx, sqlite, dst, MigrateOptions{})
 		Expect(err).NotTo(HaveOccurred(), "MigrateService sqlite→fs")
 		Expect(dst.InitHMAC(ctx)).NotTo(HaveOccurred(), "fs integrity after round-trip")
+		// Back on the filesystem, it is in OpenVox Server's format.
 		got, _ = dst.ReadInventory(ctx)
-		Expect(string(got)).To(Equal(migratedSampleInventory), "round-tripped inventory")
+		Expect(string(got)).To(Equal(
+			"0x0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /CN=node1\n"+
+				"0x0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /CN=node2\n"+
+				"0x0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /CN=node1\n"), "round-tripped inventory")
 	})
 })
 

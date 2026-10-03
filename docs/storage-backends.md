@@ -198,7 +198,7 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ├── ca_key.pem              CA private key (see note)          0600
 ├── ca_pub.pem              CA public key
 ├── ca_crl.pem              Certificate Revocation List (see note)
-├── inventory.txt           Issued/revoked certificate log
+├── inventory.txt           Issued certificate log, in OpenVox Server's format
 ├── superseded.json         Certificates awaiting delayed
 │                           revocation (see note)              0600
 ├── private/
@@ -303,6 +303,42 @@ Default. Nothing to set.
 storage_backend: filesystem   # optional; this is the default
 cadir: /etc/puppetlabs/puppet/ssl/ca
 ```
+
+### Sharing the cadir with OpenVox Server
+
+A cadir works with either openvox-ca or OpenVox Server's own CA, as it stands.
+openvox-ca keeps the CA key where OpenVox Server does, and writes each
+`inventory.txt` line in OpenVox Server's format: a `0x` serial zero-padded to
+four hex digits, and `/CN=<certname>`. It reads every line in that format and in
+the one it used before (`<serial> ... /<certname>`), in the same file, and never
+rewrites a line except to drop an expired one during cleanup.
+
+- **To start openvox-ca on OpenVox Server's cadir**, stop OpenVox Server's CA
+  and point `cadir` at the directory. There is no import step.
+- **To go back to OpenVox Server**, stop openvox-ca and start OpenVox Server's
+  CA on the same directory. Nothing in it needs changing first.
+- **To return to openvox-ca after OpenVox Server has signed anything**, rebuild
+  the inventory integrity value first. OpenVox Server appends to
+  `inventory.txt` without updating `.inventory.hmac`, so openvox-ca will not
+  start until you do; see
+  [`rebuild-inventory-hmac`](operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity).
+  That is the only preparation.
+
+Two conditions apply, and neither is about the directory's contents.
+
+1. **Both must run as the same user.** OpenVox Server runs as `puppet`, and the
+   shipped systemd unit runs openvox-ca as `puppet-ca`. openvox-ca cannot read a
+   key OpenVox Server created group-readable for `puppet`, and the files
+   openvox-ca creates are private to its own user, so OpenVox Server could not
+   read them. Run openvox-ca as `puppet` with a systemd drop-in (`User=puppet`,
+   `Group=puppet`) for as long as the two share a cadir.
+2. **The CA key must be a plain PEM file in the cadir**, because that is the
+   only kind OpenVox Server can use. With `encrypt_ca_key`, `ca_key_file`
+   pointing elsewhere, or the [OpenBao Transit](openbao-transit.md) key
+   provider, the cadir does not hold a key OpenVox Server can sign with.
+
+The other backends do not share a format with OpenVox Server. Moving to one is a
+conversion, done by [`openvox-ca-ctl migrate`](#migrating-between-backends).
 
 ---
 

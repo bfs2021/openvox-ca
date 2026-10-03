@@ -102,6 +102,11 @@ var _ = Describe("PruneInventory", func() {
 				Expect(err).NotTo(HaveOccurred(), "ReadInventory after prune (head not rewritten?)")
 				want := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n" +
 					"0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1\n"
+				if name == "filesystem" {
+					// The filesystem backend wrote OpenVox Server's format.
+					want = "0x0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /CN=node1\n" +
+						"0x0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /CN=node1\n"
+				}
 				Expect(got).To(Equal([]byte(want)), "inventory after prune")
 
 				// A subsequent append must extend the rewritten chain cleanly.

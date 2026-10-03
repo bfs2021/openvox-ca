@@ -110,8 +110,8 @@ var _ = Describe("StorageService", func() {
 
 			data, err := store.ReadInventory(context.Background())
 			Expect(err).NotTo(HaveOccurred())
-			Expect(string(data)).To(ContainSubstring("/node1"))
-			Expect(string(data)).To(ContainSubstring("/node2"))
+			Expect(string(data)).To(ContainSubstring("/CN=node1"))
+			Expect(string(data)).To(ContainSubstring("/CN=node2"))
 		})
 
 		It("ReadInventory returns an error when inventory file is missing", func() {
@@ -473,8 +473,8 @@ var _ = Describe("StorageService", func() {
 
 				data, err := store.ReadInventory(context.Background())
 				Expect(err).NotTo(HaveOccurred())
-				Expect(string(data)).To(ContainSubstring("/node1"))
-				Expect(string(data)).To(ContainSubstring("/node2"))
+				Expect(string(data)).To(ContainSubstring("/CN=node1"))
+				Expect(string(data)).To(ContainSubstring("/CN=node2"))
 			})
 		})
 
