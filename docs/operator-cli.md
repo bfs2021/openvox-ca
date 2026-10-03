@@ -240,10 +240,13 @@ See [storage backends](storage-backends.md#migrating-between-backends) for migra
 ## Offline subcommands on the server binary
 
 Four subcommands live on `openvox-ca` rather than `openvox-ca-ctl`, because they
-must reach the storage backend and CA key provider named in the *server's*
-configuration. `openvox-ca-ctl` reads a different configuration file and can
-only address a local filesystem directory, so it cannot serve a CA whose state
-is in PostgreSQL or whose key is in OpenBao Transit.
+must reach the storage backend named in the *server's* configuration — and for
+`csr`, `import-ca-cert` and `generate`, its CA key provider too.
+`rebuild-inventory-hmac` is the exception: the inventory and its HMAC key both
+live in storage, so it never opens a session to the key backend.
+`openvox-ca-ctl` reads a different configuration file and can only address a
+local filesystem directory, so it cannot serve a CA whose state is in
+PostgreSQL or whose key is in OpenBao Transit.
 
 None of them needs a running server, and on a backend that supports one running
 instance none of them will *write* beside one: each is refused before it acts,

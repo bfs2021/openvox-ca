@@ -385,8 +385,8 @@ func (l *fileLocks) acquireInstance() (Unlocker, error) {
 	// Wrapped so the unlocker carries its identity, not merely its type. A
 	// bare *fileUnlocker is what every NAMED lock returns too -- crl,
 	// bootstrap, subject:<name> -- and holding one of those says nothing about
-	// being the only instance. LockIsEnforced answered true for a crl lock
-	// before this wrapper existed.
+	// being the only instance, so a predicate keyed on the type alone cannot
+	// answer "is this store held by exactly one instance".
 	return instanceUnlocker{Unlocker: &fileUnlocker{f: f, local: local, path: path}}, nil
 }
 

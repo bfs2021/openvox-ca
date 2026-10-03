@@ -306,6 +306,12 @@ is the safe way to inspect a CA that will not start.`,
 			// verifying ("something is writing to this store"), or the process
 			// being killed. A record emitted only on success is not an audit
 			// trail of a change, it is a record of the happy path.
+			// A durable record, because this is the one command that can make
+			// tampered inventory content authentic. Warn rather than Info: an
+			// operator asking after the fact whether a CA's integrity baseline
+			// was ever reset needs to find it without knowing to look, because
+			// afterwards nothing else distinguishes a re-blessed store from a
+			// healthy one.
 			slog.Warn("Inventory integrity re-asserted by rebuild-inventory-hmac; "+
 				"the inventory as it stood is now treated as authentic",
 				"scheme", rep.Scheme,
@@ -346,8 +352,32 @@ is the safe way to inspect a CA that will not start.`,
 			// now -- but the operator is told plainly that the value covers
 			// content they did not see, rather than being left to assume it
 			// covers what the report described.
-			if rep.KeyState == storage.HMACKeyUsable && !bytes.Equal(after.StoredHead, rep.ComputedHead) {
+			// Two bindings, because the strong one is not always available. With
+			// a usable key the heads are comparable and settle it exactly. With
+			// an unusable one the rebuild mints a new key, so the reported head
+			// was computed under a key that no longer exists and cannot be
+			// compared to anything -- but that is a reason the head check does
+			// not apply, not a licence to sign over content the operator never
+			// saw. There the inventory's shape stands in: an append or a removal
+			// moves the counts, which is the race #188 is about.
+			//
+			// Weaker, and worth naming as such: a substitution of equal entry
+			// and unparseable counts would pass. Closing that needs a
+			// key-independent content digest on the report, which the report
+			// does not carry.
+			changed := false
+			switch rep.KeyState {
+			case storage.HMACKeyUsable:
+				changed = !bytes.Equal(after.StoredHead, rep.ComputedHead)
+			default:
+				changed = after.Entries != rep.Entries ||
+					after.UnparseableLines != rep.UnparseableLines
+			}
+			if changed {
 				slog.Warn("Inventory changed between the report and the rebuild; the value covers content that was not shown",
+					"key_state", rep.KeyState.String(),
+					"reported_entries", rep.Entries,
+					"written_entries", after.Entries,
 					"reported", fullHead(rep.ComputedHead),
 					"written", fullHead(after.StoredHead))
 				return fmt.Errorf("the inventory changed after it was reported: the report described a state "+
@@ -358,17 +388,14 @@ is the safe way to inspect a CA that will not start.`,
 					headFingerprint(after.StoredHead, "(none stored)"))
 			}
 
-			// A durable record, because this is the one command that can make
-			// tampered inventory content authentic. Warn rather than Info: an
-			// operator asking after the fact whether a CA's integrity baseline
-			// was ever reset needs to find this without knowing to look, and
-			// afterwards nothing else distinguishes a re-blessed store from a
-			// healthy one. It carries both heads so the answer to "what was
-			// signed over" survives the terminal that ran it.
-			// The outcome, separately from the mutation above. Full hex rather
-			// than the terminal's fingerprint: a log line has no width to save,
-			// and eight of thirty-two bytes is not the answer to "what was
-			// signed over".
+			// The outcome, separately from the mutation recorded above: that one
+			// says the store was changed, this one says the change verified. The
+			// "durable record / Warn rather than Info" reasoning belongs to the
+			// mutation record and is stated there.
+			//
+			// Full hex rather than the terminal's fingerprint, for the reason
+			// that record gives: a log line has no width to save, and eight of
+			// thirty-two bytes does not answer "what was signed over".
 			slog.Warn("Inventory integrity rebuild verified",
 				"scheme", after.Scheme,
 				"entries", after.Entries,

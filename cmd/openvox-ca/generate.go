@@ -622,9 +622,16 @@ func describeIssued(result *ca.GenerateResult) (string, time.Time, error) {
 	return fmt.Sprintf("%X", cert.SerialNumber), cert.NotAfter, nil
 }
 
-// applySubcommandLogging points slog at the configured logfile so the
-// authorisation-grant audit line emitted by internal/ca reaches it, and returns
-// a closer.
+// applySubcommandLogging points slog at the configured logfile for an offline
+// subcommand, so what it records lands where the server's own records do rather
+// than only in the terminal that ran it, and returns a closer.
+//
+// Two callers with two different audit obligations. generate mints a
+// certificate, and the authorisation-grant line internal/ca emits says an
+// administrator credential was created; rebuild-inventory-hmac re-asserts
+// inventory integrity, and its re-assertion records are the only lasting
+// evidence that a CA's baseline was reset. Both are asked about after the fact,
+// and neither is answerable from a terminal that has closed.
 //
 // Two departures from how the root command uses setupLogger, both deliberate.
 //

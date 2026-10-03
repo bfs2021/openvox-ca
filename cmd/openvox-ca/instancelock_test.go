@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -58,6 +59,14 @@ var _ = Describe("the store instance lock", func() {
 		Expect(os.WriteFile(pinned, []byte("ca_key_algo: ecdsa\nca_key_size: 256\n"), 0o644)).To(Succeed())
 		setEnv("PUPPET_CA_CONFIG", pinned)
 		clearServerEnv()
+
+		// Every command driven here reaches applySubcommandLogging ->
+		// setupLogger -> slog.SetDefault, whose closer only closes the file and
+		// never puts the previous default back. Restored for the same reason
+		// generate_test.go and rebuildinventoryhmac_test.go restore it: the
+		// rebind is process-wide and outlives the spec that caused it.
+		origLogger := slog.Default()
+		DeferCleanup(func() { slog.SetDefault(origLogger) })
 	})
 
 	// holdStore takes the store's instance lock the way a running server does,
@@ -263,6 +272,29 @@ var _ = Describe("the store instance lock", func() {
 			Expect(err).NotTo(MatchError(ContainSubstring("already running against this store")))
 			Expect(stdout).To(ContainSubstring("verifies:      NO"),
 				"and it must still have produced the report the operator came for")
+		})
+
+		It("refuses rebuild-inventory-hmac even when --replicas-stopped is asserted", func() {
+			// --replicas-stopped stands in for enforcement that CANNOT happen:
+			// it satisfies the gate on backends where the instance lock excludes
+			// nobody. It is not an override, and where a real lock is held the
+			// refusal must still win -- an operator's assertion that nothing is
+			// writing does not outrank a process demonstrably holding the store.
+			caDir := GinkgoT().TempDir()
+			bootstrapCAInDir(caDir, "puppet.example.com")
+			breakInventoryIntegrity(caDir)
+			before, readErr := os.ReadFile(filepath.Join(caDir, ".inventory.hmac"))
+			Expect(readErr).NotTo(HaveOccurred())
+			holdStore(caDir)
+
+			_, _, err := runRebuild("--cadir", caDir, "--yes-re-bless", "--replicas-stopped")
+
+			Expect(err).To(MatchError(ContainSubstring("already running against this store")))
+			Expect(err).To(MatchError(ContainSubstring("pid " + strconv.Itoa(os.Getpid()))))
+
+			after, readAfter := os.ReadFile(filepath.Join(caDir, ".inventory.hmac"))
+			Expect(readAfter).NotTo(HaveOccurred())
+			Expect(after).To(Equal(before), "a refusal must not write")
 		})
 
 		It("refuses rebuild-inventory-hmac while another instance holds the store", func() {

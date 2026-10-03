@@ -237,28 +237,39 @@ var _ = Describe("InventoryIntegrityReport", func() {
 	})
 
 	Describe("content the entry count does not describe", func() {
-		It("counts lines the blob holds that are not entries", func() {
-			// The blob scheme MACs the whole blob, so a torn write or an
-			// injected fragment is covered by the value a rebuild re-asserts
-			// while being invisible in Entries -- the operator's only
-			// quantitative view of what they are about to sign over.
-			svc := newFilesystemInventoryService()
-			blob, err := svc.readInventoryForHMAC(ctx)
-			Expect(err).NotTo(HaveOccurred())
-			// Fewer than four fields: parseInventoryEntry's actual rejection
-			// rule. A longer sentence would be *accepted* as an entry, which is
-			// its own hazard but not the one this spec is about.
-			junk := append(blob, []byte("TORN-WRITE-FRAGMENT\n\n")...)
-			Expect(svc.backend.Put(ctx, KeyInventory, junk, BlobPrivate)).To(Succeed())
+		// The blob scheme MACs the whole blob, so a torn write or an injected
+		// fragment is covered by the value a rebuild re-asserts while being
+		// invisible in Entries -- the operator's only quantitative view of what
+		// they are about to sign over. The counter therefore has to agree with
+		// parseInventoryEntry's actual rule (fewer than four whitespace-separated
+		// fields) on both sides of it, and with the blank-line skip that runs
+		// before it: an implementation that counted every non-entry line would
+		// report the trailing newline as damage on a sound store, and one that
+		// only rejected single-token lines would stay silent on a line truncated
+		// mid-field.
+		DescribeTable("counting lines the blob holds that are not entries",
+			func(appended string, wantExtraEntries, wantUnparseable int) {
+				svc := newFilesystemInventoryService()
+				blob, err := svc.readInventoryForHMAC(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(svc.backend.Put(ctx, KeyInventory,
+					append(blob, []byte(appended)...), BlobPrivate)).To(Succeed())
 
-			rep, err := svc.InventoryIntegrityReport(ctx)
-			Expect(err).NotTo(HaveOccurred())
+				rep, err := svc.InventoryIntegrityReport(ctx)
+				Expect(err).NotTo(HaveOccurred())
 
-			Expect(rep.Entries).To(Equal(len(sampleInventoryLines)),
-				"the junk line is not an entry")
-			Expect(rep.UnparseableLines).To(Equal(1),
-				"but it is in the blob the integrity value covers, so it must be reported")
-		})
+				Expect(rep.Entries).To(Equal(len(sampleInventoryLines) + wantExtraEntries))
+				Expect(rep.UnparseableLines).To(Equal(wantUnparseable),
+					"what is in the blob the integrity value covers must be reported, and nothing else")
+			},
+			Entry("a blank line is structure, not damage", "\n\n", 0, 0),
+			Entry("a whitespace-only line likewise", "   \t \n", 0, 0),
+			Entry("one token", "TORN-WRITE-FRAGMENT\n", 0, 1),
+			Entry("truncated mid-field, three tokens",
+				"0x000f 2026-01-01T00:00:00UTC 2027-01-01T00:00:0\n", 0, 1),
+			Entry("four tokens is an entry, however little it resembles one",
+				"0x000f 2026-01-01T00:00:00UTC 2027-01-01T00:00:00UTC /CN=late.example.com\n", 1, 0),
+		)
 
 		It("reports none on a structured backend, whose entries are rows", func() {
 			svc, _ := newInventoryService()

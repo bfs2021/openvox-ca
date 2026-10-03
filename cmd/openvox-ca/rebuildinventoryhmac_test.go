@@ -1032,8 +1032,40 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 
 			logged, readErr := os.ReadFile(logFile)
 			Expect(readErr).NotTo(HaveOccurred())
-			Expect(string(logged)).To(ContainSubstring("Inventory changed between the report and the rebuild"),
-				"and it is on record, because the store was written before this was detected")
+			// Per record and by value, as the sibling audit specs are: this
+			// logfile also holds the mutation record and the instance-lock
+			// warning, and a file-wide match is satisfied by any of them.
+			rec := logRecord(logged,
+				"Inventory changed between the report and the rebuild; the value covers content that was not shown")
+			Expect(rec).To(HaveKeyWithValue("level", "WARN"))
+			Expect(rec["reported"]).NotTo(Equal(rec["written"]),
+				"the two heads differing is the whole finding; equal ones would mean nothing drifted")
+
+			onDisk, diskErr := os.ReadFile(filepath.Join(caDir, ".inventory.hmac"))
+			Expect(diskErr).NotTo(HaveOccurred())
+			Expect(rec).To(HaveKeyWithValue("written", hex.EncodeToString(onDisk)),
+				"the written head must be the one actually on disk, not a recomputation")
+		})
+
+		It("refuses when the inventory changed after the report, even with an unusable key", func() {
+			// The wrong-length state is the one where the binding could not use
+			// the head: the rebuild mints a new key, so the reported head was
+			// computed under a key that no longer exists. That is a reason the
+			// head comparison cannot apply, not a reason to bless unseen
+			// content -- and #188 is about exactly this append race.
+			writeLoggingConfig()
+			Expect(os.WriteFile(filepath.Join(caDir, "private/.inventory_hmac_key"),
+				[]byte("far too short"), 0o600)).To(Succeed())
+			breakInventoryIntegrity(caDir)
+
+			store := storeOver(caDir, func(b storage.Backend) storage.Backend {
+				return &appendingBackend{Backend: b}
+			})
+
+			_, err := runRebuildOver(store, "--yes-re-bless", "--replicas-stopped")
+
+			Expect(err).To(MatchError(ContainSubstring("changed after it was reported")),
+				"an unusable key is no licence to sign over content the operator never saw")
 		})
 
 		It("records the mutation when the rebuild itself fails mid-write", func() {
