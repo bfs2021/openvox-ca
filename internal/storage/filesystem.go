@@ -79,6 +79,12 @@ const (
 // operator may not have meant, or hand OpenVox Server one this CA never used.
 var ErrCAKeyConflict = errors.New("two different CA keys in the cadir")
 
+// ErrCAKeyLinkBroken is returned for a CA key file that is a symlink leading
+// nowhere. It deliberately does not wrap fs.ErrNotExist: callers read that as
+// "no key here" (migrate skips the key, Init takes the no-key branches), and a
+// link where the key belongs is a key that is meant to be there.
+var ErrCAKeyLinkBroken = errors.New("the CA key file is a link that leads nowhere")
+
 // FilesystemBackend stores blobs as files under a single base directory.
 // It is the default Backend implementation. It keeps OpenVox Server's own CA
 // directory layout and inventory line format, and reads a cadir an earlier
@@ -289,6 +295,14 @@ func (b *FilesystemBackend) Get(ctx context.Context, key string) ([]byte, error)
 		if err := b.checkCAKeyConflict(); err != nil {
 			return nil, err
 		}
+		data, present, err := readCAKeyCopy(p)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			return nil, &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist}
+		}
+		return data, nil
 	}
 	return os.ReadFile(p)
 }
@@ -339,6 +353,9 @@ func readCAKeyCopy(p string) (data []byte, present bool, err error) {
 		return nil, false, err
 	}
 	data, err = os.ReadFile(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, true, fmt.Errorf("%w: %s", ErrCAKeyLinkBroken, p)
+	}
 	if err != nil {
 		return nil, true, err
 	}
@@ -379,6 +396,13 @@ func (b *FilesystemBackend) Exists(ctx context.Context, key string) (bool, error
 		return true, nil
 	}
 	if errors.Is(err, fs.ErrNotExist) {
+		if key == KeyCAKey {
+			// Stat follows a link; a CA key link that leads nowhere is not
+			// an absent key (see ErrCAKeyLinkBroken).
+			if _, lerr := os.Lstat(p); lerr == nil {
+				return false, fmt.Errorf("%w: %s", ErrCAKeyLinkBroken, p)
+			}
+		}
 		return false, nil
 	}
 	return false, err

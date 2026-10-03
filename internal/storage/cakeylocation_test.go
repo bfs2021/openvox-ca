@@ -247,7 +247,29 @@ var _ = Describe("Filesystem CA key location", func() {
 
 		It("refuses to read either", func() {
 			_, err := store.GetCAKey(ctx)
-			Expect(err).To(MatchError(fs.ErrNotExist))
+			Expect(err).To(MatchError(storage.ErrCAKeyLinkBroken))
+			Expect(err).NotTo(MatchError(fs.ErrNotExist), "callers read ErrNotExist as no key")
+		})
+
+		It("refuses to say whether a key exists, rather than saying there is none", func() {
+			_, err := store.HasCAKey(ctx)
+			Expect(err).To(MatchError(storage.ErrCAKeyLinkBroken))
+		})
+
+		It("fails a migration rather than migrating without the key", func() {
+			dst := storage.New(GinkgoT().TempDir())
+			_, err := storage.MigrateService(ctx, store, dst, storage.MigrateOptions{})
+			Expect(err).To(MatchError(storage.ErrCAKeyLinkBroken))
+		})
+
+		It("refuses a private/ca_key.pem link that leads nowhere too", func() {
+			Expect(os.Remove(top)).To(Succeed())
+			Expect(os.Remove(legacy)).To(Succeed())
+			Expect(os.Symlink(filepath.Join(dir, "gone.pem"), legacy)).To(Succeed())
+			_, err := store.GetCAKey(ctx)
+			Expect(err).To(MatchError(storage.ErrCAKeyLinkBroken))
+			_, err = store.HasCAKey(ctx)
+			Expect(err).To(MatchError(storage.ErrCAKeyLinkBroken))
 		})
 
 		It("names the link, not private/ca_key.pem, as the key's location", func() {
@@ -256,12 +278,12 @@ var _ = Describe("Filesystem CA key location", func() {
 		})
 
 		It("refuses to write, and leaves private/ca_key.pem alone", func() {
-			Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(MatchError(fs.ErrNotExist))
+			Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(MatchError(storage.ErrCAKeyLinkBroken))
 			Expect(os.ReadFile(legacy)).To(Equal([]byte("old-key")))
 		})
 
 		It("refuses to delete, and leaves private/ca_key.pem alone", func() {
-			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(MatchError(fs.ErrNotExist))
+			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(MatchError(storage.ErrCAKeyLinkBroken))
 			Expect(os.ReadFile(legacy)).To(Equal([]byte("old-key")))
 		})
 	})
