@@ -376,7 +376,7 @@ func (s *StorageService) AppendInventoryRecord(ctx context.Context, entry string
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if e, ok := parseInventoryEntry(line); ok && e.Serial == parsed.Serial {
+		if e, ok := parseBlobInventoryEntry(line); ok && e.Serial == inventorySerial(parsed.Serial) {
 			return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
 		}
 	}
@@ -443,7 +443,8 @@ func (s *StorageService) SerialExists(ctx context.Context, serial string) (bool,
 //
 // Unlike SerialExists, the comparison is on the *normalised* value (uppercase
 // hex, no leading zeros) rather than the stored string. SerialExists can insist
-// on an exact match because both sides are written by this CA in one format; a
+// on an exact match because both sides are written by this CA in one format (a
+// blob inventory's lines, OpenVox Server's included, are normalised as read); a
 // serial reaching this method was typed by an operator, who may reasonably
 // write it in the lowercase, zero-padded or colon-free form some other tool
 // printed. Normalising here is also what lets a modern random serial and a
@@ -713,7 +714,7 @@ func parseInventoryBlobCounting(data []byte) (entries []InventoryEntry, unparsea
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if e, ok := parseInventoryEntry(line); ok {
+		if e, ok := parseBlobInventoryEntry(line); ok {
 			entries = append(entries, e)
 			continue
 		}
@@ -790,7 +791,7 @@ func (s *StorageService) PruneInventory(ctx context.Context, keep func(Inventory
 	var buf strings.Builder
 	var removed []InventoryEntry
 	for _, line := range strings.SplitAfter(string(data), "\n") {
-		if e, ok := parseInventoryEntry(line); ok && !keep(e) {
+		if e, ok := parseBlobInventoryEntry(line); ok && !keep(e) {
 			removed = append(removed, e)
 			continue
 		}
@@ -1540,6 +1541,11 @@ func FormatInventoryLine(serial string, notBefore, notAfter time.Time, subject s
 // parseInventoryEntry parses a single inventory.txt line into an InventoryEntry.
 // The format is "SERIAL NOT_BEFORE NOT_AFTER /SUBJECT"; the leading "/" on the
 // subject is stripped. Returns ok=false for blank or malformed lines.
+//
+// The subject is the rest of the line rather than the fourth field. This CA
+// never writes a subject with a space in it, but OpenVox Server records its own
+// CA certificate as "/CN=Puppet CA: <host>", and taking one field truncated
+// that to "CN=Puppet" wherever such a line was parsed.
 func parseInventoryEntry(line string) (InventoryEntry, bool) {
 	fields := strings.Fields(line)
 	if len(fields) < 4 {
@@ -1549,8 +1555,64 @@ func parseInventoryEntry(line string) (InventoryEntry, bool) {
 		Serial:    fields[0],
 		NotBefore: fields[1],
 		NotAfter:  fields[2],
-		Subject:   strings.TrimPrefix(fields[3], "/"),
+		Subject:   strings.TrimPrefix(strings.Join(fields[3:], " "), "/"),
 	}, true
+}
+
+// parseBlobInventoryEntry is parseInventoryEntry for the whole-blob inventory,
+// which on the filesystem backend is OpenVox Server's own inventory.txt. Every
+// reader of the blob form parses through it; the structured backends keep
+// parseInventoryEntry, and what they store is unaffected.
+//
+// The file may hold OpenVox Server's lines and this CA's side by side: OpenVox
+// Server writes "0x0002 ... /CN=agent.example.com" where this CA writes
+// "2 ... /agent.example.com". The serial and subject are normalised to this
+// CA's form (see inventorySerial and inventorySubject), so that every reader
+// compares the two spellings of one certificate as equal rather than as
+// different strings. The line itself is never rewritten; this only decides how
+// it is read.
+func parseBlobInventoryEntry(line string) (InventoryEntry, bool) {
+	e, ok := parseInventoryEntry(line)
+	if !ok {
+		return InventoryEntry{}, false
+	}
+	e.Serial = inventorySerial(e.Serial)
+	e.Subject = inventorySubject(e.Subject)
+	return e, true
+}
+
+// inventorySerial normalises a blob inventory serial to NormaliseSerial's
+// canonical form, which is also serialHexStr's in the ca package, so that
+// OpenVox Server's "0x0002" and a zero-padded "0002" both read as "2" and
+// compare numerically. The "0x" prefix is stripped here rather than accepted by
+// NormaliseSerial, which validates operator input and deliberately refuses it.
+// A serial that is not hexadecimal is returned unchanged, so the readers that
+// already report malformed serials still see, and report, the original text.
+func inventorySerial(raw string) string {
+	hex := raw
+	if rest, ok := strings.CutPrefix(raw, "0x"); ok {
+		hex = rest
+	} else if rest, ok := strings.CutPrefix(raw, "0X"); ok {
+		hex = rest
+	}
+	if n, err := NormaliseSerial(hex); err == nil {
+		return n
+	}
+	return raw
+}
+
+// inventorySubject reduces a blob inventory subject (its leading "/" already
+// stripped) that is a distinguished name holding a single common name to that
+// name: OpenVox Server's "/CN=agent.example.com" reads as "agent.example.com",
+// this CA's own subject. A multi-component name, in either the X.500 form
+// ("CN=a,O=b") or the slash-separated form older Puppet CAs wrote ("CN=a/O=b"
+// once stripped), and a common name with a space in it (OpenVox Server's CA
+// certificate) are not certnames, so they are left whole and never match one.
+func inventorySubject(subject string) string {
+	if cn, ok := strings.CutPrefix(subject, "CN="); ok && cn != "" && !strings.ContainsAny(cn, ",+=/\\ ") {
+		return cn
+	}
+	return subject
 }
 
 // latestSerialFromBlob scans a rendered inventory blob and returns the serial
@@ -1562,7 +1624,7 @@ func latestSerialFromBlob(data []byte, subject string) (string, error) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		e, ok := parseInventoryEntry(line)
+		e, ok := parseBlobInventoryEntry(line)
 		if !ok {
 			badLines++
 			continue
