@@ -210,6 +210,16 @@ Conventions:
   neither — an enumeration nobody re-derives is how a gate like this goes
   quietly green. Adding an issuance surface means adding it to one of those two
   lists, not leaving it out of both.
+- `internal/api/contract_test.go` is the third: the Puppet CA API contract,
+  which checks openvox-ca's responses against ones recorded from OpenVox Server
+  under `internal/api/testdata/contract/`. Never hand-edit that directory;
+  change `test/contract/record` and re-record, as
+  [docs/development/testing.md](docs/development/testing.md#the-puppet-ca-api-contract)
+  describes. A change that alters a response either matches OpenVox Server or
+  adds an exception, with its reason, to `contractExceptions` — and a bullet to
+  `docs/api.md#differences-from-openvox-server` in the same commit. Fixing a
+  difference fails the suite until its exception is removed, which is the
+  point; remove the bullet with it.
 
 ### Integration suites (build-tagged)
 
