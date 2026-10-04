@@ -279,6 +279,15 @@ func resolveCSRRateLimit(configured int) int {
 	return configured
 }
 
+// applyResponseFormats hands srv the settings that shape response bodies. It
+// is a function of its own so that a spec can pin the wiring from
+// configuration to server, which would otherwise sit inline in the server
+// start-up where nothing can reach it.
+func applyResponseFormats(srv *api.Server, cfg *serverConfig, serialFmt api.SerialNumberFormat) {
+	srv.PuppetDateTimeFormat = cfg.PuppetDateTimeFormat
+	srv.SerialNumberFormat = serialFmt
+}
+
 // minSigningConcurrency is the floor under the built-in CA signing bound.
 // GOMAXPROCS alone would give a single-CPU container a bound of 1, serialising
 // issuance behind the OCSP responder and making a certificate request wait on
@@ -539,6 +548,13 @@ func newRootCmd() *cobra.Command {
 			}
 			if err := cfg.CAKeyProviderConfig.Validate(); err != nil {
 				return err
+			}
+			// Only the frontend uses it, but it is checked here, before role
+			// dispatch and the --daemon fork, so that a typo refuses where the
+			// operator sees it and before the signer initialises the CA.
+			serialFmt, err := api.ParseSerialNumberFormat(cfg.SerialNumberFormat)
+			if err != nil {
+				return fmt.Errorf("invalid serial_number_format: %w", err)
 			}
 
 			absCADir, err := filepath.Abs(cfg.CADir)
@@ -819,13 +835,6 @@ func newRootCmd() *cobra.Command {
 
 			slog.Debug("Autosign config", "mode", asCfg.Mode, "path", asCfg.FileOrPath)
 
-			// Checked here rather than where the server is built, so a typo
-			// refuses before the CA initialises instead of after.
-			serialFmt, err := api.ParseSerialNumberFormat(cfg.SerialNumberFormat)
-			if err != nil {
-				return fmt.Errorf("invalid serial_number_format: %w", err)
-			}
-
 			// --- CA Initialisation ---
 			myCA := ca.New(store, asCfg, cfg.Hostname)
 			if err := applyCAConfig(myCA, cfg); err != nil {
@@ -922,8 +931,7 @@ func newRootCmd() *cobra.Command {
 			srv.CSRRateLimit = resolveCSRRateLimit(cfg.CSRRateLimit)
 			srv.SignBatchLimit = 50 // Default max batch size for sign operations
 			srv.PlainHTTP = !tlsConfigured && !isLoopback(cfg.Host) && !cfg.NoTLSRequired
-			srv.PuppetDateTimeFormat = cfg.PuppetDateTimeFormat
-			srv.SerialNumberFormat = serialFmt
+			applyResponseFormats(srv, cfg, serialFmt)
 
 			// Wire mTLS auth middleware when TLS is configured -- through the
 			// same predicate the listener uses, so a self-provisioned CA
