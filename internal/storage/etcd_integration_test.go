@@ -2174,3 +2174,11 @@ var _ = Describe("EtcdMigrateFromFilesystem", func() {
 		Expect(serial).To(Equal("0003"), "the subject index must be built during import")
 	})
 })
+
+var _ = Describe("EtcdBackendSubjectBlobLifecycle", func() {
+	It("tracks a subject's CSR and certificate through save, replace and delete", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		subjectBlobLifecycle(newBackend(cli, "/test-subject-blobs"))
+	})
+})

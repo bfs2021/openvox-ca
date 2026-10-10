@@ -543,3 +543,9 @@ var _ = Describe("RedisIntegrationPruneAtScale", func() {
 		}
 	})
 })
+
+var _ = Describe("RedisIntegrationSubjectBlobLifecycle", func() {
+	It("tracks a subject's CSR and certificate through save, replace and delete", func() {
+		subjectBlobLifecycle(newIntegrationBackend("subject-blobs"))
+	})
+})

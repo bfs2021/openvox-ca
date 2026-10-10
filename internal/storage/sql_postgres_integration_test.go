@@ -322,3 +322,9 @@ var _ = Describe("Postgres AcquireLockAliasingSubjects", func() {
 		}
 	})
 })
+
+var _ = Describe("Postgres subject CSR and certificate lifecycle", func() {
+	It("tracks a subject's CSR and certificate through save, replace and delete", func() {
+		subjectBlobLifecycle(newPostgresBackend())
+	})
+})
