@@ -112,9 +112,33 @@ func serialHexStr(n *big.Int) string {
 	return fmt.Sprintf("%X", n)
 }
 
-// ErrCertExists is returned by SaveRequest when a valid (non-revoked) certificate
-// already exists for the requested subject.
+// ErrCertExists is returned by the issuance paths that refuse to replace a valid
+// (non-revoked) certificate — Generate and ImportCertificate. SaveRequest
+// answers a *DuplicateCertError instead.
 var ErrCertExists = errors.New("certificate already exists")
+
+// The states DuplicateCertError reports, in OpenVox Server's words.
+const (
+	DuplicateRequested = "requested"
+	DuplicateSigned    = "signed"
+	DuplicateRevoked   = "revoked"
+)
+
+// DuplicateCertError is SaveRequest's refusal of a CSR for a subject that
+// already has a pending CSR, a signed certificate or a revoked one, while
+// AllowDuplicateCerts is false. Its message is OpenVox Server's, word for word,
+// because the HTTP layer returns it as the response body: see
+// validate-duplicate-cert-policy! in openvox-server's
+// src/clj/puppetlabs/puppetserver/certificate_authority.clj (8.14.1).
+type DuplicateCertError struct {
+	Subject string
+	// State is one of DuplicateRequested, DuplicateSigned or DuplicateRevoked.
+	State string
+}
+
+func (e *DuplicateCertError) Error() string {
+	return fmt.Sprintf("%s already has a %s certificate; ignoring certificate request", e.Subject, e.State)
+}
 
 // ErrCertRevoked is returned by the renewal paths when the certificate
 // presented for renewal is on the CRL. A sentinel because the HTTP layer has to
@@ -196,30 +220,19 @@ var ErrNotInitialized = errors.New("CA not initialized")
 //   - Cert exists and is NOT revoked → returns ErrCertExists (block issuance).
 //   - Cert exists and IS revoked → deletes it and returns nil (allow re-issuance).
 //
+// A certificate that cannot be read or parsed counts as not revoked, and so
+// blocks issuance.
+//
+// SaveRequest does not evict: it applies checkDuplicateLocked instead, which
+// refuses a revoked certificate as it does a signed one.
+//
 // c.mu must be held by the caller. This method checks revocation via the
 // in-memory CRL cache directly to avoid re-acquiring the lock.
 func (c *CA) evictRevokedLocked(ctx context.Context, subject string) error {
 	if !c.Storage.HasCert(ctx, subject) {
 		return nil
 	}
-
-	// Check revocation against cachedCRL directly (no lock acquisition).
-	certPEM, err := c.Storage.GetCert(ctx, subject)
-	if err != nil {
-		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
-	}
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
-	}
-
-	revoked := c.cachedCRL != nil && serialInCRL(c.cachedCRL, cert.SerialNumber)
-
-	if !revoked {
+	if !c.revokedLocked(c.storedCertLocked(ctx, subject)) {
 		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
 	}
 	slog.Debug("Removing revoked certificate", "subject", subject)
@@ -227,6 +240,87 @@ func (c *CA) evictRevokedLocked(ctx context.Context, subject string) error {
 		slog.Warn("Could not remove revoked certificate", "subject", subject, "error", err)
 	}
 	return nil
+}
+
+// checkDuplicateLocked applies OpenVox Server's duplicate-certificate policy to
+// a CSR about to be saved for subject. It reports what the subject already
+// holds, in upstream's order: a certificate (revoked or signed) takes
+// precedence over a pending request.
+//
+//   - Nothing held → nil.
+//   - Something held, AllowDuplicateCerts false → a *DuplicateCertError.
+//   - Something held, AllowDuplicateCerts true → nil, after an info line naming
+//     the held certificate's serial, if any. The caller's save then overwrites
+//     a pending CSR; a certificate is left alone until a signing replaces it,
+//     as upstream does, and that signing does not revoke it — the info line is
+//     the record of which serial is left valid.
+//
+// Both the subject lock and c.mu must be held by the caller, so that the answer
+// still holds when the CSR is saved. Revocation is read from the in-memory CRL
+// cache, as evictRevokedLocked does; it decides only which word the refusal
+// uses, since a signed certificate and a revoked one are both refused.
+//
+// A storage error is returned as one rather than read as "nothing held", so
+// that a backend fault cannot let a submission through that would otherwise
+// have been refused.
+func (c *CA) checkDuplicateLocked(ctx context.Context, subject string) error {
+	state := ""
+	var held *x509.Certificate
+	hasCert, err := c.Storage.CertExists(ctx, subject)
+	if err != nil {
+		return fmt.Errorf("checking for an existing certificate for %s: %w", subject, err)
+	}
+	if hasCert {
+		state = DuplicateSigned
+		held = c.storedCertLocked(ctx, subject)
+		if c.revokedLocked(held) {
+			state = DuplicateRevoked
+		}
+	} else {
+		hasCSR, err := c.Storage.CSRExists(ctx, subject)
+		if err != nil {
+			return fmt.Errorf("checking for a pending CSR for %s: %w", subject, err)
+		}
+		if hasCSR {
+			state = DuplicateRequested
+		}
+	}
+	if state == "" {
+		return nil
+	}
+	if c.AllowDuplicateCerts {
+		attrs := []any{"subject", subject, "state", state}
+		if held != nil {
+			attrs = append(attrs, "serial", serialHexStr(held.SerialNumber))
+		}
+		slog.Info("Accepting a duplicate certificate request (allow_duplicate_certs)", attrs...)
+		return nil
+	}
+	return &DuplicateCertError{Subject: subject, State: state}
+}
+
+// storedCertLocked returns subject's stored certificate, or nil when it cannot
+// be read or parsed. c.mu must be held by the caller.
+func (c *CA) storedCertLocked(ctx context.Context, subject string) *x509.Certificate {
+	certPEM, err := c.Storage.GetCert(ctx, subject)
+	if err != nil {
+		return nil
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return nil
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil
+	}
+	return cert
+}
+
+// revokedLocked reports whether cert is on the cached CRL. A nil cert counts as
+// not revoked. c.mu must be held by the caller.
+func (c *CA) revokedLocked(cert *x509.Certificate) bool {
+	return cert != nil && c.cachedCRL != nil && serialInCRL(c.cachedCRL, cert.SerialNumber)
 }
 
 // subjectRegex forbids a leading '-' so a certname can never be misread as a
@@ -1140,6 +1234,11 @@ func (c *CA) CleanMultiple(ctx context.Context, subjects []string) CleanResult {
 }
 
 // SaveRequest validates, persists the CSR, and triggers autosigning if configured.
+//
+// A subject that already has a pending CSR, a signed certificate or a revoked
+// one is refused with a *DuplicateCertError unless AllowDuplicateCerts is set
+// — see checkDuplicateLocked. Clean is what makes such a subject submittable
+// again.
 func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bool, error) {
 	if err := ValidateSubject(subject); err != nil {
 		return false, err
@@ -1186,10 +1285,10 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 
 	slog.Debug("Received CSR", "subject", subject)
 
-	// Acquire the cluster-wide per-subject lock for the entire evict + save +
+	// Acquire the cluster-wide per-subject lock for the entire check + save +
 	// autosign sequence. This prevents TOCTOU races where two concurrent
-	// SaveRequest calls (same or different replicas) both pass eviction and
-	// produce duplicate certificates.
+	// SaveRequest calls (same or different replicas) both pass the duplicate
+	// check and both save, or both autosign.
 	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()
 	var autosigned bool
@@ -1197,9 +1296,11 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
-		// Reject if a cert already exists and is not revoked; clear it if
-		// revoked so the node can re-register with a fresh key.
-		if err := c.evictRevokedLocked(ctx, subject); err != nil {
+		// OpenVox Server's duplicate-certificate policy, ahead of the save and
+		// of autosigning as upstream runs it: refuse a subject that already
+		// has a pending CSR, a signed certificate or a revoked one, unless
+		// allow_duplicate_certs is set.
+		if err := c.checkDuplicateLocked(ctx, subject); err != nil {
 			return err
 		}
 
@@ -1246,7 +1347,7 @@ var ErrNoCSR = errors.New("no pending CSR")
 // in the same critical section, so an unlocked delete could land in between:
 // the request the operator rejected was signed anyway, and the 204 told them
 // otherwise. It also stops the delete landing inside SaveRequest's
-// evict/save/autosign section, where it turned an agent's submission into a
+// check/save/autosign section, where it turned an agent's submission into a
 // "CSR not found" failure.
 //
 // The two orderings the lock leaves are both answers rather than races. A

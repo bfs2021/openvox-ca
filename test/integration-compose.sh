@@ -312,15 +312,30 @@ grep -qi "Revoked Certificates" <<< "$_crl_text" \
     && pass "CRL contains 'Revoked Certificates' section after revoke" \
     || fail "CRL contains 'Revoked Certificates' section after revoke"
 
-# Re-registration after revocation is allowed
+# Re-registration after revocation is refused until the subject is cleaned,
+# with OpenVox Server's 400 and body (allow_duplicate_certs is off).
 make_csr "$_AGENT" "$WORK_DIR/agent2.csr"
+_rereg_body=$(curl -s -w '\n%{http_code}' \
+    -X PUT -H "Content-Type: text/plain" \
+    --data-binary @"$WORK_DIR/agent2.csr" \
+    "${CA_URL}/puppet-ca/v1/certificate_request/${_AGENT}") || true
+[ "$(tail -n1 <<< "$_rereg_body")" = "400" ] \
+    && pass "Re-registration of a revoked subject returns 400" \
+    || fail "Re-registration of a revoked subject returns 400" "got HTTP $(tail -n1 <<< "$_rereg_body")"
+grep -qF "${_AGENT} already has a revoked certificate; ignoring certificate request" <<< "$_rereg_body" \
+    && pass "Re-registration refusal names the revoked certificate" \
+    || fail "Re-registration refusal names the revoked certificate" "body: $_rereg_body"
+
+$CTL clean --certname "$_AGENT" >/dev/null 2>&1 \
+    && pass "openvox-ca-ctl clean of the revoked subject succeeds" \
+    || fail "openvox-ca-ctl clean of the revoked subject succeeds"
 _rereg=$(curl -s -o /dev/null -w '%{http_code}' \
     -X PUT -H "Content-Type: text/plain" \
     --data-binary @"$WORK_DIR/agent2.csr" \
     "${CA_URL}/puppet-ca/v1/certificate_request/${_AGENT}") || true
-[[ "$_rereg" =~ ^2 ]] \
-    && pass "Re-registration after revocation returns 2xx" \
-    || fail "Re-registration after revocation returns 2xx" "got HTTP $_rereg"
+[ "$_rereg" = "200" ] \
+    && pass "Re-registration after clean returns 200" \
+    || fail "Re-registration after clean returns 200" "got HTTP $_rereg"
 
 # Operator cleans (revoke + delete cert + delete CSR in one step)
 $CTL sign --certname "$_AGENT" >/dev/null 2>&1 || true
@@ -565,7 +580,7 @@ grep -qiF "does not match" "$WORK_DIR/mm_body.txt" 2>/dev/null \
            "body: $(cat "$WORK_DIR/mm_body.txt" 2>/dev/null)"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 9 -- Error cases (invalid subjects, bad JSON, conflict, CA:TRUE)
+# Group 9 -- Error cases (invalid subjects, bad JSON, duplicate CSR, CA:TRUE)
 # ═════════════════════════════════════════════════════════════════════════════
 printf '\n# Group 9 -- Error cases\n'
 
@@ -591,14 +606,22 @@ assert_http 400 "PUT /certificate_status with malformed JSON → 400" \
     -d 'not-json' \
     "${CA_URL}/puppet-ca/v1/certificate_status/valid-node"
 
-# 200: second CSR for active cert (node continues polling, fetches cert via GET)
+# 400: second CSR for a subject with a signed certificate, with OpenVox
+# Server's body (allow_duplicate_certs is off). The agent reads the 400 as
+# "keep waiting" and collects its certificate by GET.
 _CONF="conflict-${RUN_ID}.example.com"
 submit_csr "$_CONF"
 $CTL sign --certname "$_CONF" >/dev/null 2>&1 || true
-assert_http 200 "Duplicate CSR for active cert → 200" \
+_conf_body=$(curl -s -w '\n%{http_code}' \
     -X PUT -H "Content-Type: text/plain" \
     --data-binary @"$WORK_DIR/${_CONF}.csr" \
-    "${CA_URL}/puppet-ca/v1/certificate_request/${_CONF}"
+    "${CA_URL}/puppet-ca/v1/certificate_request/${_CONF}") || true
+[ "$(tail -n1 <<< "$_conf_body")" = "400" ] \
+    && pass "Duplicate CSR for a signed certificate → 400" \
+    || fail "Duplicate CSR for a signed certificate → 400" "got HTTP $(tail -n1 <<< "$_conf_body")"
+grep -qF "${_CONF} already has a signed certificate; ignoring certificate request" <<< "$_conf_body" \
+    && pass "Duplicate CSR refusal names the signed certificate" \
+    || fail "Duplicate CSR refusal names the signed certificate" "body: $_conf_body"
 
 # 409: CSR with BasicConstraints CA:TRUE
 cat > "$WORK_DIR/ca_true.cnf" << 'OPENSSLEOF'

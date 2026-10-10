@@ -435,13 +435,14 @@ var _ = Describe("Auth Middleware", func() {
 			oldCert, err := x509.ParseCertificate(block1.Bytes)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Step 2: revoke it; serial1 is now in the CRL.
-			Expect(myCA.Revoke(context.Background(), "puppet-server")).To(Succeed())
+			// Step 2: clean it, which revokes it (serial1 is now in the CRL) and
+			// removes it so that the subject may enrol again.
+			Expect(myCA.Clean(context.Background(), "puppet-server")).To(Succeed())
 
 			// Step 3: re-register and sign a new cert for the same CN.
 			csrPEM2, err := testutil.GenerateCSR("puppet-server")
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.SaveRequest(context.Background(), "puppet-server", csrPEM2) // evicts the revoked cert
+			_, err = myCA.SaveRequest(context.Background(), "puppet-server", csrPEM2)
 			Expect(err).NotTo(HaveOccurred())
 			certPEM2, err := myCA.Sign(context.Background(), "puppet-server")
 			Expect(err).NotTo(HaveOccurred())

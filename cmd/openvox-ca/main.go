@@ -232,6 +232,8 @@ func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
 	myCA.EncryptCAKey = cfg.EncryptCAKey
 	myCA.PromoteCNToSAN = cfg.PromoteCNToSAN
 	myCA.AllowSubjectAltNames = cfg.AllowSubjectAltNames
+	myCA.AllowDuplicateCerts = cfg.AllowDuplicateCerts
+	warnDuplicateCertsWithAutosign(myCA.AutosignConfig, cfg.AllowDuplicateCerts)
 	myCA.RevokeOnAutoRenew = cfg.RevokeOnAutoRenew
 	myCA.SupersedeAfter = cfg.supersededCertRevokeAfter()
 	myCA.LeafBackdate = cfg.leafBackdate()
@@ -1466,6 +1468,21 @@ func initCAForSigner(ctx context.Context, rt *caRuntime, cfg *serverConfig) (cry
 		return nil, fmt.Errorf("CA initialization failed: %w", err)
 	}
 	return myCA.CAKey, nil
+}
+
+// warnDuplicateCertsWithAutosign logs the consequence of combining
+// allow_duplicate_certs with any autosign mode: a CSR for a subject that
+// already holds a certificate is signed as soon as the autosign policy admits
+// it, from whoever submitted it, and the certificate it replaces stays valid.
+// Each setting is documented on its own; the combination is what an operator
+// may not have weighed.
+func warnDuplicateCertsWithAutosign(asCfg ca.AutosignConfig, allowDuplicateCerts bool) {
+	if !allowDuplicateCerts || asCfg.Mode == "off" || asCfg.Mode == "" {
+		return
+	}
+	slog.Warn("allow_duplicate_certs is on with autosigning enabled: a CSR the autosign policy admits is signed "+
+		"even for a subject that already holds a certificate, and the certificate it replaces is not revoked",
+		"autosign_mode", asCfg.Mode)
 }
 
 // validateAutosignExecutable checks the integrity of an autosign executable:

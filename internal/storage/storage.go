@@ -1047,6 +1047,23 @@ func (s *StorageService) HasCSR(ctx context.Context, subject string) bool {
 	return ok
 }
 
+// CertExists reports whether a signed certificate exists for subject. Unlike
+// HasCert it returns the backend's error rather than reading it as absence, for
+// a caller whose refusal depends on the answer.
+func (s *StorageService) CertExists(ctx context.Context, subject string) (bool, error) {
+	s.fileMu.RLock()
+	defer s.fileMu.RUnlock()
+	return s.backend.Exists(ctx, CertKey(subject))
+}
+
+// CSRExists reports whether a pending CSR exists for subject, returning the
+// backend's error rather than reading it as absence. See CertExists.
+func (s *StorageService) CSRExists(ctx context.Context, subject string) (bool, error) {
+	s.fileMu.RLock()
+	defer s.fileMu.RUnlock()
+	return s.backend.Exists(ctx, CSRKey(subject))
+}
+
 // ListCSRs returns the subject names of all pending certificate requests.
 func (s *StorageService) ListCSRs(ctx context.Context) ([]string, error) {
 	s.fileMu.RLock()

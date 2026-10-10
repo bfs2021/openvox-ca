@@ -18,6 +18,8 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,6 +161,10 @@ var _ = Describe("loadServerConfig built-in defaults", func() {
 		// here would fail.
 		Expect(cfg.AllowSubjectAltNames).To(BeFalse(),
 			"AllowSubjectAltNames = true; want false (CSRs may not request SANs by default)")
+		// OpenVox Server's default: a CSR for a subject that already holds a CSR
+		// or certificate is refused unless an operator opts in.
+		Expect(cfg.AllowDuplicateCerts).To(BeFalse(),
+			"AllowDuplicateCerts = true; want false (matches OpenVox Server)")
 		// Security-relevant default: superseded certificates are revoked on
 		// auto-renewal unless explicitly disabled. Guard the literal so a
 		// regression flipping it to false cannot pass silently.
@@ -913,6 +919,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 			func(c *serverConfig) bool { return c.AllowSubjectAltNames }, "AllowSubjectAltNames"),
 		Entry("SERIAL_NUMBER_FORMAT", "PUPPET_CA_SERIAL_NUMBER_FORMAT", "hex",
 			func(c *serverConfig) bool { return c.SerialNumberFormat == "hex" }, "SerialNumberFormat"),
+		Entry("ALLOW_DUPLICATE_CERTS", "PUPPET_CA_ALLOW_DUPLICATE_CERTS", "true",
+			func(c *serverConfig) bool { return c.AllowDuplicateCerts }, "AllowDuplicateCerts"),
 		// Distinct values, because these two are adjacent ints with adjacent
 		// names: swapping the destinations would turn a 12-hour overlap window
 		// into a 12-hour sweep interval on a 90-second delay, and both would
@@ -1197,6 +1205,78 @@ var _ = Describe("allow_subject_alt_names wiring", func() {
 		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
 		Expect(myCA.AllowSubjectAltNames).To(BeFalse())
 	})
+})
+
+// --- allow_duplicate_certs wiring ---
+
+var _ = Describe("allow_duplicate_certs wiring", func() {
+	// File-and-environment only, like allow_subject_alt_names, and silent in
+	// both directions if it never reaches ca.AllowDuplicateCerts: the specs in
+	// internal/ca set the field in Go and never load a config.
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is read from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("allow_duplicate_certs: true\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.AllowDuplicateCerts).To(BeTrue())
+	})
+
+	It("is read from the environment, which outranks the file", func() {
+		path := writeTempConfig("allow_duplicate_certs: false\n")
+		setEnv("PUPPET_CA_ALLOW_DUPLICATE_CERTS", "true")
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.AllowDuplicateCerts).To(BeTrue())
+	})
+
+	DescribeTable("reaches the CA",
+		func(yaml string, want bool) {
+			cfg, err := loadServerConfig(writeTempConfig(yaml))
+			Expect(err).NotTo(HaveOccurred())
+
+			myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			Expect(applyCAConfig(myCA, cfg)).To(Succeed())
+			Expect(myCA.AllowDuplicateCerts).To(Equal(want))
+		},
+		Entry("when the file says true", "allow_duplicate_certs: true\n", true),
+		Entry("when the file says false", "allow_duplicate_certs: false\n", false),
+	)
+
+	// Together the two settings sign a CSR for an already-enrolled subject as
+	// soon as the policy admits it, which neither setting's own docs make
+	// obvious; startup says so.
+	DescribeTable("warns at startup only when combined with autosigning",
+		func(mode string, allow, wantWarn bool) {
+			yaml := "allow_duplicate_certs: false\n"
+			if allow {
+				yaml = "allow_duplicate_certs: true\n"
+			}
+			cfg, err := loadServerConfig(writeTempConfig(yaml))
+			Expect(err).NotTo(HaveOccurred())
+
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			DeferCleanup(slog.SetDefault, orig)
+
+			// Through applyCAConfig, which every startup path calls, so the
+			// spec covers the call as well as what it logs.
+			myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: mode}, "puppet.test")
+			Expect(applyCAConfig(myCA, cfg)).To(Succeed())
+			if wantWarn {
+				Expect(buf.String()).To(ContainSubstring("allow_duplicate_certs is on with autosigning enabled"))
+				Expect(buf.String()).To(ContainSubstring("autosign_mode=" + mode))
+			} else {
+				Expect(buf.String()).To(BeEmpty())
+			}
+		},
+		Entry("autosign true", "true", true, true),
+		Entry("an autosign allowlist", "file", true, true),
+		Entry("an autosign plugin", "executable", true, true),
+		Entry("autosign off", "off", true, false),
+		Entry("no autosign configured, as the signer process builds its CA", "", true, false),
+		Entry("allow_duplicate_certs off", "true", false, false),
+	)
 })
 
 // --- crl_chain_file wiring ---

@@ -182,6 +182,18 @@ type CA struct {
 	// exemption safe -- not the fact that one of them is offline.
 	AllowSubjectAltNames bool
 
+	// AllowDuplicateCerts, when true, accepts a submitted CSR whatever the
+	// subject already holds: a pending CSR is overwritten, and a signed or
+	// revoked certificate is left in place until the new request is signed
+	// over it. When false (the default), SaveRequest refuses the submission
+	// with a DuplicateCertError instead, and the subject must be cleaned before
+	// it can enrol again.
+	//
+	// This is OpenVox Server's allow-duplicate-certs, with its default and its
+	// semantics: nothing is revoked or deleted on the way in, so a certificate
+	// replaced this way stays valid until it is revoked or expires.
+	AllowDuplicateCerts bool
+
 	// NoBootstrap makes Init refuse to create a new CA when none is found,
 	// rather than bootstrapping one. For tools that operate on an existing CA
 	// and have nothing sensible to do without it: minting a fresh root because
@@ -535,6 +547,7 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 		PromoteCNToSAN: true, // on by default; RFC 2818 deprecates CN-only certs
 		// AllowSubjectAltNames is deliberately left false: a CSR may not name
 		// itself anything it likes. See the field's comment.
+		// AllowDuplicateCerts is likewise left false, matching OpenVox Server.
 		RevokeOnAutoRenew: true, // on by default; only the newest serial should be valid
 		serialIndex:       make(map[string]string),
 		ocspCache:         make(map[ocspCacheKey]ocspCacheEntry),

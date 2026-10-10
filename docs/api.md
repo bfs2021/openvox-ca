@@ -111,8 +111,15 @@ pending-supersession list, and revoking the subject retires everything of that
 subject's the list names, in the same call. What stays unreachable is a
 predecessor whose retirement was never recorded at all — an immediate-path
 revoke that failed, or a supersession the CA could not write down.
-`puppetca_supersede_failures_total` is what tells you one exists. `PUT /certificate_status_by_serial/{serial}` names the
-certificate instead of the subject, so it can reach that one.
+`puppetca_supersede_failures_total` is what tells you one exists. A third
+cause is deliberate rather than a failure: with
+[`allow_duplicate_certs`](configuration.md#duplicate-certificate-requests) on,
+signing a request queued beside a certificate replaces that certificate
+without retiring it. No metric counts that; the `INFO` line logged when the
+request was accepted (`Accepting a duplicate certificate request
+(allow_duplicate_certs)`) names the serial left valid, and the inventory has it
+too. `PUT /certificate_status_by_serial/{serial}` names the
+certificate instead of the subject, so it can reach any of these.
 
 The serial is hexadecimal, in any case and with or without leading zeros; it is
 matched against the inventory in canonical form — uppercase and unpadded, which
@@ -177,13 +184,12 @@ Two refusals are deliberate:
 | `DELETE` | `/certificate_request/{subject}` | Delete a pending CSR |
 
 `PUT /certificate_request/{subject}` answers `200 OK` when the CSR is accepted —
-whether it was autosigned immediately or queued for manual signing, and also
-when a signed certificate already exists for the subject, which is a `200` so
-that an agent continues its poll loop and collects the certificate by `GET`
-rather than treating the submission as fatal. It answers `400 Bad Request` for a
-CSR that cannot be decoded or parsed, whose signature does not verify, or whose
-Common Name does not match the subject in the path. Those three are refused
-whatever the autosign policy, because they are decided before it. A fourth is
+whether it was autosigned immediately or queued for manual signing. It answers
+`400 Bad Request` for a CSR that cannot be decoded or parsed, whose signature
+does not verify, or whose Common Name does not match the subject in the path,
+and for a subject that already holds a CSR or a certificate — see [duplicate
+certificate requests](#duplicate-certificate-requests) below. Those are refused
+whatever the autosign policy, because they are decided before it. One more is
 not: a CSR requesting subject alternative names it may not have, which
 [`allow_subject_alt_names`](configuration.md#subject-alternative-names-requested-by-a-csr)
 governs, is refused here with `400` **only when the submission is autosigned**,
@@ -236,6 +242,55 @@ retry, and its three answers distinguish all three outcomes. Do not reach for
 `GET /certificate_request/{subject}`: that route reports a storage failure as
 `404` as well, so it cannot tell "no longer queued" from "could not tell you",
 which is the conflation this endpoint just stopped making.
+
+### Duplicate certificate requests
+
+As in OpenVox Server, a CSR is refused with `400 Bad Request` when its subject
+already has any of:
+
+1. a pending CSR — including an identical resubmission of the same CSR;
+2. a signed certificate;
+3. a revoked certificate, until the subject is cleaned.
+
+The body is OpenVox Server's, naming what was found:
+
+```text
+<subject> already has a {requested|signed|revoked} certificate; ignoring certificate request
+```
+
+A certificate is reported in preference to a pending CSR when a subject has
+both. Whether it reads `signed` or `revoked` comes from the serving replica's
+cached CRL, so a replica that has not yet synced a revocation says `signed`;
+the refusal itself reads storage and holds on every replica at once.
+
+The body is kept word for word for parity, and that has a cost worth knowing:
+it tells an unauthenticated caller whether a subject has a pending request,
+which `GET /certificate_request/{subject}` and `GET /certificate_status/{subject}`
+otherwise reveal only to the node itself or an administrator. (`signed` and
+`revoked` are public already, through `GET /certificate/{subject}` and the CRL.)
+The agent acts on the status, not the body.
+
+It is a `400` because that is what the agent expects: OpenVox's SSL state
+machine reads a `400` on CSR submission as "keep waiting for the certificate"
+and goes on polling `GET /certificate/{subject}`, while any other non-2xx status
+— a `409` included — ends the run.
+
+To let the subject enrol again, clean it (`openvox-ca-ctl clean`, or
+`DELETE /certificate_status/{subject}`), which removes both the certificate and
+any pending CSR. A pending CSR on its own can instead be rejected with
+`DELETE /certificate_request/{subject}`.
+[`allow_duplicate_certs`](configuration.md#duplicate-certificate-requests)
+turns the refusal off.
+
+The first request for a subject is the one that is kept. This endpoint needs no
+client certificate, and a request the autosign policy does not sign — under an
+allowlist or a plugin, or with autosign off, or one the policy admits but
+signing refuses, for its subject alternative names, a CA flag or a weak key —
+stays pending and refuses every
+later request for its subject, the node's own included, until it is signed,
+rejected or cleaned. So before signing a pending request by name, compare its
+fingerprint (`GET /certificate_status/{subject}`) with the one the node
+reports, and reject a request you do not recognise rather than sign it.
 
 ## Certificate retrieval
 
@@ -437,18 +492,19 @@ all. A revoked agent can still fetch the CA certificate and the CRL, read
 `/expirations`, query OCSP, and submit a CSR to
 `PUT /certificate_request/{subject}`.
 
-**Neither form of revocation prevents re-enrolment under the same subject.**
-Submitting a CSR evicts a revoked certificate for that subject (see
-[Certificate import](#certificate-import) for the same rule on the import
-path), so the difference between the two verbs is only *when* the stored
-certificate goes away:
+**The two forms of revocation differ in whether the subject can enrol again.**
+As in OpenVox Server, and with `allow_duplicate_certs` off (the default), a CSR
+for a subject that still holds a certificate, revoked or not, is refused with
+`400` until the subject is cleaned — see
+[duplicate certificate requests](#duplicate-certificate-requests). With
+`allow_duplicate_certs` on, neither form stops re-enrolment, and closing off
+issuance is the only thing that does. With it off, the two differ as follows:
 
 - `PUT /certificate_status/{subject}` with `{"desired_state":"revoked"}` adds
-  the serial to the CRL and leaves the certificate in storage until a later CSR
-  displaces it. Eviction reads the same per-process CRL cache as the admission
-  check described below, so on the HA backends a peer that has not yet synced
-  answers `200 OK` and silently discards the CSR instead — for at most
-  `crl_sync_interval_sec`, see below.
+  the serial to the CRL and leaves the certificate in storage, so every later
+  CSR for the subject is refused. That refusal reads storage rather than any
+  replica's CRL cache, so it holds on every replica as soon as the revocation
+  returns.
 - `DELETE /certificate_status/{subject}` revokes, then deletes the certificate
   and any pending request, all against shared storage, so no step depends on a
   replica's cache. All three are best-effort: each failure is logged and the
@@ -485,9 +541,9 @@ certificate goes away:
   deletes nothing, and one holding only a pending request is a `204` whose sole
   reachable warning is `Clean: delete CSR failed`.
 
-Otherwise the next CSR is accepted: with autosign enabled it is signed at once
-and the agent is back with a fresh, unrevoked certificate; with autosign off it
-queues for manual signing. The CRL entry for the old serial persists in both
+After a `DELETE` the next CSR is accepted: with autosign enabled it is signed at
+once and the agent is back with a fresh, unrevoked certificate; with autosign
+off it queues for manual signing. The CRL entry for the old serial persists in both
 cases, so the old certificate stays refused — but that is not the same as
 locking the *agent* out.
 
@@ -530,10 +586,12 @@ When containing a compromised agent, apply the levers that hold, in this order:
    `puppetca_crl_revoked_certificates` all read the same on a stale replica as
    on a fresh one.
 
-The order matters. Step 3 is also what makes a stale replica willing to evict
-the revoked certificate and issue a replacement, so letting the sync land while
+The order matters. With `allow_duplicate_certs` off, a revoked certificate left
+in storage refuses every CSR for its subject, but cleaning the subject —
+`DELETE`, or `openvox-ca-ctl clean` — re-opens enrolment, so a clean while
 autosign is still open hands whoever holds the compromised key a fresh, valid
-certificate.
+certificate. With `allow_duplicate_certs` on, nothing in storage refuses the
+next CSR at all, and step 1 is the only lever that does.
 
 > **Revocation is not enforced cluster-wide instantly.** Every admission
 > decision reads an in-memory copy of the CRL, not storage: the hot path of an
@@ -595,7 +653,6 @@ Tracked as defects, each with an issue:
 
 - `fingerprints` lacks `SHA1` and `SHA512` ([#406](https://github.com/voxpupuli/openvox-ca/issues/406)).
 - The authorisation extension `1.3.6.1.4.1.34380.1.3.2` is keyed `pp_auth_auto_renew` rather than by OID ([#408](https://github.com/voxpupuli/openvox-ca/issues/408)), and an extension whose OID is exactly the authorisation arc is listed ([#409](https://github.com/voxpupuli/openvox-ca/issues/409)).
-- `PUT /certificate_request/{subject}` for a subject that holds a certificate answers `200` rather than `400` ([#410](https://github.com/voxpupuli/openvox-ca/issues/410)).
 - `POST /sign` answers `400` for an empty or missing `certnames` (OpenVox Server: `200`) and for a non-list one (OpenVox Server: `422` with a JSON body) ([#412](https://github.com/voxpupuli/openvox-ca/issues/412)).
 - `PUT /certificate_revocation_list` (CRL upload) is not implemented ([#413](https://github.com/voxpupuli/openvox-ca/issues/413)).
 - `GET /certificate/{subject}` ignores `If-Modified-Since` ([#414](https://github.com/voxpupuli/openvox-ca/issues/414)).

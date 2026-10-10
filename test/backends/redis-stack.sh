@@ -891,9 +891,11 @@ printf '\n# Phase 5 -- Race condition torture\n'
 
 # -- Race A: same-CN CSR storm across both replicas ----------------------─
 # Eight CSRs for the same CN, each with a different private key, fired in
-# parallel and split across both replicas. After settling, exactly one cert
-# must exist (the per-subject lock + last-write-wins SET semantics) and that
-# cert must verify against the CA.
+# parallel and split across both replicas. The per-subject lock serialises
+# them: the first is autosigned and the duplicate-certificate policy refuses
+# the other seven with 400 (allow_duplicate_certs is off), so the first
+# writer wins. After settling, exactly one cert must exist and it must verify
+# against the CA.
 RACE_CN="race-samecn-$(date +%s)"
 RACE_PARALLEL=8
 for _i in $(seq 1 "$RACE_PARALLEL"); do
@@ -907,19 +909,28 @@ done
 for _i in $(seq 1 "$RACE_PARALLEL"); do
     _port=8241
     [ $(( _i % 2 )) -eq 0 ] && _port=8242
-    curl -sk -o /dev/null \
+    curl -sk -o /dev/null -w "%{http_code}\n" \
         -X PUT -H "Content-Type: text/plain" \
         --data-binary @"$WORK_DIR/race-${_i}.csr" \
         "https://localhost:${_port}/puppet-ca/v1/certificate_request/${RACE_CN}" \
-        2>/dev/null &
+        > "$WORK_DIR/race-${_i}.code" 2>/dev/null &
 done
 wait
 
-# Wait for at least one autosigned cert to land before assertion. The
-# per-subject lock serialises the 8 concurrent writers; after the last
-# writer drops the lock, signed:<RACE_CN> exists. Polling here also gives
-# the SET-overwrite race a chance to converge to its final value (the
-# "last writer wins" property is what we're about to assert).
+# One submission accepted, every other one refused by the duplicate policy:
+# the policy's check and save run under the subject lock on both replicas.
+_race_200=$(cat "$WORK_DIR"/race-*.code 2>/dev/null | grep -xc '200' || true)
+_race_400=$(cat "$WORK_DIR"/race-*.code 2>/dev/null | grep -xc '400' || true)
+if [ "$_race_200" = "1" ] && [ "$_race_400" = "$(( RACE_PARALLEL - 1 ))" ]; then
+    pass "Same-CN race: one submission accepted, $(( RACE_PARALLEL - 1 )) refused with 400"
+else
+    fail "Same-CN race: one submission accepted, $(( RACE_PARALLEL - 1 )) refused with 400" \
+        "200s=${_race_200} 400s=${_race_400} codes:$(for _c in "$WORK_DIR"/race-*.code; do printf ' %s=%s' "$(basename "$_c" .code)" "$(cat "$_c" 2>/dev/null)"; done)"
+fi
+
+# Wait for the autosigned cert to land before the remaining assertions. The
+# per-subject lock serialises the 8 concurrent writers, and only the first
+# is signed.
 poll_until 15 redis_exists "${REDIS_PREFIX}:signed:${RACE_CN}" || true
 
 # Exactly one signed:<RACE_CN> blob must exist.
@@ -950,17 +961,30 @@ fi
 _cert_pubkey_md5=$(openssl x509 -in "$WORK_DIR/race.crt" -pubkey -noout \
     2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
 _match_count=0
+_match_idx=""
+_accepted_idx=""
 for _i in $(seq 1 "$RACE_PARALLEL"); do
     _csr_pubkey_md5=$(openssl req -in "$WORK_DIR/race-${_i}.csr" -pubkey -noout \
         2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
-    [ -n "$_cert_pubkey_md5" ] && [ "$_cert_pubkey_md5" = "$_csr_pubkey_md5" ] && \
+    if [ -n "$_cert_pubkey_md5" ] && [ "$_cert_pubkey_md5" = "$_csr_pubkey_md5" ]; then
         _match_count=$(( _match_count + 1 ))
+        _match_idx="$_i"
+    fi
+    [ "$(cat "$WORK_DIR/race-${_i}.code" 2>/dev/null)" = "200" ] && _accepted_idx="$_i"
 done
 if [ "$_match_count" = "1" ]; then
     pass "Same-CN race cert's pubkey matches exactly one submitted CSR"
 else
     fail "Same-CN race cert's pubkey matches exactly one submitted CSR" \
          "matched ${_match_count} CSR keys (expected 1)"
+fi
+# ...and that CSR must be the one submission answered 200: a refused CSR
+# must never be the one that was signed.
+if [ -n "$_accepted_idx" ] && [ "$_match_idx" = "$_accepted_idx" ]; then
+    pass "Same-CN race cert belongs to the accepted submission"
+else
+    fail "Same-CN race cert belongs to the accepted submission" \
+         "cert matches CSR ${_match_idx:-none}, 200 went to ${_accepted_idx:-none}"
 fi
 
 # -- Race B: concurrent revocations across both replicas ----------------─

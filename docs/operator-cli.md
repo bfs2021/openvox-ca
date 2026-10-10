@@ -107,7 +107,10 @@ openvox-ca-ctl sign --certname agent.example.com
 # Sign all pending CSRs
 openvox-ca-ctl sign --all
 
-# Revoke a certificate (the most recent one issued for that name)
+# Revoke a certificate (the most recent one issued for that name). The revoked
+# certificate stays in storage, and the node cannot enrol again until it is
+# cleaned (below), as with `puppetserver ca clean` -- unless allow_duplicate_certs
+# is set, which lets the next CSR through regardless.
 openvox-ca-ctl revoke --certname agent.example.com
 
 # Revoke one exact certificate by serial. Use this when a replacement has
@@ -117,11 +120,14 @@ openvox-ca-ctl revoke --certname agent.example.com
 # what `openssl x509 -noout -serial` prints.
 #
 # With superseded_cert_revoke_after_sec set, --certname does reach a predecessor
-# still inside its overlap window, so this is for the two cases it cannot: a
+# still inside its overlap window, so this is for the cases it cannot: a
 # supersession that was never recorded (puppetca_supersede_failures_total is
-# what tells you one exists), and cutting an active window short for a
-# certificate you now believe is compromised. Revoking a serial the sweep still
-# has queued is safe -- re-revoking a listed serial is a no-op.
+# what tells you one exists), a certificate replaced by signing a request
+# queued under allow_duplicate_certs (nothing counts it; the INFO line
+# "Accepting a duplicate certificate request" names the serial), and cutting an
+# active window short for a certificate you now believe is compromised.
+# Revoking a serial the sweep still has queued is safe -- re-revoking a listed
+# serial is a no-op.
 openvox-ca-ctl revoke --serial 472C95FAA0DAE424BD7E911E26066010
 
 # A serial that is still the certificate stored for its subject is refused,
@@ -129,7 +135,9 @@ openvox-ca-ctl revoke --serial 472C95FAA0DAE424BD7E911E26066010
 # take a working node offline. --force revokes it anyway.
 openvox-ca-ctl revoke --serial 472C95FAA0DAE424BD7E911E26066010 --force
 
-# Revoke + delete cert and CSR. The delete happens even if the revocation
+# Revoke + delete cert and CSR, which is what lets the node submit a new CSR:
+# while a subject holds either, PUT /certificate_request refuses it with a 400
+# (unless allow_duplicate_certs is set). The delete happens even if the revocation
 # fails, so check the server log: a certificate that could not be revoked
 # stays a valid credential until it expires, and it is no longer in storage
 # to clean again. See docs/api.md for the state that causes it. To recover, fix
@@ -138,7 +146,10 @@ openvox-ca-ctl revoke --serial 472C95FAA0DAE424BD7E911E26066010 --force
 # while no replacement has been issued for that name, and `revoke --serial
 # <hex>` (above) is what is needed once one has. The WARN line names the serial
 # only when the revocation got as far as the CRL; otherwise take it from the
-# inventory. See docs/api.md for which is which.
+# inventory. See docs/api.md for which is which. The deletes are best-effort
+# too and still report success: a "Clean: delete cert failed" or "Clean: delete
+# CSR failed" WARN means the subject still holds it and still refuses the
+# node's CSR, so run clean again once storage is healthy.
 openvox-ca-ctl clean --certname agent.example.com
 
 # Re-sign the CRL with a fresh validity window (preserves all revocations)

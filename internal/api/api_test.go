@@ -501,23 +501,107 @@ var _ = Describe("API Workflow", func() {
 			Expect(resp.State).To(Equal("revoked"))
 		})
 
-		It("should return 200 when submitting a CSR for a subject with an active certificate", func() {
-			subject := "conflict-node"
+	})
+
+	// OpenVox Server's duplicate-certificate policy. The agent's SSL state
+	// machine reads a 400 from this endpoint as "keep waiting for the
+	// certificate" and any other non-2xx status as fatal, so the status code is
+	// the contract here, and the body is upstream's text word for word.
+	Context("duplicate certificate requests", func() {
+		put := func(subject string) *httptest.ResponseRecorder {
+			GinkgoHelper()
 			csrPEM, err := testutil.GenerateCSR(subject)
 			Expect(err).NotTo(HaveOccurred())
-
-			mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
-			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
-			mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
-
-			csrPEM2, err := testutil.GenerateCSR(subject)
-			Expect(err).NotTo(HaveOccurred())
-			req := httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM2))
 			rr := httptest.NewRecorder()
-			mux.ServeHTTP(rr, req)
-			// 200 so the node continues to poll and retrieves its cert via GET
-			// rather than treating the re-submission as a fatal conflict.
-			Expect(rr.Code).To(Equal(http.StatusOK))
+			mux.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
+			return rr
+		}
+		setState := func(subject, state string) {
+			GinkgoHelper()
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: state})
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+			Expect(rr.Code).To(Equal(http.StatusNoContent), "PUT certificate_status %s: %s", state, rr.Body.String())
+		}
+
+		DescribeTable("answers 400 with OpenVox Server's body",
+			func(subject string, held []string, word string) {
+				Expect(put(subject).Code).To(Equal(http.StatusOK), "first submission")
+				for _, state := range held {
+					setState(subject, state)
+				}
+
+				rr := put(subject)
+				Expect(rr.Code).To(Equal(http.StatusBadRequest))
+				Expect(rr.Body.String()).To(Equal(
+					subject + " already has a " + word + " certificate; ignoring certificate request\n"))
+			},
+			Entry("for a subject with a pending CSR", "dup-requested", nil, "requested"),
+			Entry("for a subject with a signed certificate", "dup-signed", []string{"signed"}, "signed"),
+			Entry("for a subject with a revoked certificate", "dup-revoked", []string{"signed", "revoked"}, "revoked"),
+		)
+
+		// A waiting agent resubmits on every poll, so a pending CSR is the
+		// ordinary state of a node awaiting manual signing; only a certificate
+		// that needs cleaning is worth a warning.
+		DescribeTable("logs the refusal at a level matching what it needs from the operator",
+			func(subject string, held []string, level, word string) {
+				Expect(put(subject).Code).To(Equal(http.StatusOK), "first submission")
+				for _, state := range held {
+					setState(subject, state)
+				}
+
+				var buf bytes.Buffer
+				orig := slog.Default()
+				slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+				defer slog.SetDefault(orig)
+
+				Expect(put(subject).Code).To(Equal(http.StatusBadRequest))
+				var line string
+				for _, l := range strings.Split(buf.String(), "\n") {
+					if strings.Contains(l, `msg="SaveRequest refused: duplicate certificate request"`) {
+						line = l
+					}
+				}
+				Expect(line).To(ContainSubstring("level="+level), "log: %s", buf.String())
+				Expect(line).To(ContainSubstring("subject=" + subject))
+				Expect(line).To(ContainSubstring("state=" + word))
+				// Only a refusal that needs the operator says what to do.
+				if level == "WARN" {
+					Expect(line).To(ContainSubstring("openvox-ca-ctl clean"))
+				} else {
+					Expect(line).NotTo(ContainSubstring("remedy="))
+				}
+			},
+			Entry("INFO for a pending CSR", "dup-log-requested", nil, "INFO", "requested"),
+			Entry("WARN for a signed certificate", "dup-log-signed", []string{"signed"}, "WARN", "signed"),
+			Entry("WARN for a revoked certificate", "dup-log-revoked", []string{"signed", "revoked"}, "WARN", "revoked"),
+		)
+
+		It("accepts a CSR again once the subject has been cleaned", func() {
+			subject := "dup-cleaned"
+			Expect(put(subject).Code).To(Equal(http.StatusOK))
+			setState(subject, "signed")
+			Expect(put(subject).Code).To(Equal(http.StatusBadRequest))
+
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("DELETE", "/certificate_status/"+subject, nil))
+			Expect(rr.Code).To(Equal(http.StatusNoContent))
+
+			Expect(put(subject).Code).To(Equal(http.StatusOK))
+		})
+
+		It("answers 200 and replaces the pending CSR when allow_duplicate_certs is set", func() {
+			myCA.AllowDuplicateCerts = true
+			subject := "dup-allowed"
+			Expect(put(subject).Code).To(Equal(http.StatusOK))
+			first, err := myCA.Storage.GetCSR(context.Background(), subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(put(subject).Code).To(Equal(http.StatusOK))
+			second, err := myCA.Storage.GetCSR(context.Background(), subject)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second).NotTo(Equal(first), "the second CSR should have replaced the first")
 		})
 	})
 
