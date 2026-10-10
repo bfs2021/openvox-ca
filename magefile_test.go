@@ -1053,6 +1053,80 @@ jobs:
 	})
 })
 
+var _ = Describe("verifyDevCheckWiring", func() {
+	// A guard's doc comment saying dev:check runs it is not evidence that it
+	// does. verifyReleaseJobConfinement claimed it twice and was called
+	// nowhere near Dev.Check, which is what this guard now refuses.
+	//
+	// Against the real file first: this is the spec that would have caught
+	// that miss, and the one that fails if a later guard is added with its
+	// banner forgotten.
+	It("finds every claiming guard in the real magefile wired into dev:check", func() {
+		Expect(verifyDevCheckWiring()).To(Succeed())
+	})
+
+	// A purpose-built fixture rather than the real file, so the refusal
+	// branches do not depend on magefile.go's current contents. The receiver
+	// type is never declared: the parse needs the method, not the type.
+	good := []byte(`package main
+
+import "fmt"
+
+// verifyOne is wired into dev:check as a single step.
+func verifyOne() error { return nil }
+
+// verifyTwo makes no claim about where it runs, so it is not required here.
+func verifyTwo() error { return nil }
+
+func (Dev) Check() error {
+	fmt.Println("Checking one...")
+	if err := verifyOne(); err != nil {
+		return err
+	}
+	return nil
+}
+`)
+
+	It("accepts a magefile whose every claiming guard is called", func() {
+		Expect(verifyDevCheckWiringIn(good)).To(Succeed())
+	})
+
+	It("refuses a guard that claims the wiring but is never called", func() {
+		bad := bytes.Replace(good, []byte("func (Dev) Check() error {"),
+			[]byte("// verifyThree has its own banner in Dev.Check.\nfunc verifyThree() error { return nil }\n\nfunc (Dev) Check() error {"), 1)
+		err := verifyDevCheckWiringIn(bad)
+		Expect(err).To(MatchError(ContainSubstring("verifyThree")))
+		Expect(err).To(MatchError(ContainSubstring("Dev.Check does not call it")))
+	})
+
+	It("names the other spelling of the claim too", func() {
+		bad := bytes.Replace(good, []byte("// verifyTwo makes no claim about where it runs, so it is not required here."),
+			[]byte("// verifyTwo is wired into dev:check."), 1)
+		Expect(verifyDevCheckWiringIn(bad)).To(MatchError(ContainSubstring("verifyTwo")))
+	})
+
+	// The floor. Every comparison above is between a comment and a call, so a
+	// regex that stops matching makes all of them vacuous while still
+	// reporting success -- the way this guard's own subject failed.
+	It("refuses a magefile in which nothing claims the wiring at all", func() {
+		bare := bytes.Replace(good, []byte("// verifyOne is wired into dev:check as a single step."),
+			[]byte("// verifyOne says nothing."), 1)
+		Expect(verifyDevCheckWiringIn(bare)).To(MatchError(
+			ContainSubstring("has stopped matching and this check is a no-op")))
+	})
+
+	It("refuses a magefile it cannot find Dev.Check in", func() {
+		none := bytes.Replace(good, []byte("func (Dev) Check() error {"),
+			[]byte("func (Dev) Something() error {"), 1)
+		Expect(verifyDevCheckWiringIn(none)).To(MatchError(
+			ContainSubstring("no Dev.Check method was found")))
+	})
+
+	It("reports a source it cannot parse rather than passing it", func() {
+		Expect(verifyDevCheckWiringIn([]byte("package main\nfunc ("))).To(HaveOccurred())
+	})
+})
+
 var _ = Describe("workflowStepUses", func() {
 	// Its error branches are unreachable through its only production caller,
 	// which reaches workflowRunScripts first -- so they are asserted here or

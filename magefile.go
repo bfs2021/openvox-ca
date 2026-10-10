@@ -2191,6 +2191,106 @@ func verifyMageTargetsIn(mageSrc []byte, workflows map[string][]byte) error {
 	return nil
 }
 
+// devCheckClaimRE matches a guard's doc comment claiming that dev:check runs
+// it. Both spellings already in use are accepted: "wired into dev:check", and
+// "banner in Dev.Check" for the guards that announce themselves.
+//
+// KNOWN LIMIT: a claim is attributed to the function whose doc comment carries
+// it. A comment describing some *other* guard's wiring -- as
+// verifyDistVariants' does for verifyReleaseJobConfinement -- therefore reads
+// as a claim about its owner. That is harmless, because the owner is checked
+// anyway, but a guard whose wiring is claimed only in a neighbour's prose is
+// not covered here.
+var devCheckClaimRE = regexp.MustCompile(`(?i)wired into dev:check|banner in Dev\.Check`)
+
+// verifyDevCheckWiring asserts that every guard whose doc comment says
+// dev:check runs it is actually called from Dev.Check.
+//
+// It exists because a comment is not a call site. verifyReleaseJobConfinement
+// said in two places that it had "its own banner in Dev.Check" and was wired
+// nowhere near it: the security property was still enforced, by a spec against
+// the real workflow under test:magefile, but `mage dev:check` passed a release
+// job that ran repository code -- and the comment is what stopped anyone
+// looking for the call. Nothing else here checks Dev.Check's own wiring, so a
+// guard added with its banner forgotten is silent.
+//
+// Wired into dev:check, which makes it self-checking: this paragraph is a claim
+// about itself, and the check fails if it is ever left uncalled.
+func verifyDevCheckWiring() error {
+	src, err := os.ReadFile("magefile.go")
+	if err != nil {
+		return err
+	}
+	return verifyDevCheckWiringIn(src)
+}
+
+// verifyDevCheckWiringIn is verifyDevCheckWiring over caller-supplied source,
+// split out so the refusal branches are testable without touching magefile.go.
+func verifyDevCheckWiringIn(src []byte) error {
+	f, err := parser.ParseFile(token.NewFileSet(), "magefile.go", src, parser.ParseComments)
+	if err != nil {
+		return err
+	}
+
+	// What Dev.Check calls directly. A guard reached only through a helper has
+	// no banner of its own, which is the thing the doc comments claim.
+	called := map[string]bool{}
+	var sawCheck bool
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "Check" || fn.Recv == nil || len(fn.Recv.List) != 1 {
+			continue
+		}
+		if recv, ok := fn.Recv.List[0].Type.(*ast.Ident); !ok || recv.Name != "Dev" {
+			continue
+		}
+		sawCheck = true
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok {
+					called[id.Name] = true
+				}
+			}
+			return true
+		})
+	}
+	if !sawCheck {
+		return errors.New("no Dev.Check method was found in magefile.go, so this check cannot see " +
+			"what dev:check runs; fix the parse rather than deleting the check")
+	}
+
+	var claimed, uncalled []string
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv != nil || fn.Doc == nil {
+			continue
+		}
+		if !strings.HasPrefix(fn.Name.Name, "verify") || !devCheckClaimRE.MatchString(fn.Doc.Text()) {
+			continue
+		}
+		claimed = append(claimed, fn.Name.Name)
+		if !called[fn.Name.Name] {
+			uncalled = append(uncalled, fn.Name.Name)
+		}
+	}
+
+	// A floor, in the spirit of verifyDistVariants': everything above is a
+	// comparison between a comment and a call, and a regex that stops matching
+	// -- a reworded comment, an escaping slip -- makes every one of them
+	// vacuous while still reporting success.
+	if len(claimed) == 0 {
+		return errors.New("no guard in magefile.go claims dev:check runs it, which cannot be right " +
+			"while Dev.Check calls several; devCheckClaimRE has stopped matching and this check " +
+			"is a no-op")
+	}
+	if len(uncalled) > 0 {
+		return fmt.Errorf("%s claims dev:check runs it, but Dev.Check does not call it: either add "+
+			"the banner and the call to Dev.Check, or stop the doc comment claiming it "+
+			"(claims found: %s)", strings.Join(uncalled, ", "), strings.Join(claimed, ", "))
+	}
+	return nil
+}
+
 // mageTargetNames returns every target a magefile declares, lowercased, in the
 // spelling mage resolves on the command line: "dev:check" for a method on a
 // namespace type, "foo" for an exported package-level function.
@@ -8266,6 +8366,10 @@ func (Dev) Check() error {
 	if err := verifyDistVariants(); err != nil {
 		return err
 	}
+	fmt.Println("Checking the release job's confinement...")
+	if err := verifyReleaseJobConfinement(); err != nil {
+		return err
+	}
 	fmt.Println("Checking chart version pins...")
 	if err := verifyChartPins(); err != nil {
 		return err
@@ -8304,6 +8408,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking the provisioning backend aliases against the CA's own...")
 	if err := verifyBackendAliases(); err != nil {
+		return err
+	}
+	fmt.Println("Checking that every guard claiming dev:check is wired into it...")
+	if err := verifyDevCheckWiring(); err != nil {
 		return err
 	}
 	// Vet the two packages with non-Linux build-tagged files. Every CI check
