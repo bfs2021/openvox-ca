@@ -59,12 +59,20 @@ import (
 // implements no PathProvider, and "" satisfies NotTo(BeAnExistingFile()) just
 // as readily as a moved path would.
 //
-// Three paths in this file are deliberately *not* routed through here, and the
-// difference is whether a file is involved. They build a KeyPermWarning to hand
-// to a renderer or to logKeyPermissions, where Path is a string being formatted
-// and nothing opens it -- one of them names a directory holding no CA at all.
-// A literal is the honest fixture there, and sending it through the store would
-// suggest a filesystem dependency the spec does not have.
+// Two paths in this file are deliberately *not* routed through here. They build
+// a KeyPermWarning, hand it to logKeyPermissions, and then assert on the very
+// string they supplied -- self-consistent, with no reference to where a key
+// really lives, and one of them names a directory holding no CA at all. A
+// literal is the honest fixture there, and sending it through the store would
+// imply a filesystem dependency those specs do not have.
+//
+// "Nothing opens the path" is the wrong test for that, and classifying by it
+// got a third case wrong: the --daemon notice spec also only formats its path,
+// but it compares the rendered notice against stderr written by the production
+// code from the real findings, so its fixture has to name the real key. Whether
+// a spec needs this helper is decided by whether anything it asserts against
+// was produced from the store's own idea of the path -- not by whether the spec
+// itself touches the filesystem.
 func caKeyPathIn(caDir string) string {
 	GinkgoHelper()
 	p := storage.New(caDir).CAKeyPath()
@@ -603,8 +611,15 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		// non-empty, and then matched a hardcoded substring -- so it was
 		// re-pinning prose in miniature under a comment claiming it did not,
 		// and a round-8 PR comment reported it as fixed when it was not.
+		//
+		// The path comes from the store, and has to: errOut was written by the
+		// production code from the *real* findings, so a fixture naming a
+		// different path renders a different notice and the comparison fails.
+		// Strengthening this assertion is what created that coupling -- while it
+		// matched a hardcoded "chmod o-rwx -- " it did not care where the key
+		// was, which is the trade a vacuous assertion always offers.
 		expected := keyPermInsecureNotice(
-			[]storage.KeyPermWarning{{Path: filepath.Join(caDir, "private", "ca_key.pem"), Mode: os.FileMode(0o644)}},
+			[]storage.KeyPermWarning{{Path: caKeyPathIn(caDir), Mode: os.FileMode(0o644)}},
 			true)
 		Expect(expected).NotTo(BeEmpty(), "the renderer must have something to say, or this proves nothing")
 		Expect(errOut.String()).To(ContainSubstring(expected),
