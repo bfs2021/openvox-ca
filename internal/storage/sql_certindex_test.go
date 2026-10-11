@@ -20,7 +20,6 @@ package storage
 import (
 	"context"
 	"path/filepath"
-	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -142,7 +141,7 @@ func certIndexMigrationRollback(b *SQLBackend) {
 	// catalogue query mis-scoped for this dialect would make the rollback a
 	// silent no-op, the re-apply a no-op too, and the round-trip below would
 	// still pass against a schema nothing ever touched.
-	for _, col := range slices.Concat(certIndexColumns, []string{ipAltNamesColumnName}) {
+	for _, col := range certIndexColumns {
 		exists, err := columnExists(ctx, b.db, inventoryTableV1, col)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(exists).To(BeFalse(), "column %s should have been dropped by the rollback", col)
@@ -162,6 +161,59 @@ func certIndexMigrationRollback(b *SQLBackend) {
 	certIndexRoundTrip(b)
 }
 
+// ipAltNamesMigrationDownUp runs the ip_alt_names migration's down and up
+// steps on their own, against a table holding a row. The full rollback above
+// cannot check them: it unwinds the migration that creates the table too, so
+// every column is gone afterwards whatever the down step did. Shared with the
+// PostgreSQL/MySQL integration suites, like the helpers above.
+func ipAltNamesMigrationDownUp(b *SQLBackend) {
+	ctx := context.Background()
+	svc := NewWithBackend(b, "")
+	Expect(svc.TouchInventory(ctx)).To(Succeed(), "TouchInventory")
+	Expect(svc.InitHMAC(ctx)).To(Succeed(), "InitHMAC")
+	proj := CertProjection{Fingerprint: "aa:bb:cc", IPAltNames: []string{"192.0.2.10"}}
+	Expect(svc.AppendInventoryRecord(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1", &proj)).
+		To(Succeed())
+
+	migrator := migrate.NewMigrator(b.db, sqlMigrations)
+	var m *migrate.Migration
+	for _, candidate := range sqlMigrations.Sorted() {
+		if candidate.Name == "20261011000000" {
+			m = &candidate
+		}
+	}
+	Expect(m).NotTo(BeNil(), "the ip_alt_names migration must be registered under its file's timestamp")
+
+	Expect(m.Down(ctx, migrator, m)).To(Succeed(), "down")
+	// Put the column back even if an assertion below fails, so a shared
+	// integration database is left as the next spec expects it. bun_migrations
+	// still records the migration as applied, so nothing else would re-add it.
+	DeferCleanup(func(ctx SpecContext) {
+		Expect(m.Up(ctx, migrator, m)).To(Succeed(), "restoring %s for the next spec", ipAltNamesColumnName)
+	})
+	exists, err := columnExists(ctx, b.db, inventoryTableV1, ipAltNamesColumnName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(exists).To(BeFalse(), "down must drop %s", ipAltNamesColumnName)
+	entries, err := b.Entries(ctx)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(entries).To(HaveLen(1), "down must leave the inventory itself alone")
+
+	Expect(m.Up(ctx, migrator, m)).To(Succeed(), "up")
+	exists, err = columnExists(ctx, b.db, inventoryTableV1, ipAltNamesColumnName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(exists).To(BeTrue(), "up must add %s", ipAltNamesColumnName)
+
+	// The row now holds a fingerprint and NULL ip_alt_names, the shape every
+	// row has when the column is first added. It must read as no projection,
+	// so that readers fall back to the PEM and repair rewrites it.
+	putCertBlob(b, "node1")
+	recs, err := b.Statuses(ctx, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(recs).To(HaveLen(1))
+	Expect(recs[0].CertProjection).To(Equal(CertProjection{}),
+		"a row projected before %s existed must read as unprojected", ipAltNamesColumnName)
+}
+
 var _ = Describe("SQLiteCertIndex", func() {
 	It("round-trips the certificate index end to end", func() {
 		certIndexRoundTrip(newSQLiteBackend())
@@ -169,6 +221,10 @@ var _ = Describe("SQLiteCertIndex", func() {
 
 	It("survives a migration rollback and re-apply", func() {
 		certIndexMigrationRollback(newSQLiteBackend())
+	})
+
+	It("drops and restores ip_alt_names through that migration's own steps", func() {
+		ipAltNamesMigrationDownUp(newSQLiteBackend())
 	})
 
 	It("persists the projection at append time and serves it back from Statuses", func() {
