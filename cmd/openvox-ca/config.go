@@ -1104,6 +1104,9 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_SQL_DSN"); v != "" {
 		cfg.SQLDSN = v
 	}
+	if v := os.Getenv("PUPPET_CA_SQL_DSN_FILE"); v != "" {
+		cfg.SQLDSNFile = v
+	}
 	if v := os.Getenv("PUPPET_CA_SQL_REQUEST_TIMEOUT_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.SQLRequestTimeoutSec = n

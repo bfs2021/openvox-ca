@@ -775,7 +775,7 @@ can share it. `postgres`, `postgresql` and `pg` are accepted as aliases.
 # /etc/puppet-ca/config.yaml
 storage_backend: postgres
 cadir: /var/lib/puppet-ca                # still needed for per-subject keys
-sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem"  # prefer PUPPET_CA_SQL_DSN
+sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem"  # prefer PUPPET_CA_SQL_DSN or sql_dsn_file
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
 sql_migration_timeout_sec: 600           # whole schema-migration run (default 600)
@@ -821,9 +821,12 @@ database's CA is rotated, but new ones fail, so the connection pool runs down
 gradually rather than all at once. Restart `openvox-ca` whenever the CA
 changes; some operators issue database CAs that last only weeks or months.
 
+On the command line, keep the password out of the arguments by putting the DSN
+in a file (see [keeping the database password private](#keeping-the-database-password-private)):
+
 ```text
 --storage-backend postgres
---sql-dsn         'postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem'
+--sql-dsn-file    /etc/puppet-ca/sql-dsn   # contains postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem
 ```
 
 **Operational notes.** Back the database up with your normal PostgreSQL tooling.
@@ -841,7 +844,7 @@ replicas can share it. `mysql` and `mariadb` are accepted as aliases.
 # /etc/puppet-ca/config.yaml
 storage_backend: mysql                   # or "mariadb"
 cadir: /var/lib/puppet-ca                # still needed for per-subject keys
-sql_dsn: "puppetca:secret@tcp(db.example.com:3306)/puppetca"  # prefer PUPPET_CA_SQL_DSN
+sql_dsn: "puppetca:secret@tcp(db.example.com:3306)/puppetca"  # prefer PUPPET_CA_SQL_DSN or sql_dsn_file
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
 sql_migration_timeout_sec: 600           # whole schema-migration run (default 600)
@@ -856,9 +859,11 @@ sql_tls_key_file:  /etc/puppet-ca/mysql-client-key.pem
 The DSN is the [go-sql-driver/mysql](https://github.com/go-sql-driver/mysql)
 form (`user:pass@tcp(host:3306)/dbname`).
 
+On the command line, as for PostgreSQL:
+
 ```text
 --storage-backend mysql
---sql-dsn         puppetca:secret@tcp(db.example.com:3306)/puppetca
+--sql-dsn-file    /etc/puppet-ca/sql-dsn   # contains puppetca:secret@tcp(db.example.com:3306)/puppetca
 ```
 
 **Operational notes.** The CA private key lives in the database by default;
@@ -873,6 +878,38 @@ database is the supported arrangement and is exactly what those locks are for.)
 PostgreSQL advisory locks are database-scoped, so the equivalent there is not to
 share a *database* with another application that uses `pg_advisory_lock`.
 
+### Keeping the database password private
+
+A PostgreSQL or MySQL DSN usually carries the database password, and that
+password fronts the store holding the CA's own key. Do not pass it with
+`--sql-dsn`. Every local user can read a process's command line (`ps`,
+`/proc/<pid>/cmdline`), and in Kubernetes anyone who can `get pods` can read it
+too. In the default topology `openvox-ca` also re-executes itself for the
+signer and the frontend with the same arguments, so the password is on show in
+three processes. It logs a warning at startup when `--sql-dsn` carries one.
+
+Use one of these instead:
+
+- **`sql_dsn_file` / `--sql-dsn-file` / `PUPPET_CA_SQL_DSN_FILE`**: the path to
+  a file whose first line is the DSN. Surrounding whitespace is trimmed. Make
+  it readable by the account `openvox-ca` runs as and nobody else: under the
+  shipped systemd unit that is `root:puppet-ca` with mode `0640`, as
+  [running under systemd](systemd.md) sets up the config file. In
+  Kubernetes, mount the Secret as a file. The file is read when `openvox-ca`
+  opens the database, not for each connection, so restart `openvox-ca` after
+  changing the password.
+- **`sql_dsn`** in the config file, which should then be readable by the
+  same account only, as above.
+- **`PUPPET_CA_SQL_DSN`**. A process's environment is readable only by its own
+  user and root, but child processes inherit it.
+
+`sql_dsn` and `sql_dsn_file` are mutually exclusive, whichever of the config
+file, environment or command line each comes from. Setting both is refused at
+startup rather than one silently overriding the other.
+
+`openvox-ca-ctl migrate` reads `sql_dsn_file` from its `--source-config` and
+`--dest-config` files in the same way.
+
 ### SQL environment variables
 
 The SQL backends share one set of config keys and environment variables:
@@ -881,6 +918,7 @@ The SQL backends share one set of config keys and environment variables:
 | --- | --- |
 | `storage_backend` | `PUPPET_CA_STORAGE_BACKEND` |
 | `sql_dsn` | `PUPPET_CA_SQL_DSN` |
+| `sql_dsn_file` | `PUPPET_CA_SQL_DSN_FILE` |
 | `sql_request_timeout_sec` | `PUPPET_CA_SQL_REQUEST_TIMEOUT_SEC` |
 | `sql_max_open_conns` | `PUPPET_CA_SQL_MAX_OPEN_CONNS` |
 | `sql_max_idle_conns` | `PUPPET_CA_SQL_MAX_IDLE_CONNS` |

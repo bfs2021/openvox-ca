@@ -119,6 +119,11 @@ type SQLSpec struct {
 	// DSN is the driver-specific data source name (a file path/URI for SQLite,
 	// a connection string for PostgreSQL/MySQL).
 	DSN string
+	// DSNFile is the path to a file whose first line is the DSN, so a
+	// password-bearing DSN need not appear in the process's arguments or
+	// environment. Mutually exclusive with DSN; it is read when the backend
+	// is opened, not for each connection.
+	DSNFile string
 
 	RequestTimeoutSec int
 	// MigrationTimeoutSec bounds a whole schema-migration run rather than one
@@ -248,8 +253,9 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 		if spec.LocalDir == "" {
 			return nil, fmt.Errorf("sql backend still needs LocalDir for local private keys")
 		}
-		if spec.SQL.DSN == "" {
-			return nil, fmt.Errorf("sql backend requires sql_dsn")
+		dsn, err := resolveSQLDSN(spec.SQL)
+		if err != nil {
+			return nil, err
 		}
 		dialect, ok := sqlDialectForKind(kind)
 		if !ok {
@@ -257,7 +263,7 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 		}
 		cfg := SQLConfig{
 			Dialect:      dialect,
-			DSN:          spec.SQL.DSN,
+			DSN:          dsn,
 			MaxOpenConns: spec.SQL.MaxOpenConns,
 			MaxIdleConns: spec.SQL.MaxIdleConns,
 		}

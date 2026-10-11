@@ -1248,7 +1248,7 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- $_ := set $credentials "etcd_password" "PUPPET_CA_ETCD_PASSWORD" -}}
 {{- $_ := set $credentials "redis_password" "PUPPET_CA_REDIS_PASSWORD" -}}
 {{- $_ := set $credentials "redis_sentinel_password" "PUPPET_CA_REDIS_SENTINEL_PASSWORD" -}}
-{{- $_ := set $credentials "sql_dsn" "PUPPET_CA_SQL_DSN from a Secret holding the whole DSN, or with the password as $(VAR) set from a Secret earlier in extraEnv (percent-encoded, for a URL)" -}}
+{{- $_ := set $credentials "sql_dsn" "PUPPET_CA_SQL_DSN from a Secret holding the whole DSN, or with the password as $(VAR) set from a Secret earlier in extraEnv (percent-encoded, for a URL), or sql_dsn_file pointing at the Secret mounted as a file" -}}
 {{- $found := list -}}
 {{- range $key, $remedy := $credentials -}}
 {{- $value := index $config $key -}}

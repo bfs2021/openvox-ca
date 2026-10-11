@@ -69,8 +69,11 @@ type StorageConfig struct {
 	// SQL backend (sqlite, postgres, mysql/mariadb). SQLDSN is the
 	// driver-specific data source name: a file path/URI for SQLite
 	// ("file:/var/lib/puppet-ca/ca.db"), or a connection string for the
-	// networked engines. SQLTLS* apply only to the networked dialects.
+	// networked engines. SQLDSNFile names a file holding the DSN instead, so
+	// a password need not be on the command line or in the environment; the
+	// two are mutually exclusive. SQLTLS* apply only to the networked dialects.
 	SQLDSN               string `yaml:"sql_dsn"`
+	SQLDSNFile           string `yaml:"sql_dsn_file"`
 	SQLRequestTimeoutSec int    `yaml:"sql_request_timeout_sec"`
 	// SQLMigrationTimeoutSec bounds a whole schema-migration run, not one
 	// statement. Zero uses ten minutes. Raise it when an index build over a
@@ -141,6 +144,7 @@ func (c StorageConfig) ToBackendSpec(localDir string) (storage.BackendSpec, erro
 	case storage.BackendSQLite, storage.BackendPostgres, storage.BackendMySQL:
 		spec.SQL = storage.SQLSpec{
 			DSN:                 c.SQLDSN,
+			DSNFile:             absIfSet(c.SQLDSNFile),
 			RequestTimeoutSec:   c.SQLRequestTimeoutSec,
 			MigrationTimeoutSec: c.SQLMigrationTimeoutSec,
 			MaxOpenConns:        c.SQLMaxOpenConns,

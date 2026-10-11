@@ -717,6 +717,7 @@ func newRootCmd() *cobra.Command {
 		redisSentinelAddrs      []string
 		redisKeyPrefix          string
 		sqlDSN                  string
+		sqlDSNFile              string
 		caCertFile              string
 		caKeyFile               string
 
@@ -859,6 +860,9 @@ func newRootCmd() *cobra.Command {
 			if cmd.Flags().Changed("sql-dsn") {
 				cfg.SQLDSN = sqlDSN
 			}
+			if cmd.Flags().Changed("sql-dsn-file") {
+				cfg.SQLDSNFile = sqlDSNFile
+			}
 			if cmd.Flags().Changed("ca-cert-file") {
 				cfg.CACertFile = caCertFile
 			}
@@ -889,6 +893,10 @@ func newRootCmd() *cobra.Command {
 			// Note: --daemon is intentionally excluded from config file / env var support
 			// because PUPPET_CA_DAEMON is used internally as the fork signal.
 			if daemon && os.Getenv("PUPPET_CA_DAEMON") != "1" {
+				// The child's stderr is discarded below, so this is the only
+				// place the operator's terminal can see the warning. The child
+				// repeats it into the log it configures.
+				warnSQLDSNPasswordOnCommandLine(cmd.Flags())
 				// A service manager tracks the process it started; forking and
 				// exiting makes the service look like it died the moment it
 				// started. Under systemd, drop --daemon and use Type=notify.
@@ -1022,20 +1030,28 @@ func newRootCmd() *cobra.Command {
 				return runSignerMode(ctx, cfg, absCADir, keyPermWarnings)
 			}
 
-			// Launcher mode (default): spawn isolated signer + frontend children.
-			if role == "" && !singleProcess {
-				// The launcher configures logging for itself, like the signer
-				// does. Without this it ran on Go's built-in default handler:
-				// its verbosity was fixed at info whatever the operator set, so
-				// the debug line explaining why no memory budget was divided
-				// could never appear, and its warnings bypassed logfile
-				// entirely.
+			// The launcher (the default) and the single-process server are both
+			// the process the operator started, so both configure logging here,
+			// once, like the signer does. Without this the launcher ran on Go's
+			// built-in default handler: its verbosity was fixed at info whatever
+			// the operator set, so the debug line explaining why no memory
+			// budget was divided could never appear, and its warnings bypassed
+			// logfile entirely.
+			if role == "" {
 				closeLog, err := openRoleLogAndReport(cfg, keyPermWarnings)
 				if err != nil {
 					return err
 				}
 				defer closeLog()
-				return runLauncher(cfg, notifier, hupCh)
+				// Here rather than earlier, so that it reaches logfile; and
+				// only here, so the signer and frontend, which carry the same
+				// argv, do not repeat it.
+				warnSQLDSNPasswordOnCommandLine(cmd.Flags())
+
+				// Launcher mode: spawn isolated signer + frontend children.
+				if !singleProcess {
+					return runLauncher(cfg, notifier, hupCh)
+				}
 			}
 
 			// Frontend mode (role=frontend) or single-process mode: run HTTP server.
@@ -1044,12 +1060,15 @@ func newRootCmd() *cobra.Command {
 			// the overlay-aware storage service).
 			var remoteSigner *signer.RemoteSigner
 
-			// --- Logging setup, and the report that has to follow it ---
-			closeLog, err := openRoleLogAndReport(cfg, keyPermWarnings)
-			if err != nil {
-				return err
+			// --- Logging setup, and the report that has to follow it --- (the
+			// frontend's; single-process mode configured its own above)
+			if role == "frontend" {
+				closeLog, err := openRoleLogAndReport(cfg, keyPermWarnings)
+				if err != nil {
+					return err
+				}
+				defer closeLog()
 			}
-			defer closeLog()
 
 			slog.Info("Starting Puppet CA",
 				"cadir", absCADir,
@@ -1541,7 +1560,8 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&redisSentinelMasterName, "redis-sentinel-master-name", "", "Redis Sentinel primary name; set to enable Sentinel-managed failover")
 	f.StringSliceVar(&redisSentinelAddrs, "redis-sentinel-addrs", nil, "Comma-separated Redis Sentinel addresses (e.g. sentinel-0:26379,sentinel-1:26379)")
 	f.StringVar(&redisKeyPrefix, "redis-key-prefix", "", "Redis key namespace for this CA (default: puppet-ca)")
-	f.StringVar(&sqlDSN, "sql-dsn", "", "SQL data source name (SQLite 'file:/var/lib/puppet-ca/ca.db', PostgreSQL 'postgres://user:pass@host:5432/db?sslmode=verify-full&sslrootcert=/path/to/ca.pem', or MySQL 'user:pass@tcp(host:3306)/db')")
+	f.StringVar(&sqlDSN, "sql-dsn", "", "SQL data source name: a SQLite path ('file:/var/lib/puppet-ca/ca.db') or a PostgreSQL or MySQL connection string (for PostgreSQL over TLS, sslmode=verify-full with sslrootcert). Every local user can read the command line, so give a DSN with a password via --sql-dsn-file, PUPPET_CA_SQL_DSN or sql_dsn in the config file instead")
+	f.StringVar(&sqlDSNFile, "sql-dsn-file", "", "Path to a file containing the SQL data source name (first line used), keeping a database password off the command line. Mutually exclusive with --sql-dsn")
 	f.StringVar(&caCertFile, "ca-cert-file", "", "Keep the CA certificate at this local path regardless of storage backend")
 	f.StringVar(&caKeyFile, "ca-key-file", "", "Keep the CA private key at this local path regardless of storage backend")
 	registerOpenBaoFlags(f, &obFlags)
@@ -1578,6 +1598,27 @@ type openBaoFlagValues struct {
 	k8sMount            string
 	k8sRole             string
 	k8sJWTFile          string
+}
+
+// warnSQLDSNPasswordOnCommandLine logs a warning when --sql-dsn carries a
+// database password. The command line is world-readable through
+// /proc/<pid>/cmdline and ps, and the launcher re-execs the signer and the
+// frontend with the same arguments, so in the default topology the password is
+// on show in three processes for as long as they run -- whichever backend is
+// selected, since a DSN the backend ignores is still in argv. The warning names
+// the routes that keep it private and never the DSN itself.
+//
+// Its callers decide where it is said: once by the launcher or single-process
+// server, after its logger is configured so that logfile receives it, and once
+// more by a --daemon parent before it forks, since that child's stderr is
+// discarded. The signer and frontend never call it.
+func warnSQLDSNPasswordOnCommandLine(flags *pflag.FlagSet) {
+	dsn, err := flags.GetString("sql-dsn")
+	if err != nil || !storage.DSNHasPassword(dsn) {
+		return
+	}
+	slog.Warn("--sql-dsn contains a database password, which any local user can read from the process list; " +
+		"use --sql-dsn-file, PUPPET_CA_SQL_DSN or sql_dsn in the config file instead")
 }
 
 // registerOpenBaoFlags registers the --ca-key-provider and --openbao-* flags

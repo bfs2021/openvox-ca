@@ -217,6 +217,9 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 		{Setting: "ca_cert_file", Path: cfg.CACertFile},
 		{Setting: "ca_key_file", Path: cfg.CAKeyFile},
 		{Setting: "ca_key_passphrase_file", Path: cfg.CAKeyPassphraseFile},
+		// The DSN, password included: an entry written over it leaves the CA
+		// unable to open its store at the next start.
+		{Setting: "sql_dsn_file", Path: cfg.SQLDSNFile},
 		{Setting: "crl_chain_file", Path: cfg.CRLChainFile},
 		{Setting: "logfile", Path: cfg.LogFile},
 		{Setting: "puppet_server_file", Path: cfg.PuppetServerFile},
