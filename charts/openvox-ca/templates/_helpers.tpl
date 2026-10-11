@@ -1238,52 +1238,53 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- end -}}
 
 {{/*
-Whether a sql_dsn carries a password, splitting it the way the server's
-drivers do. Takes a dict: "dsn", and "backend", the configured storage_backend.
+Whether a sql_dsn carries a password. Takes a dict: "dsn", and "backend", the
+configured storage_backend.
 
-The server picks the driver from storage_backend, not from the DSN, so a
-mysql or mariadb backend always means go-sql-driver: cut at the last /, then
-take what precedes the last @ before that. Otherwise a postgres://,
-postgresql:// or unix:// DSN goes through net/url, as pgdriver's does, whose
-userinfo is the authority (up to the first /, ? or #) before its last @.
+Both drivers the server uses put the password between the first colon and an
+@: pgdriver's URLs (postgres://, postgresql://, unix://) through net/url, and
+go-sql-driver's user:password@tcp(host)/db. Mirroring either split exactly lets
+a malformed DSN through: a password carrying an unencoded / (or, in a URL, ?
+or #), or a user part carrying an @, cuts the driver's userinfo short, and
+although the server cannot use that DSN the ConfigMap would hold the password
+all the same. So this asks one question instead: is there a colon followed by
+text anywhere before the DSN's last @? An empty password ("user:@host") is not
+a secret.
+
+A URL's scheme is set aside first, since its colon is not a separator, but only
+for those three schemes and only when the backend is not mysql or mariadb: the
+server picks the driver from storage_backend, not from the DSN, and to
+go-sql-driver "postgres://x@tcp(db)/ca" is user "postgres" with password "//x".
 Keying on those schemes rather than on any "scheme://" keeps a MySQL password
-that begins with // from being read as a URL when the backend is set some
-other way, such as PUPPET_CA_STORAGE_BACKEND. Anything else goes
-go-sql-driver's way. A password is then any text after the userinfo's first
-colon; an empty one is not a secret.
+that begins with // from being read as a URL when the backend is set some other
+way, such as PUPPET_CA_STORAGE_BACKEND.
 
-Both splits fall back when they find no @ where they look: a URL to everything
-after :// up to its last @, the go-sql-driver form to everything up to its last
-@. On a well-formed DSN that finds nothing, but a password carrying an
-unencoded / (or, in a URL, ? or #) ends the driver's userinfo early: the server
-cannot use that DSN, yet the ConfigMap would hold the password all the same.
-The cost is that a DSN with no user part and an @ in a query value, after a
-port's colon, is refused although it works. That is the direction to err in.
+The cost is one class of false refusal: a DSN with an @ after its host, in a
+database name or a query value, is refused when a port or any other colon comes
+before that @, although it works. That is the direction to err in, and moving
+such a DSN into extraEnv is harmless.
 
-A password= parameter counts wherever it appears, sslpassword included, for
-the same reason: no driver here takes a password that way, but erring towards
-refusal costs the operator one extraEnv entry.
+SQLite's DSN is a file path, which may hold an @ and starts "file:", so with a
+sqlite backend only the password= check below applies. Without one, a file:
+path containing @ falls into the class above.
+
+A password= parameter counts wherever it appears, sslpassword included: no
+driver here takes a password that way, but the ConfigMap would hold it all the
+same.
 
 Returns "true", or nothing.
 */}}
 {{- define "openvox-ca.dsnHasPassword" -}}
 {{- $dsn := .dsn -}}
-{{- $mysql := has (lower (trim .backend)) (list "mysql" "mariadb") -}}
+{{- $backend := lower (trim .backend) -}}
 {{- $userinfo := "" -}}
-{{- if and (not $mysql) (regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn) -}}
-{{- $authority := regexReplaceAll "(?s)^[^:]*://([^/?#]*).*$" $dsn "${1}" -}}
-{{- $rest := regexReplaceAll "(?s)^[^:]*://" $dsn "" -}}
-{{- if contains "@" $authority -}}
-{{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $authority "${1}" -}}
-{{- else if contains "@" $rest -}}
-{{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $rest "${1}" -}}
+{{- if not (has $backend (list "sqlite" "sqlite3")) -}}
+{{- $rest := $dsn -}}
+{{- if and (not (has $backend (list "mysql" "mariadb"))) (regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn) -}}
+{{- $rest = regexReplaceAll "(?s)^[^:]*://" $dsn "" -}}
 {{- end -}}
-{{- else -}}
-{{- $head := regexReplaceAll "(?s)^(.*)/.*$" $dsn "${1}" -}}
-{{- if contains "@" $head -}}
-{{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $head "${1}" -}}
-{{- else if contains "@" $dsn -}}
-{{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $dsn "${1}" -}}
+{{- if contains "@" $rest -}}
+{{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $rest "${1}" -}}
 {{- end -}}
 {{- end -}}
 {{- if or (regexMatch "(?s)^[^:]*:." $userinfo) (regexMatch "(?i)password=[^&\\s]" $dsn) -}}true{{- end -}}

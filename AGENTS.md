@@ -394,10 +394,13 @@ is expected until someone sweeps the block deliberately.
 The one exception is a setting that can hold a credential inline. `config`
 lands in a ConfigMap, so `openvox-ca.validate` refuses every such key it lists
 in `$credentials`; a new one needs adding there, with a reject case in
-`chart:test`. `chart:test` enforces that for any key whose yaml tag names a
-password, secret, token or DSN (`inlineCredentialKeys` in `magefile.go`), but
-it cannot see a credential named otherwise, which the chart would render in
-clear text without a word.
+`chart:test`. `chart:test` enforces that for any key in `internal/config` or
+`cmd/openvox-ca/config.go` whose yaml tag names a password, secret, token or
+DSN (`inlineCredentialKeys` in `magefile.go`). It reads tag names, not paths:
+a key in a nested block such as `openbao` still fails the check, but needs a
+`dig` for its path in `openvox-ca.validate` rather than a top-level entry. A
+credential named otherwise, or declared outside those files, it cannot see,
+and the chart would render it in clear text without a word.
 
 Every fixture under `charts/openvox-ca/ci/` is linted and schema-checked in CI.
 A new template branch needs a fixture that exercises it, or it is untested —

@@ -140,7 +140,7 @@ var _ = Describe("inlineCredentialKeys", func() {
 		It("reads both sources, sorted, skipping path keys and test files", func() {
 			write("internal/config/a.go", "type A struct {\n\tP string `yaml:\"zed_password\"`\n\tF string `yaml:\"approle_secret_id_file\"`\n\tN int `yaml:\"port\"`\n}\n")
 			write("internal/config/a_test.go", "type T struct {\n\tS string `yaml:\"fixture_secret\"`\n}\n")
-			write("cmd/openvox-ca/config.go", "type C struct {\n\tD string `yaml:\"sql_dsn\"`\n\tT string `yaml:\"api_token\"`\n}\n")
+			write("cmd/openvox-ca/config.go", "type C struct {\n\tD string `yaml:\"sql_dsn\"`\n\tT string `yaml:\"api_token,omitempty\"`\n}\n")
 
 			Expect(inlineCredentialKeys(root)).To(Equal([]string{"api_token", "sql_dsn", "zed_password"}))
 		})
@@ -151,6 +151,25 @@ var _ = Describe("inlineCredentialKeys", func() {
 			_, err := inlineCredentialKeys(root)
 			Expect(err).To(MatchError(ContainSubstring("found no inline-credential config keys")))
 		})
+	})
+})
+
+var _ = Describe("uncoveredCredentialKeys", func() {
+	rejects := []chartRejectCase{
+		{wantErr: "config.etcd_password: set PUPPET_CA_ETCD_PASSWORD instead"},
+		{wantErr: "config.redis_sentinel_password: set PUPPET_CA_REDIS_SENTINEL_PASSWORD instead"},
+	}
+
+	It("returns exactly the keys no reject case refuses", func() {
+		Expect(uncoveredCredentialKeys([]string{"etcd_password", "sql_dsn"}, rejects)).To(Equal([]string{"sql_dsn"}))
+	})
+
+	It("does not count a case for a longer key that ends in this one", func() {
+		Expect(uncoveredCredentialKeys([]string{"redis_password"}, rejects)).To(Equal([]string{"redis_password"}))
+	})
+
+	It("returns nothing when every key is covered", func() {
+		Expect(uncoveredCredentialKeys([]string{"etcd_password", "redis_sentinel_password"}, rejects)).To(BeEmpty())
 	})
 })
 

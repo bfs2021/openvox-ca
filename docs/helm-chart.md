@@ -179,13 +179,19 @@ carries any of these:
 
 A `sql_dsn` carries a password when its user part has one
 (`postgres://user:password@…`, `user:password@tcp(…)/…`) or when it has a
-`password=` parameter. The chart reads it as the server would, by
-`storage_backend`, and errs towards refusal. A password with an unescaped `/`
-(or, in a `postgres://` DSN, `?` or `#`) is refused too, although the server
-could not use it. So is a DSN with no user part that has an `@` in a query
-value after the port, although it works; move that one to `extraEnv` as well.
-One without a password, such as a SQLite file path, can stay in `config`. With `existingConfigMap` set the chart renders no ConfigMap, so
-nothing is refused, and what goes into yours is your own decision.
+`password=` parameter. The chart errs towards refusal: it refuses any colon
+followed by text before the DSN's last `@`, after setting a `postgres://`
+scheme aside unless `storage_backend` is `mysql` or `mariadb`. That catches a
+password with an unescaped `/`, `?` or `#`, which the server could not use
+either. It also refuses a working DSN with an `@` after its host, in a
+database name or a query value, when a port or other colon comes before it;
+move that one to `extraEnv` as well.
+
+One without a password can stay in `config`. Under a `sqlite` backend only a
+`password=` parameter counts, since a SQLite path may hold an `@`.
+
+With `existingConfigMap` set the chart renders no ConfigMap, so nothing is
+refused, and what goes into yours is your own decision.
 
 ## Choosing an image
 

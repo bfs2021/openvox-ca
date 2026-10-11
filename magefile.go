@@ -2444,13 +2444,20 @@ type chartRenderCase struct {
 }
 
 // inlineCredentialSources are the files that declare the server's config keys,
-// relative to the repository root.
+// relative to the repository root. internal/k8sexport/config.go declares the
+// kubernetes_export block too, but only export targets: the exporter
+// authenticates with the pod's ServiceAccount, so no credential lives there.
+//
+// The scan reads tag names, not paths, so a key in a nested block such as
+// openbao comes back bare. That is enough to fail the check below; the fix is
+// then a dig for its path in openvox-ca.validate, not a top-level entry.
 var inlineCredentialSources = []string{"internal/config/*.go", "cmd/openvox-ca/config.go"}
 
-// inlineCredentialKeyRe matches a yaml tag whose name says it holds a secret.
-// A key ending _file names a path to the secret rather than the secret, and
-// inlineCredentialKeys drops those.
-var inlineCredentialKeyRe = regexp.MustCompile(`yaml:"([a-z0-9_]*(?:password|secret|token|dsn)[a-z0-9_]*)"`)
+// inlineCredentialKeyRe matches a yaml tag whose name says it holds a secret,
+// with or without tag options such as ",omitempty". A key ending _file names a
+// path to the secret rather than the secret, and inlineCredentialKeys drops
+// those.
+var inlineCredentialKeyRe = regexp.MustCompile(`yaml:"([a-z0-9_]*(?:password|secret|token|dsn)[a-z0-9_]*)[",]`)
 
 // inlineCredentialKeys returns, sorted, every config key under root that can
 // hold a credential inline. chart:test requires a reject case for each, which
@@ -2485,6 +2492,19 @@ func inlineCredentialKeys(root string) ([]string, error) {
 		return nil, fmt.Errorf("found no inline-credential config keys in %v under %s; update inlineCredentialSources", inlineCredentialSources, root)
 	}
 	return slices.Sorted(maps.Keys(seen)), nil
+}
+
+// uncoveredCredentialKeys returns the keys no reject case refuses, judged by
+// the per-key line openvox-ca.validate prints: "config.<key>: set ".
+func uncoveredCredentialKeys(keys []string, rejects []chartRejectCase) []string {
+	var uncovered []string
+	for _, key := range keys {
+		marker := "config." + key + ": set "
+		if !slices.ContainsFunc(rejects, func(c chartRejectCase) bool { return strings.Contains(c.wantErr, marker) }) {
+			uncovered = append(uncovered, key)
+		}
+	}
+	return uncovered
 }
 
 // chartRejectCase is one assertion that the chart refuses a configuration:
@@ -4001,9 +4021,8 @@ config:
 		},
 		{
 			// The credential refusal keys on a password, not on sql_dsn being
-			// set. Read as go-sql-driver would, this DSN's userinfo is
-			// "postgres://ca", whose colon is the scheme's — so this also pins
-			// that a postgres URL is split as a URL.
+			// set. Left in place, the scheme's colon would precede the @ — so
+			// this also pins that a postgres scheme is set aside first.
 			name:       "a postgres sql_dsn without a password stays in config",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db:5432/ca?sslmode=require'\n",
@@ -4018,9 +4037,7 @@ config:
 			wants:      []string{"sql_dsn: POSTGRESQL://ca@db/ca"},
 		},
 		{
-			// No userinfo at all: the authority has no @, so the go-sql-driver
-			// fallback runs and finds none either. Taking the authority as the
-			// userinfo would read the port's colon as a password.
+			// No user part at all, and no @: the port's colon is not a password.
 			name:       "a postgres sql_dsn with no user part stays in config",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://db:5432/ca?sslmode=require'\n",
@@ -4057,6 +4074,21 @@ config:
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'ca@tcp(db:3306)/ca?allowNativePasswords=true'\n",
 			wants:      []string{"sql_dsn: ca@tcp(db:3306)/ca?allowNativePasswords=true"},
+		},
+		{
+			// A SQLite path may hold an @, and its "file:" colon precedes it, so
+			// under a sqlite backend only a password= parameter counts.
+			name:       "a SQLite sql_dsn whose path holds an @ stays in config under a sqlite backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'file:/srv/ca@prod/ca.db'\n",
+			wants:      []string{"sql_dsn: file:/srv/ca@prod/ca.db"},
+		},
+		{
+			// The server folds case and accepts sqlite3 as an alias.
+			name:       "a SQLite sql_dsn whose path holds an @ stays in config under a SQLite3 backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: SQLite3\n  sql_dsn: 'file:/srv/ca@prod/ca.db'\n",
+			wants:      []string{"sql_dsn: file:/srv/ca@prod/ca.db"},
 		},
 		{
 			name:       "a SQLite sql_dsn, which is a file path, stays in config",
@@ -4658,9 +4690,8 @@ config:
 			notWants:   []string{"MYSECRET"},
 		},
 		{
-			// go-sql-driver cuts at the *last* slash, so a slash in the password
-			// is legal. Cutting at the first would leave "ca:MY", with no @, and
-			// miss it.
+			// go-sql-driver cuts at the last slash, so a slash in the password
+			// is legal, and the chart has to look past it to the @.
 			name:       "a MySQL sql_dsn whose password contains a slash",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'ca:MY/SECRET@tcp(db:3306)/ca'\n",
@@ -4704,8 +4735,8 @@ config:
 		{
 			// net/url ends the authority at the first /, leaving "ca:PG" with no
 			// @ and so no userinfo. The server cannot use this DSN, but the
-			// ConfigMap would hold the password, so the URL split falls back to
-			// go-sql-driver's.
+			// ConfigMap would hold the password, so the chart looks to the last
+			// @ instead.
 			name:       "a postgres sql_dsn whose password contains an unescaped slash",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG/SECRET@db/ca'\n",
@@ -4722,9 +4753,8 @@ config:
 			notWants:   []string{"PG?SECRET"},
 		},
 		{
-			// With no database path there is no / after the password, so the
-			// fallback has to look past :// to the last @ rather than cut at the
-			// last /, which here falls inside the password.
+			// With no database path the last / falls inside the password, so
+			// cutting there, as go-sql-driver would, finds no @.
 			name:       "a pathless postgres sql_dsn whose password contains an unescaped slash",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG/SECRET@db?sslmode=require'\n",
@@ -4740,12 +4770,31 @@ config:
 			notWants:   []string{"PG?SECRET"},
 		},
 		{
-			// The go-sql-driver form's fallback: with the slash inside the
+			// The same in go-sql-driver's form: with the slash inside the
 			// password and no database name, the text before the last / holds
 			// no @.
 			name:       "a pathless MySQL sql_dsn whose password contains a slash",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'ca:MY/SECRET@tcp(db:3306)'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MY/SECRET"},
+		},
+		{
+			// An @ in the user part, as in Azure's user@server convention, puts
+			// one in net/url's authority too, so its userinfo is just "ca" and
+			// the password after the / goes unseen. Only the last @ counts.
+			name:       "a postgres sql_dsn with an @ in its user part and a slash in its password",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@tenant:PG/SECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG/SECRET"},
+		},
+		{
+			// The same in go-sql-driver's form, where the last / is inside the
+			// password and the last @ before it is the user part's.
+			name:       "a pathless MySQL sql_dsn with an @ in its user part and a slash in its password",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'ca@tenant:MY/SECRET@tcp(db:3306)'\n",
 			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
 			notWants:   []string{"MY/SECRET"},
 		},
@@ -4914,14 +4963,14 @@ config:
 	if err != nil {
 		return err
 	}
+	uncovered := uncoveredCredentialKeys(credentialKeys, rejects)
 	for _, key := range credentialKeys {
 		name := fmt.Sprintf("config.%s is refused by a reject case", key)
-		marker := "config." + key + ": set "
-		if slices.ContainsFunc(rejects, func(c chartRejectCase) bool { return strings.Contains(c.wantErr, marker) }) {
-			fmt.Printf("ok    %s\n", name)
-		} else {
-			fmt.Printf("FAIL  %s\n      no reject case expects %q; add the key to $credentials in openvox-ca.validate and a case here\n", name, marker)
+		if slices.Contains(uncovered, key) {
+			fmt.Printf("FAIL  %s\n      no reject case expects %q; add the key to $credentials in openvox-ca.validate (or, in a nested block, a dig for its path) and a case here\n", name, "config."+key+": set ")
 			failures++
+		} else {
+			fmt.Printf("ok    %s\n", name)
 		}
 	}
 
