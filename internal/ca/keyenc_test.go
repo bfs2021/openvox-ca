@@ -150,7 +150,7 @@ var _ = Describe("Key encryption", func() {
 
 			pp, err := resolvePassphrase(KeyPassphraseConfig{
 				PassphraseFile: ppFile,
-			}, tmpDir)
+			}, tmpDir, needEncryptConfigured)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(pp)).To(Equal("my-secret"))
 		})
@@ -166,7 +166,7 @@ var _ = Describe("Key encryption", func() {
 			})
 			os.Setenv("PUPPET_CA_KEY_PASSPHRASE", "env-secret")
 
-			pp, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
+			pp, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir, needEncryptConfigured)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(pp)).To(Equal("env-secret"))
 		})
@@ -177,7 +177,7 @@ var _ = Describe("Key encryption", func() {
 			cfg := KeyPassphraseConfig{PassphraseEnvVar: "SITE_CA_KEY_PASSPHRASE"}
 			GinkgoT().Setenv(cfg.EnvVar(), "custom-secret")
 
-			pp, err := resolvePassphrase(cfg, tmpDir)
+			pp, err := resolvePassphrase(cfg, tmpDir, needEncryptConfigured)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(pp)).To(Equal("custom-secret"))
 		})
@@ -187,7 +187,7 @@ var _ = Describe("Key encryption", func() {
 		// for the default configuration: a copy of the cadir carried the
 		// ciphertext and the passphrase together (#432).
 		It("refuses when encryption is on and no passphrase source is configured", func() {
-			pp, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
+			pp, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir, needEncryptConfigured)
 
 			Expect(err).To(HaveOccurred(), "a missing passphrase is not something to invent")
 			// Nil alongside the error, not merely unused by the callers. They
@@ -195,6 +195,8 @@ var _ = Describe("Key encryption", func() {
 			// is "no passphrase", and a future caller reading the value before
 			// the error should get nothing rather than something plausible.
 			Expect(pp).To(BeNil(), "and no passphrase came back with it")
+			Expect(err.Error()).To(ContainSubstring("encrypt_ca_key is set"),
+				"this call says encryption is configured, so that is what the message must name")
 			Expect(err.Error()).To(ContainSubstring("no passphrase source is configured"))
 			Expect(err.Error()).To(ContainSubstring("ca_key_passphrase_file"), "the remedy")
 			Expect(err.Error()).To(ContainSubstring("PUPPET_CA_KEY_PASSPHRASE"), "or the other one")
@@ -211,7 +213,7 @@ var _ = Describe("Key encryption", func() {
 			autoPath := autoPassphrasePath(tmpDir)
 			Expect(os.WriteFile(autoPath, []byte("generated-by-an-older-version"), 0600)).To(Succeed())
 
-			_, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
+			_, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir, needEncryptConfigured)
 
 			Expect(err).To(HaveOccurred(), "not read implicitly, even though it is there")
 			Expect(err.Error()).To(ContainSubstring(autoPath), "the file it found")
@@ -225,10 +227,34 @@ var _ = Describe("Key encryption", func() {
 			autoPath := autoPassphrasePath(tmpDir)
 			Expect(os.WriteFile(autoPath, []byte("generated-by-an-older-version"), 0600)).To(Succeed())
 
-			pp, err := resolvePassphrase(KeyPassphraseConfig{PassphraseFile: autoPath}, tmpDir)
+			pp, err := resolvePassphrase(KeyPassphraseConfig{PassphraseFile: autoPath}, tmpDir, needEncryptConfigured)
 
 			Expect(err).NotTo(HaveOccurred(), "the remedy in the message has to work")
 			Expect(string(pp)).To(Equal("generated-by-an-older-version"))
+		})
+
+		// The load path's own reason, which had no anchor at all: the message
+		// opened "encrypt_ca_key is set" wherever it was raised, and on this
+		// path that is false -- loadCAKeyFromDisk resolves a passphrase because
+		// the stored PEM is encrypted, whatever the setting says.
+		It("names the stored key, not the setting, when that is the reason", func() {
+			_, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir, needStoredKeyEncrypted)
+
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("the CA key in the store is encrypted"))
+			Expect(err.Error()).NotTo(ContainSubstring("encrypt_ca_key is set"),
+				"pointing at a setting the operator may have deliberately unset is the defect")
+		})
+
+		It("names the stored key in the generated-file remedy too", func() {
+			autoPath := autoPassphrasePath(tmpDir)
+			Expect(os.WriteFile(autoPath, []byte("generated-by-an-older-version"), 0600)).To(Succeed())
+
+			_, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir, needStoredKeyEncrypted)
+
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("the CA key in the store is encrypted"))
+			Expect(err.Error()).To(ContainSubstring(autoPath), "and still names the file")
 		})
 
 		It("errors on empty passphrase file", func() {
@@ -237,7 +263,7 @@ var _ = Describe("Key encryption", func() {
 
 			_, err := resolvePassphrase(KeyPassphraseConfig{
 				PassphraseFile: ppFile,
-			}, tmpDir)
+			}, tmpDir, needEncryptConfigured)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("empty"))
 		})
@@ -250,6 +276,90 @@ var _ = Describe("Key encryption", func() {
 		Entry("defaults to PUPPET_CA_KEY_PASSPHRASE", KeyPassphraseConfig{}, "PUPPET_CA_KEY_PASSPHRASE"),
 		Entry("names a configured variable", KeyPassphraseConfig{PassphraseEnvVar: "SITE_CA_KEY_PASSPHRASE"}, "SITE_CA_KEY_PASSPHRASE"),
 	)
+
+	// PassphraseNeeded is what lets the server raise a missing-passphrase
+	// refusal before it forks, so it has to answer the question CA.Init will
+	// actually ask. The two conditions are independent and disagree in both
+	// directions, which is why the answer cannot come from the setting alone.
+	Describe("PassphraseNeeded", func() {
+		var tmpDir string
+
+		BeforeEach(func() {
+			var err error
+			tmpDir, err = os.MkdirTemp("", "openvox-ca-need-test")
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(os.RemoveAll(tmpDir)).To(Succeed()) })
+		})
+
+		// An encrypted PEM to feed it, made the way the CA makes one rather
+		// than hand-rolled, so the predicate is tested against the real shape.
+		encryptedPEM := func() []byte {
+			GinkgoHelper()
+			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+			pemBytes, err := encryptAndMarshalKey(key, []byte("pp"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(pemBytes)).To(ContainSubstring("ENCRYPTED PRIVATE KEY"))
+			return pemBytes
+		}
+
+		plaintextPEM := func() []byte {
+			GinkgoHelper()
+			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+			pemBytes, err := marshalPrivateKeyPEM(key)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(pemBytes)).NotTo(ContainSubstring("ENCRYPTED"))
+			return pemBytes
+		}
+
+		It("needs one for an encrypted stored key even with encryption off", func() {
+			// The case a check written against cfg.EncryptCAKey would miss, and
+			// the whole reason the preflight reads the key.
+			Expect(PassphraseNeeded(false, encryptedPEM())).To(BeTrue())
+		})
+
+		It("needs none for a plaintext stored key even with encryption on", func() {
+			// The other direction. Nothing re-encrypts a key that already
+			// exists, so refusing here would stop a CA that works today.
+			Expect(PassphraseNeeded(true, plaintextPEM())).To(BeFalse())
+		})
+
+		DescribeTable("falls back to the setting when there is no stored key",
+			func(encrypt bool, stored []byte, expected bool) {
+				Expect(PassphraseNeeded(encrypt, stored)).To(Equal(expected))
+			},
+			Entry("bootstrap with encryption", true, nil, true),
+			Entry("bootstrap without encryption", false, nil, false),
+			Entry("empty blob with encryption", true, []byte{}, true),
+			// A blob that is not PEM at all is Init's to report, precisely;
+			// refusing here on a condition it will describe better would
+			// replace a good error with a worse one.
+			Entry("undecodable blob with encryption", true, []byte("not a pem file"), true),
+			Entry("undecodable blob without encryption", false, []byte("not a pem file"), false),
+		)
+
+		Describe("CheckKeyPassphrase", func() {
+			It("refuses when one is needed and no source is configured", func() {
+				err := CheckKeyPassphrase(KeyPassphraseConfig{}, tmpDir, false, encryptedPEM())
+
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("the CA key in the store is encrypted"))
+			})
+
+			It("passes when none is needed", func() {
+				Expect(CheckKeyPassphrase(KeyPassphraseConfig{}, tmpDir, true, plaintextPEM())).To(Succeed())
+			})
+
+			It("passes when one is needed and a source is configured", func() {
+				ppFile := filepath.Join(tmpDir, "pp")
+				Expect(os.WriteFile(ppFile, []byte("pp\n"), 0600)).To(Succeed())
+
+				Expect(CheckKeyPassphrase(KeyPassphraseConfig{PassphraseFile: ppFile},
+					tmpDir, false, encryptedPEM())).To(Succeed())
+			})
+		})
+	})
 
 	Describe("isEncryptedPEM", func() {
 		It("returns true for encrypted PEM type", func() {

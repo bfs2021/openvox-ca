@@ -237,9 +237,15 @@ func preflightInstanceLock(ctx context.Context, cfg *serverConfig) error {
 	return ul.Unlock()
 }
 
-// preflightKeyPermissions opens the store, judges the permissions of everything
-// holding key material, and refuses if any of it is readable by every local
-// account.
+// preflightKeyMaterial opens the store and raises, in the parent, every refusal
+// about the CA's key material that would otherwise be raised too late to be
+// seen. Two of them today: the permissions of everything holding key material,
+// and whether the passphrase this CA will need can be resolved at all.
+//
+// They are one function because they share one store open and, more to the
+// point, the same two reasons for being here rather than in CA.Init -- the
+// passphrase refusal was added to Init without them, and the result was an
+// operator being told the CA had started when it could never start.
 //
 // It runs in the parent, before the role dispatch, for two reasons that both
 // have to hold:
@@ -287,7 +293,7 @@ func preflightInstanceLock(ctx context.Context, cfg *serverConfig) error {
 // The findings come back with the error so the caller can log them once a logger
 // exists. Nothing is logged here: at this point in startup the default handler is
 // still Go's own, so a record emitted now would miss a configured logfile.
-func preflightKeyPermissions(ctx context.Context, cfg *serverConfig) ([]storage.KeyPermWarning, error) {
+func preflightKeyMaterial(ctx context.Context, cfg *serverConfig) ([]storage.KeyPermWarning, error) {
 	rt, err := resolveRuntime(ctx, cfg, false)
 	if err != nil {
 		return nil, err
@@ -295,7 +301,38 @@ func preflightKeyPermissions(ctx context.Context, cfg *serverConfig) ([]storage.
 	defer func() { _ = rt.Close() }()
 
 	warnings := rt.Store.CheckKeyPermissions(cfg.CAKeyPassphraseFile)
-	return warnings, refuseOnKeyPermissions(warnings, cfg.InsecureAllowWorldReadableKeys)
+	if err := refuseOnKeyPermissions(warnings, cfg.InsecureAllowWorldReadableKeys); err != nil {
+		return warnings, err
+	}
+	return warnings, refuseOnMissingPassphrase(ctx, rt, cfg)
+}
+
+// refuseOnMissingPassphrase refuses when the CA will need a key passphrase and
+// no source for one is configured.
+//
+// Whether it will need one is a question about the stored key, not about
+// encrypt_ca_key: loadCAKeyFromDisk resolves a passphrase whenever the stored
+// PEM is an encrypted block, so an operator who turns encrypt_ca_key off while
+// the key on disk stays encrypted still needs one, and an operator whose stored
+// key is plaintext does not need one even with the setting on. Reading the key
+// is therefore the only way to ask the question the server will actually ask;
+// a check written as "if cfg.EncryptCAKey" would pass here and then die past
+// the fork for the one case it did not cover.
+//
+// A store that cannot say whether it has a key, or cannot hand it over, falls
+// back to the setting. That is deliberately not fail-closed: the store opened
+// cleanly a moment ago, so a read error here is a transient fault rather than a
+// missing passphrase, and refusing startup over it would invent an outage.
+// CA.Init reaches the same blob immediately afterwards and reports the real
+// error precisely, which is the better diagnostic for that case.
+func refuseOnMissingPassphrase(ctx context.Context, rt *caRuntime, cfg *serverConfig) error {
+	var keyPEM []byte
+	if has, err := rt.Store.HasCAKey(ctx); err == nil && has {
+		if pem, err := rt.Store.GetCAKey(ctx); err == nil {
+			keyPEM = pem
+		}
+	}
+	return ca.CheckKeyPassphrase(keyPassphraseConfig(cfg), rt.Store.CADir(), cfg.EncryptCAKey, keyPEM)
 }
 
 // holdInstanceLock takes the store's instance lock and ties its release to rt,

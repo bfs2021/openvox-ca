@@ -454,7 +454,7 @@ func (c *CA) loadCAKeyFromDisk(ctx context.Context) error {
 
 	// Handle encrypted keys: decrypt first, then parse the PKCS#8 DER.
 	if isEncryptedPEM(block) {
-		passphrase, err := resolvePassphrase(c.KeyPassphrase, c.Storage.CADir())
+		passphrase, err := resolvePassphrase(c.KeyPassphrase, c.Storage.CADir(), needStoredKeyEncrypted)
 		if err != nil {
 			return fmt.Errorf("resolving CA key passphrase: %w", err)
 		}

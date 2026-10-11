@@ -213,7 +213,7 @@ func (c *CA) marshalCAKeyForStorage(key crypto.Signer) ([]byte, error) {
 		}
 		return keyPEM, nil
 	}
-	passphrase, err := resolvePassphrase(c.KeyPassphrase, c.Storage.CADir())
+	passphrase, err := resolvePassphrase(c.KeyPassphrase, c.Storage.CADir(), needEncryptConfigured)
 	if err != nil {
 		return nil, fmt.Errorf("resolving CA key passphrase: %w", err)
 	}

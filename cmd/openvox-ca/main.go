@@ -526,10 +526,18 @@ func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
 
 // keyPassphraseConfig is where the CA key passphrase is read from under cfg.
 //
-// One function for both readers: applyCAConfig, which hands it to the CA, and
-// the launcher, which withholds its variable from the frontend child. Two
-// copies could disagree on the variable name, and the frontend would then be
-// handed the passphrase the signer reads.
+// One function for three readers, and each of the latter two is a reason it is
+// one function rather than three copies:
+//
+//   - applyCAConfig, which hands it to the CA.
+//   - The launcher, which withholds its variable from the frontend child. Two
+//     copies could disagree on the variable name, and the frontend would then
+//     be handed the passphrase the signer reads.
+//   - The pre-fork preflight, which has to ask whether the passphrase resolves
+//     with exactly the sources Init will use. Built separately, the guard could
+//     pass on sources the CA then does not consult, or refuse on ones it would
+//     have found -- a guard that mirrors the thing it guards instead of sharing
+//     with it is a guard that can disagree with it.
 func keyPassphraseConfig(cfg *serverConfig) ca.KeyPassphraseConfig {
 	return ca.KeyPassphraseConfig{
 		PassphraseFile: cfg.CAKeyPassphraseFile,
@@ -897,7 +905,7 @@ func newRootCmd() *cobra.Command {
 				}
 				// Same reasoning for key-material permissions: a refusal raised
 				// past the fork is discarded with the child's stderr.
-				daemonWarnings, err := preflightKeyPermissions(ctx, cfg)
+				daemonWarnings, err := preflightKeyMaterial(ctx, cfg)
 				if err != nil {
 					return err
 				}
@@ -990,7 +998,7 @@ func newRootCmd() *cobra.Command {
 			// that holds the key; inheriting the parent's verdict across an
 			// execve is not something a child can do, so each checks for itself.
 			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-			keyPermWarnings, err := preflightKeyPermissions(ctx, cfg)
+			keyPermWarnings, err := preflightKeyMaterial(ctx, cfg)
 			if err != nil {
 				return err
 			}
