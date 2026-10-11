@@ -192,6 +192,39 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 		Expect(*forked).To(BeTrue(), "a CA that can start must not be refused")
 	})
 
+	// Which roles owe a passphrase, and which do not. The frontend never
+	// decrypts the CA key -- it proxies every signature to the signer over IPC,
+	// and roleMayReachCAKey refuses it a key provider for that reason -- so
+	// demanding a passphrase from it refuses a configuration that is not merely
+	// valid but preferable: the secret reaching only the process that uses it.
+	//
+	// Found by integration against #477, which removes the passphrase variable
+	// from the frontend child's environment. With an unconditional check the
+	// frontend refused to start and took the whole CA with it, on a passphrase
+	// supplied only through the environment. Neither branch is wrong alone and
+	// the two never touch the same lines, so the merge was clean and the server
+	// was broken; only running it showed that.
+	DescribeTable("asks for a passphrase only from a role that uses the key",
+		func(role string, wantRefusal bool) {
+			caDir := encryptedCADir()
+
+			_, err := preflightKeyMaterial(context.Background(), &serverConfig{CADir: caDir}, role)
+
+			if wantRefusal {
+				Expect(err).To(MatchError(ContainSubstring("no passphrase source is configured")),
+					"a role that loads the key cannot start without one")
+				return
+			}
+			Expect(err).NotTo(HaveOccurred(),
+				"a role that never decrypts the key must not be asked for the passphrase")
+		},
+		// The launcher forks the children and, with --single-process, is the
+		// process that holds the key itself.
+		Entry("the launcher or single-process role", "", true),
+		Entry("the signer, which loads the key", "signer", true),
+		Entry("the frontend, which never does", "frontend", false),
+	)
+
 	// Without --daemon the refusal always had somewhere to go, so this spec is
 	// not about delivery; it is the one that would still fail if the refusal
 	// were moved back behind the fork for the non-daemon path too.

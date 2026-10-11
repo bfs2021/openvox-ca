@@ -637,12 +637,12 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		caDir := worldReadableCADir()
 		cfg := &serverConfig{CADir: caDir}
 
-		_, err := preflightKeyMaterial(context.Background(), cfg)
+		_, err := preflightKeyMaterial(context.Background(), cfg, "")
 		Expect(err).To(MatchError(ContainSubstring("refusing to start")),
 			"without the opt-out, world-readable key material is refused")
 
 		cfg.InsecureAllowWorldReadableKeys = true
-		warnings, err := preflightKeyMaterial(context.Background(), cfg)
+		warnings, err := preflightKeyMaterial(context.Background(), cfg, "")
 		Expect(err).NotTo(HaveOccurred(), "the opt-out must reach the decision")
 		Expect(warnings).NotTo(BeEmpty(), "the findings still come back, to be logged")
 	})
@@ -662,7 +662,7 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 
 		cfg := &serverConfig{CADir: caDir, CAKeyPassphraseFile: passPath}
 
-		_, err := preflightKeyMaterial(context.Background(), cfg)
+		_, err := preflightKeyMaterial(context.Background(), cfg, "")
 
 		Expect(err).To(MatchError(ContainSubstring("refusing to start")),
 			"a world-readable passphrase file unlocks the key, so it is refused like the key")

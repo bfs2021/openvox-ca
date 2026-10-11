@@ -293,7 +293,29 @@ func preflightInstanceLock(ctx context.Context, cfg *serverConfig) error {
 // The findings come back with the error so the caller can log them once a logger
 // exists. Nothing is logged here: at this point in startup the default handler is
 // still Go's own, so a record emitted now would miss a configured logfile.
-func preflightKeyMaterial(ctx context.Context, cfg *serverConfig) ([]storage.KeyPermWarning, error) {
+// The role is taken as an argument rather than read from the environment here,
+// and it decides only the passphrase half. The permission check runs for every
+// role: each process judges the store it is about to use, because a verdict
+// cannot be inherited across an execve.
+//
+// The passphrase half asks roleMayReachCAKey, which is the same predicate that
+// decides whether a process is handed a key provider at all. A process that may
+// not reach the CA key never decrypts it, so demanding a passphrase from it
+// refuses a configuration that is not only valid but better: the frontend
+// proxies every signature to the signer over IPC and has no use for the secret.
+// Requiring one there would be a credential demanded of a process specifically
+// forbidden from using it.
+//
+// That matters beyond tidiness. #477 removes the passphrase variable from the
+// frontend child's environment, which is the right thing for it to do, and with
+// an unconditional check here the frontend would refuse to start and take the
+// whole CA down with it on a passphrase supplied only through the environment.
+// Neither change is wrong alone and the two do not touch the same lines, so
+// nothing would have surfaced it at merge time; integration found it by running
+// the server. Asking the predicate rather than naming the frontend is what keeps
+// the two gates from drifting: a later role that does not hold the key inherits
+// the right behaviour without anybody remembering this.
+func preflightKeyMaterial(ctx context.Context, cfg *serverConfig, role string) ([]storage.KeyPermWarning, error) {
 	rt, err := resolveRuntime(ctx, cfg, false)
 	if err != nil {
 		return nil, err
@@ -303,6 +325,9 @@ func preflightKeyMaterial(ctx context.Context, cfg *serverConfig) ([]storage.Key
 	warnings := rt.Store.CheckKeyPermissions(cfg.CAKeyPassphraseFile)
 	if err := refuseOnKeyPermissions(warnings, cfg.InsecureAllowWorldReadableKeys); err != nil {
 		return warnings, err
+	}
+	if !roleMayReachCAKey(role) {
+		return warnings, nil
 	}
 	return warnings, refuseOnMissingPassphrase(ctx, rt, cfg)
 }

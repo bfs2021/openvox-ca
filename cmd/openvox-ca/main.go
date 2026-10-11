@@ -905,7 +905,10 @@ func newRootCmd() *cobra.Command {
 				}
 				// Same reasoning for key-material permissions: a refusal raised
 				// past the fork is discarded with the child's stderr.
-				daemonWarnings, err := preflightKeyMaterial(ctx, cfg)
+				// The launcher's own role, by construction: this block returns
+				// before the role dispatch below, and a role child is never
+				// started with --daemon.
+				daemonWarnings, err := preflightKeyMaterial(ctx, cfg, "")
 				if err != nil {
 					return err
 				}
@@ -998,7 +1001,7 @@ func newRootCmd() *cobra.Command {
 			// that holds the key; inheriting the parent's verdict across an
 			// execve is not something a child can do, so each checks for itself.
 			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-			keyPermWarnings, err := preflightKeyMaterial(ctx, cfg)
+			keyPermWarnings, err := preflightKeyMaterial(ctx, cfg, role)
 			if err != nil {
 				return err
 			}
