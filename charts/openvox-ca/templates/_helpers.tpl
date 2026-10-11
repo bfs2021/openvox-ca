@@ -1114,8 +1114,8 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   so it fires exactly when rbac.yaml would render the ClusterRole and never when
   it renders nothing.
 */}}
-{{- if and (eq (include "openvox-ca.exportRBACRendered" .) "true") (eq .Values.kubernetesExport.rbac.scope "ClusterRole") (not .Values.kubernetesExport.rbac.acknowledgeClusterWideSecretCreate) -}}
-{{- fail "kubernetesExport.rbac.scope: ClusterRole would grant the openvox-ca ServiceAccount create on Secrets and ConfigMaps in every namespace. create cannot be narrowed to the export targets, and create on Secrets lets the holder mint a token for any ServiceAccount in the cluster, kube-system included. Set kubernetesExport.rbac.scope: Role and list each namespace you export into under kubernetesExport.rbac.namespaces, or set kubernetesExport.rbac.acknowledgeClusterWideSecretCreate: true to accept the cluster-wide grant." -}}
+{{- if and (eq (include "openvox-ca.exportRBACRendered" .) "true") (eq .Values.kubernetesExport.rbac.scope "ClusterRole") (not .Values.kubernetesExport.rbac.allowClusterWideSecretCreate) -}}
+{{- fail "kubernetesExport.rbac.scope: ClusterRole would grant the openvox-ca ServiceAccount create on Secrets and ConfigMaps in every namespace. create cannot be narrowed to the export targets, and create on Secrets lets the holder mint a token for any ServiceAccount in the cluster, kube-system included. Set kubernetesExport.rbac.scope: Role and list each namespace you export into under kubernetesExport.rbac.namespaces, or set kubernetesExport.rbac.allowClusterWideSecretCreate: true to allow the cluster-wide grant." -}}
 {{- end -}}
 
 {{/*
@@ -1377,7 +1377,7 @@ and keep the HTTPRoute for the anonymous endpoints (CRL, OCSP, health) only.
 WARNING: Kubernetes export RBAC was created as a ClusterRole, so the openvox-ca
 ServiceAccount holds create on Secrets and ConfigMaps in every namespace. That
 is enough to mint a token for any ServiceAccount in the cluster, kube-system
-included. kubernetesExport.rbac.acknowledgeClusterWideSecretCreate accepted
+included. kubernetesExport.rbac.allowClusterWideSecretCreate allowed
 this; kubernetesExport.rbac.scope: Role with each target namespace listed in
 kubernetesExport.rbac.namespaces confines it to those namespaces.
 {{- end }}
