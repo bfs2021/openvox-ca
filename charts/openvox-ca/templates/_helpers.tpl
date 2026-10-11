@@ -1386,8 +1386,8 @@ and keep the HTTPRoute for the anonymous endpoints (CRL, OCSP, health) only.
 WARNING: Kubernetes export RBAC was created as a ClusterRole, so the openvox-ca
 ServiceAccount holds create on Secrets and ConfigMaps in every namespace. That
 is enough to mint a token for any ServiceAccount in the cluster, kube-system
-included. kubernetesExport.rbac.allowClusterWideSecretCreate allowed
-this; kubernetesExport.rbac.scope: Role with each target namespace listed in
+included. kubernetesExport.rbac.allowClusterWideSecretCreate allowed this;
+kubernetesExport.rbac.scope: Role with each target namespace listed in
 kubernetesExport.rbac.namespaces confines it to those namespaces.
 {{- end }}
 {{- if and (eq (include "openvox-ca.exportRBACRendered" .) "true") (eq (include "openvox-ca.exportTargetNames" .) "unknown") }}

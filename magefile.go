@@ -3605,9 +3605,10 @@ config:
 			wants: []string{"cluster-wide patch on every"},
 		},
 		{
-			// allowClusterWideSecretCreate lets the ClusterRole render; it does not make the
-			// grant any narrower, so the install still says what it holds. Named
-			// targets, so the unnarrowed-patch warning above is not what matches.
+			// allowClusterWideSecretCreate lets the ClusterRole render; it does
+			// not make the grant any narrower, so the install still says what it
+			// holds. Named targets, so the unnarrowed-patch warning above is not
+			// what matches.
 			name:  "NOTES warns about cluster-wide Secret create once allowed",
 			notes: true,
 			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole",
