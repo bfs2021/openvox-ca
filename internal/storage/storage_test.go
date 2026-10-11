@@ -513,6 +513,34 @@ var _ = Describe("StorageService", func() {
 		})
 	})
 
+	// The CRL is served without authentication, and OpenVox Server writes it
+	// world-readable, so a process reading it from a shared cadir must not
+	// find it narrowed by a re-sign here.
+	Describe("CRL file permissions", func() {
+		BeforeEach(func() {
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		})
+
+		It("UpdateCRL creates the CRL world-readable", func() {
+			Expect(store.UpdateCRL(context.Background(), []byte("crl-pem"))).To(Succeed())
+
+			info, err := os.Stat(store.CRLPath())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0644)))
+		})
+
+		It("UpdateCRL leaves a replaced owner-only CRL world-readable", func() {
+			Expect(os.WriteFile(store.CRLPath(), []byte("old-crl"), 0600)).To(Succeed())
+			Expect(os.Chmod(store.CRLPath(), 0600)).To(Succeed())
+
+			Expect(store.UpdateCRL(context.Background(), []byte("crl-pem"))).To(Succeed())
+
+			info, err := os.Stat(store.CRLPath())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0644)))
+		})
+	})
+
 	// --- ListCerts ---
 
 	Describe("ListCerts", func() {

@@ -106,6 +106,7 @@ var _ = Describe("MigratePreservesVisibility", func() {
 			perm os.FileMode
 		}{
 			{KeyCACert, FilePermPublic},
+			{KeyCRL, FilePermPublic},
 			{KeySerial, FilePermPublic},
 			{KeyCAKey, FilePermPrivate},
 			{KeyInventory, FilePermPrivate},

@@ -921,10 +921,14 @@ func (s *StorageService) readInventoryForHMAC(ctx context.Context) ([]byte, erro
 
 // --- CRL ---
 
+// UpdateCRL stores the CRL as a public blob. It is served to anyone without
+// authentication, and OpenVox Server writes ca_crl.pem world-readable too, so a
+// re-sign on a cadir the two share leaves it readable to whatever else reads it
+// there.
 func (s *StorageService) UpdateCRL(ctx context.Context, pemData []byte) error {
 	s.crlMu.Lock()
 	defer s.crlMu.Unlock()
-	return s.backend.Put(ctx, KeyCRL, pemData, BlobPrivate)
+	return s.backend.Put(ctx, KeyCRL, pemData, BlobPublic)
 }
 
 func (s *StorageService) GetCRL(ctx context.Context) ([]byte, error) {

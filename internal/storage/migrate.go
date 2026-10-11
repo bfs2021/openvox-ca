@@ -43,7 +43,7 @@ var migratableSingletons = []migratableSingleton{
 	{KeyCACert, BlobPublic},
 	{KeyCAPubKey, BlobPublic},
 	{KeyCAKey, BlobPrivate},
-	{KeyCRL, BlobPrivate},
+	{KeyCRL, BlobPublic},
 	{KeySerial, BlobPublic},
 	{KeyInventory, BlobPrivate},
 	{KeyInventoryHMAC, BlobPrivate},

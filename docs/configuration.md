@@ -2343,11 +2343,10 @@ store the same logical state elsewhere.
 | --- | --- |
 | Directories | `0750` |
 | Private keys | `0600` |
-| CRL file | `0600` |
 | Inventory and its integrity value | `0600` |
 | Pending-supersession list | `0600` |
 | Lock files under `locks/` | `0600` |
-| Public data (certs, CSRs, CA certificate) | `0644` |
+| Public data (certs, CSRs, CA certificate, CRL) | `0644` |
 
 Blob modes — the private keys, the CRL, the supersession list, the inventory
 and the public data — are set on each file as it is created and your umask
