@@ -1128,9 +1128,15 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 // The private-key directory is judged whole rather than by filename. It is the
 // directory the CA keeps its secrets in, so its contents are secret by
 // construction: as well as the per-subject "<subject>_key.pem" keys it holds
-// the inventory-integrity HMAC key and, under encrypt_ca_key, the
-// auto-generated CA key passphrase — neither of which ends in "_key.pem". A
-// suffix test exempted both from a refusal whose whole subject is key material.
+// the inventory-integrity HMAC key, which does not end in "_key.pem". A suffix
+// test exempted it from a refusal whose whole subject is key material, and a
+// world-readable HMAC key lets any local account forge inventory MACs.
+//
+// Judging the directory rather than a pattern is also what makes this robust
+// to the next secret put there, which is the property a suffix test cannot
+// have: an earlier revision of this comment justified the sweep partly by a
+// generated CA key passphrase, and that file stopped existing without the
+// argument needing to change.
 //
 // This reports; it does not correct. Nothing in openvox-ca changes the mode of a
 // file it did not create, so a finding here is a condition the operator has to

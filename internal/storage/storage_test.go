@@ -308,12 +308,13 @@ var _ = Describe("StorageService", func() {
 			Expect(warnings[0].Mode).To(Equal(os.FileMode(0644)))
 		})
 
-		// The directory is judged whole, not by filename. Two of the secrets kept
-		// here have never ended in _key.pem -- the inventory-integrity HMAC key
-		// (private/.inventory_hmac_key) and, under encrypt_ca_key, the generated
-		// passphrase (private/.ca_key_passphrase) -- so a suffix test exempted
-		// both from a refusal whose whole subject is key material. A
-		// world-readable HMAC key lets any local account forge inventory MACs.
+		// The directory is judged whole, not by filename. The inventory-integrity
+		// HMAC key (private/.inventory_hmac_key) does not end in _key.pem, so a
+		// suffix test exempted it from a refusal whose whole subject is key
+		// material, and a world-readable HMAC key lets any local account forge
+		// inventory MACs. Judging the directory also covers whatever is put
+		// there next, which is the point: it does not depend on the set of
+		// secrets being known in advance.
 		It("checks every file in the private directory, not just _key.pem", func() {
 			hmacPath := filepath.Join(store.CADir(), "private", ".inventory_hmac_key")
 			Expect(os.WriteFile(hmacPath, []byte("x"), storage.FilePermPrivate)).To(Succeed())

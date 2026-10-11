@@ -252,15 +252,24 @@ openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key \
 export PUPPET_CA_KEY_PASSPHRASE="my-secret-passphrase"
 openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
 
-# openvox-ca-ctl setup also supports encryption:
-openvox-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key
+# openvox-ca-ctl setup also supports encryption, and needs a source just the
+# same. It reads PUPPET_CA_KEY_PASSPHRASE from the environment, so the line
+# above would carry it; named here instead, because a command copied out of a
+# block should not depend on what came before it:
+openvox-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key \
+  --ca-key-passphrase-file /etc/puppet-ca/key-passphrase
 ```
 
 ### Backward compatibility
 
-Existing CAs with unencrypted keys continue to work without changes. The `--encrypt-ca-key`
-flag only affects new CA bootstraps. Loading transparently handles both encrypted and
-unencrypted PEM files.
+Existing CAs with unencrypted keys continue to work without changes, and
+`--encrypt-ca-key` affects new CA bootstraps only: it does not re-encrypt a key
+that already exists.
+
+Loading handles both encrypted and unencrypted PEM files, deciding from the PEM
+itself rather than from the setting. An encrypted key therefore needs its
+passphrase whether or not `encrypt_ca_key` is still set, and the server says so
+by name if it cannot find one.
 
 ### Security considerations
 

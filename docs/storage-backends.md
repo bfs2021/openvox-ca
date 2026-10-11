@@ -237,9 +237,9 @@ tighter umask narrows them further.
 `openvox-ca` never changes the mode of a file it did not create, so anything
 already on disk is left as you have it — but it does check its key material at
 startup. That is every file under `private/` — the CA key, the per-subject
-`*_key.pem` keys, the inventory-integrity key and the generated passphrase
-alike, because that directory holds secrets by construction — plus a
-`ca_key_passphrase_file` you point it at. A file readable by every local account
+`*_key.pem` keys and the inventory-integrity key alike, because that directory
+holds secrets by construction — plus a `ca_key_passphrase_file` you point it
+at. A file readable by every local account
 makes it **refuse to start**, naming the file and the `chmod` that fixes it; one
 readable only by its group is reported at `Info` and does not stop the CA.
 
@@ -980,8 +980,10 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
   volume — `chmod` will not work and the fix belongs in the volume, as
   `defaultMode: 0600`.
 - Existing protections still apply: `encrypt_ca_key` encrypts the key PEM
-  before writing, and `ca_key_passphrase_file` overrides the auto-generated
-  passphrase file.
+  before writing, and `ca_key_passphrase_file` is where its passphrase comes
+  from. There is no default source: with `encrypt_ca_key` set and neither
+  `ca_key_passphrase_file` nor `PUPPET_CA_KEY_PASSPHRASE` configured, the
+  server refuses to start.
 
 This override also works with the filesystem backend, e.g. to pull the CA
 key out of the cadir tree and onto a separately-mounted volume.

@@ -48,7 +48,7 @@ type BackendSpec struct {
 	// LocalDir is the operational directory on the local filesystem. For the
 	// filesystem backend it is the backend root; for remote backends it is
 	// still used for per-subject generated private keys (always local) and
-	// for ancillary local state such as the auto-generated CA key passphrase.
+	// for ancillary local state such as the inventory-integrity HMAC key.
 	LocalDir string
 
 	// Etcd configures the etcd backend. Only consulted when Kind == BackendEtcd.
