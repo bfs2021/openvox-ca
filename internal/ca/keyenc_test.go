@@ -148,11 +148,10 @@ var _ = Describe("Key encryption", func() {
 			ppFile := filepath.Join(tmpDir, "pp.txt")
 			Expect(os.WriteFile(ppFile, []byte("my-secret\n"), 0600)).To(Succeed())
 
-			pp, auto, err := resolvePassphrase(KeyPassphraseConfig{
+			pp, err := resolvePassphrase(KeyPassphraseConfig{
 				PassphraseFile: ppFile,
 			}, tmpDir)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(auto).To(BeFalse())
 			Expect(string(pp)).To(Equal("my-secret"))
 		})
 
@@ -167,9 +166,8 @@ var _ = Describe("Key encryption", func() {
 			})
 			os.Setenv("PUPPET_CA_KEY_PASSPHRASE", "env-secret")
 
-			pp, auto, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
+			pp, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(auto).To(BeFalse())
 			Expect(string(pp)).To(Equal("env-secret"))
 		})
 
@@ -179,47 +177,65 @@ var _ = Describe("Key encryption", func() {
 			cfg := KeyPassphraseConfig{PassphraseEnvVar: "SITE_CA_KEY_PASSPHRASE"}
 			GinkgoT().Setenv(cfg.EnvVar(), "custom-secret")
 
-			pp, _, err := resolvePassphrase(cfg, tmpDir)
+			pp, err := resolvePassphrase(cfg, tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(pp)).To(Equal("custom-secret"))
 		})
 
-		It("auto-generates and persists passphrase when none provided", func() {
-			pp, auto, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(auto).To(BeTrue())
-			Expect(len(pp)).To(BeNumerically(">", 0))
+		// It used to generate one here and write it beside the key, which is
+		// what made docs/ca-key-security.md's backup-and-snapshot claim false
+		// for the default configuration: a copy of the cadir carried the
+		// ciphertext and the passphrase together (#432).
+		It("refuses when encryption is on and no passphrase source is configured", func() {
+			pp, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
 
-			// Verify the file was written.
-			autoPath := autoPassphrasePath(tmpDir)
-			data, err := os.ReadFile(autoPath)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(data).To(Equal(pp))
+			Expect(err).To(HaveOccurred(), "a missing passphrase is not something to invent")
+			// Nil alongside the error, not merely unused by the callers. They
+			// check err first so a stray value is inert today, but the contract
+			// is "no passphrase", and a future caller reading the value before
+			// the error should get nothing rather than something plausible.
+			Expect(pp).To(BeNil(), "and no passphrase came back with it")
+			Expect(err.Error()).To(ContainSubstring("no passphrase source is configured"))
+			Expect(err.Error()).To(ContainSubstring("ca_key_passphrase_file"), "the remedy")
+			Expect(err.Error()).To(ContainSubstring("PUPPET_CA_KEY_PASSPHRASE"), "or the other one")
 
-			// Verify permissions.
-			info, err := os.Stat(autoPath)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0600)))
+			Expect(autoPassphrasePath(tmpDir)).NotTo(BeAnExistingFile(),
+				"and nothing was written in the process of refusing")
 		})
 
-		It("reuses existing auto-generated passphrase", func() {
-			// First call generates.
-			pp1, auto1, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(auto1).To(BeTrue())
+		// An existing generated file is the upgrade case, and it must not be
+		// read implicitly -- that is the configuration being withdrawn. But the
+		// file is still a perfectly good passphrase, so the refusal has to say
+		// how to keep using it or the operator's CA is simply gone.
+		It("refuses but names the file when an earlier version generated one", func() {
+			autoPath := autoPassphrasePath(tmpDir)
+			Expect(os.WriteFile(autoPath, []byte("generated-by-an-older-version"), 0600)).To(Succeed())
 
-			// Second call reads existing.
-			pp2, auto2, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(auto2).To(BeFalse())
-			Expect(pp2).To(Equal(pp1))
+			_, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
+
+			Expect(err).To(HaveOccurred(), "not read implicitly, even though it is there")
+			Expect(err.Error()).To(ContainSubstring(autoPath), "the file it found")
+			Expect(err.Error()).To(ContainSubstring("set ca_key_passphrase_file to that path"),
+				"how to keep the CA working")
+		})
+
+		// And the remedy the refusal names actually works, which is the half a
+		// message-only assertion cannot show.
+		It("accepts the generated file once it is configured explicitly", func() {
+			autoPath := autoPassphrasePath(tmpDir)
+			Expect(os.WriteFile(autoPath, []byte("generated-by-an-older-version"), 0600)).To(Succeed())
+
+			pp, err := resolvePassphrase(KeyPassphraseConfig{PassphraseFile: autoPath}, tmpDir)
+
+			Expect(err).NotTo(HaveOccurred(), "the remedy in the message has to work")
+			Expect(string(pp)).To(Equal("generated-by-an-older-version"))
 		})
 
 		It("errors on empty passphrase file", func() {
 			ppFile := filepath.Join(tmpDir, "empty.txt")
 			Expect(os.WriteFile(ppFile, []byte(""), 0600)).To(Succeed())
 
-			_, _, err := resolvePassphrase(KeyPassphraseConfig{
+			_, err := resolvePassphrase(KeyPassphraseConfig{
 				PassphraseFile: ppFile,
 			}, tmpDir)
 			Expect(err).To(HaveOccurred())
@@ -255,10 +271,18 @@ var _ = Describe("CA encrypted key integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 
+		// A configured passphrase file, because there is no longer any other
+		// kind. This spec is about encrypting and reloading, not about where
+		// the passphrase came from; it used to rely on auto-generation, which
+		// is the configuration #432 withdrew.
+		ppFile := filepath.Join(tmpDir, "passphrase")
+		Expect(os.WriteFile(ppFile, []byte("integration-passphrase\n"), 0o600)).To(Succeed())
+		ppCfg := KeyPassphraseConfig{PassphraseFile: ppFile}
+
 		store := storage.New(tmpDir)
 		myCA := New(store, AutosignConfig{Mode: "off"}, "puppet-enc-test")
 		myCA.EncryptCAKey = true
-		// Let it auto-generate the passphrase.
+		myCA.KeyPassphrase = ppCfg
 		Expect(myCA.Init(context.Background())).To(Succeed())
 		Expect(myCA.CACert).NotTo(BeNil())
 		Expect(myCA.CAKey).NotTo(BeNil())
@@ -270,14 +294,16 @@ var _ = Describe("CA encrypted key integration", func() {
 		Expect(block).NotTo(BeNil())
 		Expect(block.Type).To(Equal(encryptedPEMType))
 
-		// Verify the auto-generated passphrase file exists.
-		_, err = os.Stat(autoPassphrasePath(tmpDir))
-		Expect(err).NotTo(HaveOccurred())
+		// And nothing was written beside the key, which is the point of the
+		// change: the passphrase lives where the operator put it.
+		Expect(autoPassphrasePath(tmpDir)).NotTo(BeAnExistingFile(),
+			"no passphrase generated next to the key it protects")
 
-		// Reload the CA from disk; should succeed using the auto-generated passphrase.
+		// Reload the CA from disk with the same configured passphrase.
 		store2 := storage.New(tmpDir)
 		myCA2 := New(store2, AutosignConfig{Mode: "off"}, "puppet-enc-test")
 		myCA2.EncryptCAKey = true
+		myCA2.KeyPassphrase = ppCfg
 		Expect(myCA2.Init(context.Background())).To(Succeed())
 		Expect(myCA2.CACert).NotTo(BeNil())
 		Expect(myCA2.CAKey).NotTo(BeNil())
@@ -322,18 +348,26 @@ var _ = Describe("CA encrypted key integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 
-		// Bootstrap with encryption.
+		// Bootstrap with encryption and a configured passphrase.
+		ppFile := filepath.Join(tmpDir, "passphrase")
+		Expect(os.WriteFile(ppFile, []byte("right-passphrase\n"), 0o600)).To(Succeed())
+
 		store := storage.New(tmpDir)
 		myCA := New(store, AutosignConfig{Mode: "off"}, "puppet-wrong")
 		myCA.EncryptCAKey = true
+		myCA.KeyPassphrase = KeyPassphraseConfig{PassphraseFile: ppFile}
 		Expect(myCA.Init(context.Background())).To(Succeed())
 
-		// Overwrite the auto-generated passphrase file with wrong value.
-		Expect(os.WriteFile(autoPassphrasePath(tmpDir), []byte("wrong-passphrase"), 0600)).To(Succeed())
+		// Change the configured passphrase under it. Previously this spec
+		// overwrote the auto-generated file; there is no longer one to
+		// overwrite, so it rewrites the file the operator configured.
+		Expect(os.WriteFile(ppFile, []byte("wrong-passphrase\n"), 0o600)).To(Succeed())
 
-		// Reload should fail.
+		// Reload should fail, and for the passphrase rather than for a missing
+		// source -- which is why the file is still configured here.
 		store2 := storage.New(tmpDir)
 		myCA2 := New(store2, AutosignConfig{Mode: "off"}, "puppet-wrong")
+		myCA2.KeyPassphrase = KeyPassphraseConfig{PassphraseFile: ppFile}
 		err = myCA2.Init(context.Background())
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("wrong passphrase"))

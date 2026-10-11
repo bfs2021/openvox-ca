@@ -456,9 +456,18 @@ var _ = Describe("openvox-ca csr", func() {
 		// csr --create-key duplicates bootstrapCA's key handling; nothing else
 		// pins the two together, and the failure mode is silent — a CA key
 		// written in plaintext despite encrypt_ca_key.
-		cfgPath := filepath.Join(GinkgoT().TempDir(), "enc.yaml")
-		Expect(os.WriteFile(cfgPath,
-			[]byte("ca_key_algo: ecdsa\nca_key_size: 256\nencrypt_ca_key: true\n"), 0o600)).To(Succeed())
+		//
+		// A passphrase source is configured because encrypt_ca_key now requires
+		// one: openvox-ca no longer generates a passphrase beside the key it
+		// protects, so a config that only turns encryption on refuses to start.
+		dir := GinkgoT().TempDir()
+		ppPath := filepath.Join(dir, "passphrase")
+		Expect(os.WriteFile(ppPath, []byte("spec-passphrase\n"), 0o600)).To(Succeed())
+
+		cfgPath := filepath.Join(dir, "enc.yaml")
+		Expect(os.WriteFile(cfgPath, []byte(
+			"ca_key_algo: ecdsa\nca_key_size: 256\nencrypt_ca_key: true\n"+
+				"ca_key_passphrase_file: "+ppPath+"\n"), 0o600)).To(Succeed())
 		setEnv("PUPPET_CA_CONFIG", cfgPath)
 
 		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")

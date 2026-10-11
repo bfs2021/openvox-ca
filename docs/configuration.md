@@ -153,7 +153,7 @@ expired_cert_cleanup_interval_sec: 0     # how often to run; 0 = built-in defaul
 # CA key encryption at rest.
 encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argon2id)
 insecure_allow_world_readable_keys: false  # start even if key material is world-readable (refuses by default)
-ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omitted
+ca_key_passphrase_file: ""      # path to passphrase file; required with encrypt_ca_key
 # Date/time format in JSON responses.
 puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" instead of RFC 3339
 # serial_number in certificate status responses. See "Serial number format" below.
@@ -2312,8 +2312,8 @@ See [the status response](api.md#certificate-status) for the exact rendering.
                       instance lock, which records its holder) — see below
   private/
     ca_key.pem              CA private key (mode 0600; encrypted PEM when --encrypt-ca-key)
-    .ca_key_passphrase      Auto-generated passphrase file (mode 0600; only when --encrypt-ca-key
-                            is used without an explicit passphrase source)
+    .ca_key_passphrase      Passphrase file written by versions that generated one
+                            (mode 0600). Not created any more — see ca-key-security.md
     {subject}_key.pem       Server-side generated private keys (mode 0600)
 ```
 
