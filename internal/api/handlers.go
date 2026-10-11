@@ -313,7 +313,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Warn("Sign failed", "subject", subject, "error", err)
 			if strings.Contains(err.Error(), "CSR not found") {
-				http.Error(w, "CSR not found", http.StatusNotFound)
+				s.answerSignWithoutCSR(w, r, subject, err)
 			} else if errors.Is(err, ca.ErrDisallowedSubjectAltNames) {
 				// 409 rather than the 400 the CSR-submission path uses, because
 				// here the operator's request is well-formed — it is the stored
@@ -422,6 +422,77 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "desired_state must be 'signed' or 'revoked'", http.StatusBadRequest)
 	}
+}
+
+// answerSignWithoutCSR answers a signing request whose CSR could not be read,
+// given the error Sign returned.
+//
+// OpenVox Server decides between two answers on whether the subject was ever
+// issued, not on anything about the request. In its certificate_status resource
+// (src/clj/puppetlabs/services/ca/certificate_authority_core.clj, at
+// openvox-server a2e884e71bfb):
+//
+//	certificate-issued?  (or (certificate-exists? …) (in-cert-inventory-file? …))  :181-185
+//	:exists?             (or (certificate-issued? …) (csr-exists? …))              :463-465
+//	:conflict? :signed   (when-not (csr-exists? …) (conflict "Cannot sign …"))     :440-444
+//	:handle-not-implemented  404 "Invalid certificate subject."                    :475-487
+//
+// So a subject with a certificate or an inventory entry answers 409 with that
+// sentence, which its tests pin word for word, and one with neither answers
+// 404. A revoked subject keeps its certificate and a cleaned one keeps its
+// inventory entry, so both answer 409. The line numbers are pinned to that
+// commit; the predicates are the durable part. The 404 deliberately keeps its
+// own body, although upstream's tests pin "Invalid certificate subject." too:
+// docs/api.md leaves error wording out of the contract, and that sentence is
+// wrong here, since the subject is valid and only the request is missing.
+//
+// Where storage cannot say whether the request or the subject exists, neither
+// answer has been measured, so this answers 503, the API's documented answer
+// for a read the CA could not complete, with the cause in the log rather than
+// the body because it can name storage paths.
+func (s *Server) answerSignWithoutCSR(w http.ResponseWriter, r *http.Request, subject string, signErr error) {
+	const unreadable = "could not read the certificate request for this subject; see the server log"
+	if !errors.Is(signErr, fs.ErrNotExist) {
+		http.Error(w, unreadable, http.StatusServiceUnavailable)
+		return
+	}
+	issued, err := s.subjectIssued(r.Context(), subject)
+	if err != nil {
+		slog.Warn("Sign: could not determine whether the subject was ever issued; "+
+			"answering 503 rather than guessing between 404 and 409",
+			"subject", subject, "error", err)
+		http.Error(w, "could not read this subject's certificate or inventory entry; see the server log",
+			http.StatusServiceUnavailable)
+		return
+	}
+	if !issued {
+		http.Error(w, "CSR not found", http.StatusNotFound)
+		return
+	}
+	// subject has passed ValidateSubject, so it is safe to echo.
+	http.Error(w, fmt.Sprintf("Cannot sign certificate for host %s without a certificate request", subject),
+		http.StatusConflict)
+}
+
+// subjectIssued is OpenVox Server's certificate-issued?: whether subject holds
+// a certificate in storage, or failing that, an entry in the inventory. Absence
+// from both is (false, nil); any other storage failure is returned.
+func (s *Server) subjectIssued(ctx context.Context, subject string) (bool, error) {
+	_, err := s.CA.Storage.GetCert(ctx, subject)
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	_, err = s.CA.Storage.LatestSerialForSubject(ctx, subject)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 // PutStatusBySerialBody is the request body for PUT

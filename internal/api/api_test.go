@@ -1599,12 +1599,107 @@ var _ = Describe("API Workflow", func() {
 	})
 
 	Context("PUT /certificate_status sign when no CSR exists", func() {
-		It("should return 404 when trying to sign a subject with no pending CSR", func() {
-			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
-			req := httptest.NewRequest("PUT", "/certificate_status/ghost-node", bytes.NewReader(body))
+		// OpenVox Server decides on whether the subject was ever issued: a
+		// certificate or an inventory entry answers 409 with the sentence
+		// below, which its tests pin (certificate_authority_core_test.clj
+		// :912-922 at a2e884e71bfb), and neither answers 404.
+		const withoutCSR = "Cannot sign certificate for host %s without a certificate request\n"
+
+		putStatus := func(h http.Handler, subject, state string) *httptest.ResponseRecorder {
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: state})
 			rr := httptest.NewRecorder()
-			mux.ServeHTTP(rr, req)
+			h.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+			return rr
+		}
+		issue := func(h http.Handler, subject string) {
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+			Expect(putStatus(h, subject, "signed").Code).To(Equal(http.StatusNoContent))
+		}
+
+		It("answers 404 for a subject with neither a certificate nor a CSR", func() {
+			rr := putStatus(mux, "ghost-node", "signed")
 			Expect(rr.Code).To(Equal(http.StatusNotFound))
+			Expect(rr.Body.String()).To(Equal("CSR not found\n"))
+		})
+
+		It("answers 409, in OpenVox Server's words, for a subject that holds a certificate", func() {
+			issue(mux, "signed-node")
+			Expect(myCA.Storage.HasCSR(context.Background(), "signed-node")).To(BeFalse(),
+				"signing must have consumed the request, or this is not the no-CSR case")
+
+			rr := putStatus(mux, "signed-node", "signed")
+			Expect(rr.Code).To(Equal(http.StatusConflict))
+			Expect(rr.Header().Get("Content-Type")).To(HavePrefix("text/plain"))
+			Expect(rr.Body.String()).To(Equal(fmt.Sprintf(withoutCSR, "signed-node")))
+		})
+
+		It("answers 409 for a revoked subject, which keeps its certificate", func() {
+			issue(mux, "revoked-node")
+			Expect(putStatus(mux, "revoked-node", "revoked").Code).To(Equal(http.StatusNoContent))
+
+			rr := putStatus(mux, "revoked-node", "signed")
+			Expect(rr.Code).To(Equal(http.StatusConflict))
+			Expect(rr.Body.String()).To(Equal(fmt.Sprintf(withoutCSR, "revoked-node")))
+		})
+
+		It("answers 409 for a cleaned subject, which keeps only its inventory entry", func() {
+			issue(mux, "cleaned-node")
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("DELETE", "/certificate_status/cleaned-node", nil))
+			Expect(rr.Code).To(Equal(http.StatusNoContent))
+			Expect(myCA.Storage.HasCert(context.Background(), "cleaned-node")).To(BeFalse(),
+				"clean must have removed the certificate, or the inventory is not what answers")
+
+			rr = putStatus(mux, "cleaned-node", "signed")
+			Expect(rr.Code).To(Equal(http.StatusConflict))
+			Expect(rr.Body.String()).To(Equal(fmt.Sprintf(withoutCSR, "cleaned-node")))
+		})
+
+		Context("when storage cannot say", func() {
+			// 503 rather than either answer, since each would assert a state
+			// nothing has read.
+			var (
+				backend *getFaultBackend
+				handler http.Handler
+			)
+
+			BeforeEach(func() {
+				ctx := context.Background()
+				dir := GinkgoT().TempDir()
+				backend = &getFaultBackend{Backend: storage.NewFilesystemBackend(dir), fail: map[string]bool{}}
+				store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+				Expect(store.EnsureDirs(ctx)).To(Succeed())
+				Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+				Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+				Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+				Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+				Expect(store.TouchInventory(ctx)).To(Succeed())
+				faultCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+				Expect(faultCA.Init(ctx)).To(Succeed())
+				handler = api.New(faultCA).Routes()
+			})
+
+			DescribeTable("answers 503 when a read fails for a reason other than absence",
+				func(key func(subject string) string) {
+					// Unfaulted, each of these subjects answers 404, so the
+					// fault is what moves it.
+					Expect(putStatus(handler, "fault-node", "signed").Code).To(Equal(http.StatusNotFound))
+
+					backend.fail[key("fault-node")] = true
+					rr := putStatus(handler, "fault-node", "signed")
+					Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+					Expect(rr.Body.String()).To(ContainSubstring("see the server log"))
+					Expect(rr.Body.String()).NotTo(ContainSubstring("backend unavailable"),
+						"the cause belongs in the log, not the body")
+				},
+				Entry("the CSR", storage.CSRKey),
+				Entry("the certificate", storage.CertKey),
+				Entry("the inventory", func(string) string { return storage.KeyInventory }),
+			)
 		})
 	})
 
