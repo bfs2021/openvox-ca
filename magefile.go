@@ -2473,6 +2473,12 @@ func inlineCredentialKeys(root string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Each source needs a floor of its own: one that has been renamed or
+		// split would otherwise stop being scanned while the others kept the
+		// total above zero.
+		if len(files) == 0 {
+			return nil, fmt.Errorf("inline-credential source %s matches no file under %s; update inlineCredentialSources", pattern, root)
+		}
 		for _, file := range files {
 			if strings.HasSuffix(file, "_test.go") {
 				continue

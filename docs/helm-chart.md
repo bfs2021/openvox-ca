@@ -138,10 +138,7 @@ extraVolumeMounts:
 ```
 
 Environment variables take precedence over the config file, which is what makes
-this work. Kubernetes substitutes `$(POSTGRES_PASSWORD)` verbatim, so a password
-containing `/`, `?`, `#`, `%` or `@` must be stored URL-encoded for a URL DSN
-like this one. Alternatively, keep the whole DSN in the Secret and set
-`PUPPET_CA_SQL_DSN` itself with `valueFrom.secretKeyRef`.
+this work.
 
 `sslmode=verify-full` checks that the database's certificate was issued by the
 CA in `sslrootcert` and names the host in the DSN, so mount that CA alongside.
@@ -165,6 +162,16 @@ rotation, connections a pod already holds keep working but new ones fail, so
 its pool slowly stops refilling. Restart the pods whenever the CA changes; the
 Reloader annotation described under [TLS](#tls-the-charts-most-important-setting)
 restarts them automatically when the mounted Secret changes.
+
+The simplest route for a DSN is to keep all of it in the Secret and set
+`PUPPET_CA_SQL_DSN` itself with `valueFrom.secretKeyRef`. If you splice a
+password in as above, Kubernetes substitutes `$(POSTGRES_PASSWORD)` verbatim,
+so for a URL DSN like this one the Secret must hold the password
+percent-encoded: every character other than a letter, a digit or `-._~`. A
+character URL parsing refuses outright stops the server at startup, and the
+parse error it reports carries the DSN, password included, into the pod log.
+go-sql-driver's `user:password@tcp(…)` form takes the password raw, so leave
+it unencoded there.
 
 Backend credentials must come through the environment from a Secret, as in the
 `extraEnv` example above. `config` is rendered into a ConfigMap,
