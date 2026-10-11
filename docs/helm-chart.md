@@ -207,6 +207,11 @@ network one.
 With `existingConfigMap` set the chart renders no ConfigMap, so nothing is
 refused, and what goes into yours is your own decision.
 
+The check reads only the merged `config`. It does not see a password written
+literally into an `extraEnv` `value:` rather than fed from
+`valueFrom.secretKeyRef`, nor anything inside an `existingConfigMap`, so a
+render that passes proves only that `config` holds no credential.
+
 ## Choosing an image
 
 The chart defaults to the **Alpine** image variant. With `image.tag` empty it
