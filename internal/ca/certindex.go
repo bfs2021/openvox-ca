@@ -25,6 +25,7 @@ import (
 	"encoding/pem"
 	"log/slog"
 	"math/big"
+	"net"
 	"strings"
 	"time"
 
@@ -47,6 +48,26 @@ func SHA256ColonFingerprint(der []byte) string {
 	return strings.Join(parts, ":")
 }
 
+// IPAddressStrings renders IP address SANs as text, in certificate order. It is
+// the single producer of the form stored in the certificate index, and exported
+// so that a reader rendering IP SANs from a parsed certificate can use the same
+// form.
+//
+// The form is net.IP.String()'s: an IPv6 address is compressed (2001:db8::1),
+// where OpenVox Server writes Java's uncompressed form (2001:db8:0:0:0:0:0:1).
+// Both name the same address, and the difference is kept deliberately rather
+// than reproducing Java's formatting.
+func IPAddressStrings(ips []net.IP) []string {
+	if len(ips) == 0 {
+		return nil
+	}
+	out := make([]string, len(ips))
+	for i, ip := range ips {
+		out[i] = ip.String()
+	}
+	return out
+}
+
 // certProjectionFor derives the certificate-index display projection from a
 // parsed certificate. Every field is immutable for the certificate's life,
 // which is what makes storing them alongside the inventory row safe: they can
@@ -55,6 +76,7 @@ func certProjectionFor(cert *x509.Certificate) storage.CertProjection {
 	return storage.CertProjection{
 		Fingerprint:    SHA256ColonFingerprint(cert.Raw),
 		DNSAltNames:    cert.DNSNames,
+		IPAltNames:     IPAddressStrings(cert.IPAddresses),
 		AuthExtensions: AuthExtensionMap(cert.Extensions),
 	}
 }

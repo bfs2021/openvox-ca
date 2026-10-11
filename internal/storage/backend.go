@@ -216,6 +216,15 @@ type CertProjection struct {
 	Fingerprint string
 	// DNSAltNames holds the certificate's DNS subject alternative names.
 	DNSAltNames []string
+	// IPAltNames holds the certificate's IP address subject alternative names,
+	// in the text form ca.IPAddressStrings renders.
+	//
+	// Every backend stores this field so that a projection written before it
+	// existed can be told apart from one with no IP SANs: an empty list is
+	// stored as an empty list, never as an absent value. A projection that
+	// lacks the field decodes as no projection at all (empty Fingerprint), so
+	// readers fall back to the PEM and the startup repair pass rewrites it.
+	IPAltNames []string
 	// AuthExtensions holds Puppet auth-arc extension values keyed by short
 	// name (e.g. "pp_auth_role") or dotted OID when no short name is known.
 	AuthExtensions map[string]string

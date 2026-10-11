@@ -24,16 +24,19 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"database/sql"
 	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net"
 	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/uptrace/bun/driver/sqliteshim"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 	"github.com/voxpupuli/openvox-ca/internal/testutil"
@@ -90,6 +93,34 @@ func (b *unknownRepairBackend) SetProjection(ctx context.Context, serial string,
 // auth-arc OIDs from CSRs. Returns the certificate PEM, ready for
 // ImportCertificate.
 func signLeafWithAuthRole(subject, role string) []byte {
+	roleValue, err := asn1.MarshalWithParams(role, "utf8")
+	Expect(err).NotTo(HaveOccurred())
+	return signLeaf(&x509.Certificate{
+		SerialNumber: big.NewInt(0x1D01),
+		Subject:      pkix.Name{CommonName: subject},
+		ExtraExtensions: []pkix.Extension{{
+			Id:    asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 13}, // pp_auth_role
+			Value: roleValue,
+		}},
+	})
+}
+
+// signLeafWithIPs builds a leaf certificate for subject signed directly by the
+// cached test CA, carrying the given IP address SANs beside a DNS SAN — which
+// the normal signing path never produces, since it copies DNS SANs only.
+// Returns the certificate PEM, ready for ImportCertificate.
+func signLeafWithIPs(subject string, ips ...net.IP) []byte {
+	return signLeaf(&x509.Certificate{
+		SerialNumber: big.NewInt(0x1D02),
+		Subject:      pkix.Name{CommonName: subject},
+		DNSNames:     []string{subject},
+		IPAddresses:  ips,
+	})
+}
+
+// signLeaf signs template with the cached test CA over a fresh key, valid from
+// an hour ago until a day from now.
+func signLeaf(template *x509.Certificate) []byte {
 	keyBlock, _ := pem.Decode(cachedKeyPEM)
 	Expect(keyBlock).NotTo(BeNil())
 	caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
@@ -101,19 +132,9 @@ func signLeafWithAuthRole(subject, role string) []byte {
 
 	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	Expect(err).NotTo(HaveOccurred())
-	roleValue, err := asn1.MarshalWithParams(role, "utf8")
-	Expect(err).NotTo(HaveOccurred())
 
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(0x1D01),
-		Subject:      pkix.Name{CommonName: subject},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		ExtraExtensions: []pkix.Extension{{
-			Id:    asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 13}, // pp_auth_role
-			Value: roleValue,
-		}},
-	}
+	template.NotBefore = time.Now().Add(-time.Hour)
+	template.NotAfter = time.Now().Add(24 * time.Hour)
 	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &leafKey.PublicKey, caKey)
 	Expect(err).NotTo(HaveOccurred())
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
@@ -124,6 +145,9 @@ var _ = Describe("CA certificate index", func() {
 		ctx   = context.Background()
 		myCA  *ca.CA
 		store *storage.StorageService
+		// sqliteDSN is the database newSQLiteService last opened, for a spec
+		// that must reach the table past the backend.
+		sqliteDSN string
 	)
 
 	// newCA builds and initialises a CA over the given storage service,
@@ -161,9 +185,10 @@ var _ = Describe("CA certificate index", func() {
 
 	newSQLiteService := func() *storage.StorageService {
 		dir := GinkgoT().TempDir()
+		sqliteDSN = "file:" + filepath.Join(dir, "ca.db")
 		b, err := storage.NewSQLBackend(storage.SQLConfig{
 			Dialect: storage.SQLitePure,
-			DSN:     "file:" + filepath.Join(dir, "ca.db"),
+			DSN:     sqliteDSN,
 		})
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { _ = b.Close() })
@@ -359,6 +384,52 @@ var _ = Describe("CA certificate index", func() {
 			Expect(recs[0].AuthExtensions).To(Equal(map[string]string{"pp_auth_role": "webserver"}),
 				"the auth extension must survive sign→projection→JSON column→record")
 			Expect(recs[0].Fingerprint).To(Equal(storedFingerprint(store, "import-node")))
+		})
+
+		It("projects IP SANs from an imported certificate through the index", func() {
+			certPEM := signLeafWithIPs("ip-node", net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::1"))
+			_, err := myCA.ImportCertificate(ctx, "ip-node", certPEM)
+			Expect(err).NotTo(HaveOccurred())
+
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].Fingerprint).To(Equal(storedFingerprint(store, "ip-node")))
+			Expect(recs[0].IPAltNames).To(Equal([]string{"192.0.2.10", "2001:db8::1"}),
+				"the IP SANs must survive projection→JSON column→record, in certificate order")
+			Expect(recs[0].DNSAltNames).To(Equal([]string{"ip-node"}))
+		})
+
+		It("re-projects a row written before the index stored IP SANs when repair runs", func() {
+			certPEM := signLeafWithIPs("old-row", net.ParseIP("192.0.2.10"))
+			_, err := myCA.ImportCertificate(ctx, "old-row", certPEM)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Put the row back as code from before ip_alt_names wrote it: a
+			// populated projection and nothing in the column. Done past the
+			// backend, which no longer writes that shape.
+			db, err := sql.Open(sqliteshim.ShimName, sqliteDSN)
+			Expect(err).NotTo(HaveOccurred())
+			res, err := db.ExecContext(ctx, "UPDATE puppet_ca_inventory SET ip_alt_names = NULL")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RowsAffected()).To(BeEquivalentTo(1))
+			Expect(db.Close()).To(Succeed())
+
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].Fingerprint).To(BeEmpty(),
+				"a projection that cannot say whether there are IP SANs is no projection")
+
+			restarted := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			Expect(restarted.Init(ctx)).To(Succeed())
+
+			recs, _, err = store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].Fingerprint).To(Equal(storedFingerprint(store, "old-row")))
+			Expect(recs[0].IPAltNames).To(Equal([]string{"192.0.2.10"}),
+				"repair must rewrite the row from the stored PEM, IP SANs included")
 		})
 
 		It("reconciles a zero-padded row serial against the CRL when repair runs", func() {
@@ -566,3 +637,16 @@ var _ = Describe("CA certificate index", func() {
 		})
 	})
 })
+
+var _ = DescribeTable("IPAddressStrings",
+	func(ips []net.IP, want []string) {
+		Expect(ca.IPAddressStrings(ips)).To(Equal(want))
+	},
+	Entry("gives nil for no addresses", nil, nil),
+	Entry("keeps certificate order", []net.IP{net.ParseIP("192.0.2.2"), net.ParseIP("192.0.2.1")},
+		[]string{"192.0.2.2", "192.0.2.1"}),
+	Entry("writes IPv4 dotted, from its 4-byte form", []net.IP{net.ParseIP("192.0.2.10").To4()},
+		[]string{"192.0.2.10"}),
+	Entry("writes IPv6 in Go's compressed form, not OpenVox Server's uncompressed one",
+		[]net.IP{net.ParseIP("2001:db8:0:0:0:0:0:1")}, []string{"2001:db8::1"}),
+)

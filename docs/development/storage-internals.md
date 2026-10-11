@@ -310,12 +310,13 @@ indexed by subject:
 | `subject` | certificate subject (indexed) |
 | `not_before` / `not_after` | validity window, stored as the inventory.txt strings |
 | `fingerprint_sha256` | SHA-256 fingerprint; `NULL` means "no projection, read the PEM" |
-| `dns_alt_names` | subject alternative names, JSON array; `NULL` when empty |
+| `dns_alt_names` | DNS subject alternative names, JSON array; `NULL` when empty |
+| `ip_alt_names` | IP address subject alternative names, JSON array; `[]` when empty, `NULL` only when there is no projection |
 | `auth_extensions` | Puppet auth extensions, JSON object; `NULL` when empty |
 | `state` | `signed` or `revoked`, projected from the signed CRL (indexed) |
 | `revoked_at` | revocation time; `NULL` unless revoked |
 
-The last five columns make the table double as the certificate index; see
+The last six columns make the table double as the certificate index; see
 [the inventory store](inventory-store.md) for what reads them and how a missing
 projection falls back to the stored PEM. `not_after` is indexed alongside
 `state` for consumers that have not landed yet (see the migration's own note).

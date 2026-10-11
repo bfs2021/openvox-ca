@@ -1895,6 +1895,7 @@ var _ = Describe("EtcdLegacyInventoryDecompose", func() {
 var certIndexProj = CertProjection{
 	Fingerprint:    "aa:bb:cc",
 	DNSAltNames:    []string{"node1", "node1.example.com"},
+	IPAltNames:     []string{"192.0.2.10", "2001:db8::1"},
 	AuthExtensions: map[string]string{"pp_auth_role": "webserver"},
 }
 
@@ -1926,6 +1927,7 @@ var _ = Describe("EtcdCertIndex", func() {
 		Expect(recs[0].Serial).To(Equal("0003"), "node1's latest issuance wins")
 		Expect(recs[0].Fingerprint).To(Equal(certIndexProj.Fingerprint))
 		Expect(recs[0].DNSAltNames).To(Equal(certIndexProj.DNSAltNames))
+		Expect(recs[0].IPAltNames).To(Equal(certIndexProj.IPAltNames))
 		Expect(recs[0].AuthExtensions).To(Equal(certIndexProj.AuthExtensions))
 		Expect(recs[1].Subject).To(Equal("node2"))
 		Expect(recs[1].Fingerprint).To(BeEmpty(), "appended without a projection")

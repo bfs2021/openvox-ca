@@ -165,7 +165,7 @@ recomputes the destination's integrity head from its entries
 
 The inventory table doubles as a **certificate index**: alongside the four
 canonical columns, each row carries a denormalised display projection
-(`fingerprint_sha256`, `dns_alt_names`, `auth_extensions`, filled at signing or
+(`fingerprint_sha256`, `dns_alt_names`, `ip_alt_names`, `auth_extensions`, filled at signing or
 import — see `issueLeafLocked` and `ImportCertificate`)
 and the one mutable fact, revocation (`state`, `revoked_at`). Backends owning
 the rows may advertise a second optional capability:
@@ -215,6 +215,15 @@ Design rules that keep the index honest:
   this is what makes a `storage migrate` from a blob backend converge. Until
   repair runs, the statuses handler falls back to the PEM per projection-less
   record.
+- **A projection that predates a field counts as missing.** The projection
+  gained IP SANs after rows had been written without them, so every backend
+  writes them even when there are none: `[]` in the SQL `ip_alt_names` column,
+  and an `ip_alt_names` key in the etcd and Redis records. A populated
+  projection without them cannot say whether the certificate has IP SANs, so
+  it decodes as no projection at all and takes the PEM fallback and the
+  startup backfill above. On etcd and Redis, a revocation that rewrites such a
+  record drops the stale projection with it, which leaves the record in that
+  same state.
 - **Statuses is gated on blob existence.** Historical rows survive cleaning
   (that is the inventory's job), so the index reports only subjects whose
   `cert/<subject>` blob still exists, and only their latest issuance —
