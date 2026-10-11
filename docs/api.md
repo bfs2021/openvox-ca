@@ -90,7 +90,7 @@ Nor is either status code a statement about [`puppetca_crl_update_failures_total
 }
 ```
 
-Fingerprints are uppercase hex pairs and each SAN carries its `DNS:` prefix, as OpenVox Server renders them. The response is checked against OpenVox Server's own: see [Differences from OpenVox Server](#differences-from-openvox-server).
+Fingerprints are uppercase hex pairs and each SAN carries its `DNS:` or `IP:` prefix, as OpenVox Server renders them. `subject_alt_names` lists the IP SANs first and then the DNS SANs; `dns_alt_names` lists the DNS SANs alone. The response is checked against OpenVox Server's own: see [Differences from OpenVox Server](#differences-from-openvox-server).
 
 > **Note:** `serial_number` is the certificate's full serial, a random 128-bit value, as a bare JSON number. That is how OpenVox Server sends it. It is omitted for certificates in the `requested` state. The number is exact in the response, but a parser that reads every JSON number as a double — JavaScript's `JSON.parse`, or `jq` before 1.7 — rounds a value this large. Where you need the exact serial, use a parser that keeps the digits (`jq` 1.7 or later does), or read it from the certificate itself.
 >
@@ -594,7 +594,6 @@ Where openvox-ca still differs, the spec carries an exception for each differenc
 Tracked as defects, each with an issue:
 
 - `fingerprints` lacks `SHA1` and `SHA512` ([#406](https://github.com/voxpupuli/openvox-ca/issues/406)).
-- `subject_alt_names` omits IP SANs, which OpenVox Server lists first as `IP:…` ([#407](https://github.com/voxpupuli/openvox-ca/issues/407)).
 - The authorisation extension `1.3.6.1.4.1.34380.1.3.2` is keyed `pp_auth_auto_renew` rather than by OID ([#408](https://github.com/voxpupuli/openvox-ca/issues/408)), and an extension whose OID is exactly the authorisation arc is listed ([#409](https://github.com/voxpupuli/openvox-ca/issues/409)).
 - `PUT /certificate_request/{subject}` for a subject that holds a certificate answers `200` rather than `400` ([#410](https://github.com/voxpupuli/openvox-ca/issues/410)).
 - `PUT /certificate_status/{subject}` signing a subject with no CSR answers `404` rather than `409` ([#411](https://github.com/voxpupuli/openvox-ca/issues/411)).
@@ -608,6 +607,7 @@ Deliberate, and kept. Each has a fixture that records it, except where marked *n
 - `GET /certificate_statuses` returns `[]` for an unknown `state`, and lists a subject holding both a certificate and a pending CSR once (the certificate).
 - `GET /certificate_status/{subject}` for an unknown subject answers `404` with a plain-text body labelled `text/plain`; OpenVox Server sends the same kind of body labelled `application/json`.
 - An authorisation-extension value that is not a DER string renders as hex.
+- An IPv6 SAN is written in compressed form, `IP:2001:db8::1`, where OpenVox Server writes `IP:2001:db8:0:0:0:0:0:1`. Both name the same address, so compare them as addresses rather than as strings.
 - A stored certificate openvox-ca cannot parse is reported in part: its status omits the SANs, serial number and validity dates rather than failing. Go refuses, for one, a certificate whose SAN holds an IPv4-mapped IPv6 address, which OpenVox Server signs and reports in full. Such a certificate can still be revoked, but its holder cannot complete TLS to openvox-ca, so it cannot use auto-renewal.
 - An unparseable CSR answers `400` rather than `500`.
 - A CSR asking for authorisation extensions is signed with them stripped (`204`), where OpenVox Server refuses it (`409`).

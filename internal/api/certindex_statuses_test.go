@@ -27,6 +27,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -172,6 +174,51 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 		Expect(*got.NotBefore).To(Equal(cert.NotBefore.UTC().Format(time.RFC3339)))
 		Expect(got.NotAfter).NotTo(BeNil())
 		Expect(*got.NotAfter).To(Equal(cert.NotAfter.UTC().Format(time.RFC3339)))
+	})
+
+	It("lists an imported certificate's IP SANs from the index exactly as from the stored PEM", func() {
+		// The signing path copies DNS SANs only, so a certificate carrying IP
+		// SANs reaches the index by import (or a migrated cadir).
+		keyBlock, _ := pem.Decode(cachedKeyPEM)
+		Expect(keyBlock).NotTo(BeNil())
+		caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		crtBlock, _ := pem.Decode(cachedCrtPEM)
+		Expect(crtBlock).NotTo(BeNil())
+		caCert, err := x509.ParseCertificate(crtBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+			SerialNumber: big.NewInt(0x407),
+			Subject:      pkix.Name{CommonName: "idx-ip"},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(24 * time.Hour),
+			DNSNames:     []string{"idx-ip"},
+			IPAddresses:  []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::1")},
+		}, caCert, &leafKey.PublicKey, caKey)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.ImportCertificate(ctx, "idx-ip", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+		Expect(err).NotTo(HaveOccurred())
+
+		recs, indexed, err := store.CertStatuses(ctx, "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(indexed).To(BeTrue())
+		Expect(recs).To(ConsistOf(HaveField("Fingerprint", Not(BeEmpty()))),
+			"the listing must come from the index row, not the PEM fallback")
+
+		want := []string{"IP:192.0.2.10", "IP:2001:db8::1", "DNS:idx-ip"}
+		statuses := getStatuses("")
+		Expect(statuses).To(HaveLen(1))
+		Expect(statuses[0].SubjectAltNames).To(Equal(want))
+		Expect(statuses[0].DNSAltNames).To(Equal([]string{"DNS:idx-ip"}))
+
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate_status/idx-ip", nil))
+		Expect(rr.Code).To(Equal(http.StatusOK))
+		var single api.CertStatusResponse
+		Expect(json.Unmarshal(rr.Body.Bytes(), &single)).To(Succeed())
+		Expect(single.SubjectAltNames).To(Equal(want), "the per-certificate path must agree")
 	})
 
 	It("encodes an indexed serial as a JSON number by default", func() {

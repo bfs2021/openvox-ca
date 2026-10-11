@@ -49,9 +49,8 @@ func SHA256ColonFingerprint(der []byte) string {
 }
 
 // IPAddressStrings renders IP address SANs as text, in certificate order. It is
-// the single producer of the form stored in the certificate index, and exported
-// so that a reader rendering IP SANs from a parsed certificate can use the same
-// form.
+// the single producer of the form stored in the certificate index and emitted
+// by the status API, so the indexed and per-certificate paths never disagree.
 //
 // The form is net.IP.String()'s: an IPv6 address is compressed (2001:db8::1),
 // where OpenVox Server writes Java's uncompressed form (2001:db8:0:0:0:0:0:1).

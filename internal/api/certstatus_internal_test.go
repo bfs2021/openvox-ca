@@ -18,7 +18,16 @@
 package api
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
+	"net"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -129,6 +138,96 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
 		Expect(ok).To(BeTrue())
 		Expect(got.DNSAltNames).NotTo(BeNil())
+		Expect(got.SubjectAltNames).NotTo(BeNil())
 		Expect(got.AuthorizationExtensions).NotTo(BeNil())
 	})
+
+	It("lists the projected IP SANs ahead of the DNS SANs in subject_alt_names only", func() {
+		rec := storage.CertRecord{
+			InventoryEntry: storage.InventoryEntry{
+				Subject: "node1", Serial: "01",
+				NotBefore: "2026-01-01T00:00:00UTC", NotAfter: "2036-01-01T00:00:00UTC",
+			},
+			CertProjection: storage.CertProjection{
+				Fingerprint: "SHA256:AA",
+				DNSAltNames: []string{"node1", "node1.example.com"},
+				IPAltNames:  []string{"192.0.2.10", "2001:db8::1"},
+			},
+			State: storage.CertStateSigned,
+		}
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		Expect(ok).To(BeTrue())
+		Expect(got.SubjectAltNames).To(Equal([]string{
+			"IP:192.0.2.10", "IP:2001:db8::1", "DNS:node1", "DNS:node1.example.com",
+		}))
+		Expect(got.DNSAltNames).To(Equal([]string{"DNS:node1", "DNS:node1.example.com"}))
+	})
 })
+
+// The certificate and CSR paths read the SANs off the parsed artefact rather
+// than a projection, so each needs its own spec. The SANs are interleaved by
+// type on purpose: subject_alt_names groups them, IP first, as OpenVox Server
+// does, rather than keeping the order they were written in.
+var _ = Describe("subject_alt_names from a parsed certificate or CSR", func() {
+	var (
+		key  *ecdsa.PrivateKey
+		sans []byte
+	)
+
+	BeforeEach(func() {
+		var err error
+		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		sans = interleavedSANs()
+	})
+
+	It("lists a certificate's IP SANs ahead of its DNS SANs", func() {
+		template := &x509.Certificate{
+			SerialNumber:    big.NewInt(1),
+			Subject:         pkix.Name{CommonName: "node1"},
+			NotBefore:       time.Now().Add(-time.Hour),
+			NotAfter:        time.Now().Add(time.Hour),
+			ExtraExtensions: []pkix.Extension{{Id: oidSubjectAltName, Value: sans}},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+		Expect(err).NotTo(HaveOccurred())
+
+		got := certStatusFromCert("node1", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+			storage.CertStateSigned, time.RFC3339, SerialNumberAsNumber)
+		Expect(got.SubjectAltNames).To(Equal([]string{
+			"IP:192.0.2.10", "IP:2001:db8::1", "DNS:node1", "DNS:node1.example.com",
+		}))
+		Expect(got.DNSAltNames).To(Equal([]string{"DNS:node1", "DNS:node1.example.com"}))
+	})
+
+	It("lists a CSR's IP SANs ahead of its DNS SANs", func() {
+		template := &x509.CertificateRequest{
+			Subject:         pkix.Name{CommonName: "node1"},
+			ExtraExtensions: []pkix.Extension{{Id: oidSubjectAltName, Value: sans}},
+		}
+		der, err := x509.CreateCertificateRequest(rand.Reader, template, key)
+		Expect(err).NotTo(HaveOccurred())
+
+		got := certStatusFromCSR("node1", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+		Expect(got.SubjectAltNames).To(Equal([]string{
+			"IP:192.0.2.10", "IP:2001:db8::1", "DNS:node1", "DNS:node1.example.com",
+		}))
+		Expect(got.DNSAltNames).To(Equal([]string{"DNS:node1", "DNS:node1.example.com"}))
+	})
+})
+
+var oidSubjectAltName = asn1.ObjectIdentifier{2, 5, 29, 17}
+
+// interleavedSANs is a subjectAltName extension value written by hand, since
+// crypto/x509 groups the SANs it writes by type: DNS, IPv4, DNS, IPv6.
+func interleavedSANs() []byte {
+	raw := []asn1.RawValue{
+		{Class: asn1.ClassContextSpecific, Tag: 2, Bytes: []byte("node1")},
+		{Class: asn1.ClassContextSpecific, Tag: 7, Bytes: net.ParseIP("192.0.2.10").To4()},
+		{Class: asn1.ClassContextSpecific, Tag: 2, Bytes: []byte("node1.example.com")},
+		{Class: asn1.ClassContextSpecific, Tag: 7, Bytes: net.ParseIP("2001:db8::1")},
+	}
+	out, err := asn1.Marshal(raw)
+	Expect(err).NotTo(HaveOccurred())
+	return out
+}
