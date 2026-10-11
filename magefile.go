@@ -4832,6 +4832,33 @@ config:
 			notWants:   []string{"SQLSECRET"},
 		},
 		{
+			// The other half of the SQLite exemption: a file: DSN is exempt only
+			// under a sqlite backend. To go-sql-driver this is user "file" with
+			// password "SQLSECRET".
+			name:       "a file: sql_dsn with a password under a mysql backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: mysql\n  sql_dsn: 'file:SQLSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"SQLSECRET"},
+		},
+		{
+			// And with no backend in config at all, as the docs promise.
+			name:       "a file: sql_dsn with an @ and no storage_backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'file:SQLSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"SQLSECRET"},
+		},
+		{
+			// libpq's keyword/value form allows spaces around the =. pgdriver
+			// cannot parse this DSN at all, but the ConfigMap would hold it.
+			name:       "a keyword/value sql_dsn with spaces around password =",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'host=db user=ca password = PGSECRET'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
 			// Even a SQLite path faces the password= check.
 			name:       "a SQLite sql_dsn carrying a password= parameter under a sqlite backend",
 			sets:       []string{tls},

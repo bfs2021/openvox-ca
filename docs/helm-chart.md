@@ -182,7 +182,8 @@ carries any of these:
 
 A `sql_dsn` carries a password when its user part has one
 (`postgres://user:password@…`, `user:password@tcp(…)/…`) or when it has a
-`password=` parameter. The chart errs towards refusal: it refuses any colon
+`password=` parameter, spaces around the `=` included. The chart errs towards
+refusal: it refuses any colon
 followed by text before the DSN's last `@`, after setting a `postgres://`,
 `postgresql://` or `unix://` scheme aside unless `storage_backend` is `mysql`
 or `mariadb`. That also catches a password containing `/`, `?` or `#`, which

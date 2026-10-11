@@ -1271,9 +1271,10 @@ needs no exemption, having no colon before its @. Both conditions are needed: th
 left beside a sqlite backend is still judged as one. Without a sqlite backend,
 a file: path containing @ falls into the class above.
 
-A password= parameter counts wherever it appears, sslpassword included: no
-driver here takes a password that way, but the ConfigMap would hold it all the
-same.
+A password= parameter counts wherever it appears, sslpassword included, and
+with spaces around the = as libpq's keyword/value form allows: no driver here
+takes a password that way, but the ConfigMap would hold it all the same. Only
+an empty value is not a secret.
 
 Returns "true", or nothing.
 */}}
@@ -1290,7 +1291,7 @@ Returns "true", or nothing.
 {{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $rest "${1}" -}}
 {{- end -}}
 {{- end -}}
-{{- if or (regexMatch "(?s)^[^:]*:." $userinfo) (regexMatch "(?i)password=[^&\\s]" $dsn) -}}true{{- end -}}
+{{- if or (regexMatch "(?s)^[^:]*:." $userinfo) (regexMatch "(?i)password\\s*=\\s*[^&\\s]" $dsn) -}}true{{- end -}}
 {{- end -}}
 
 {{/*
