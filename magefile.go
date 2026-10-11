@@ -2455,10 +2455,11 @@ type chartRenderCase struct {
 var inlineCredentialSources = []string{"internal/config/*.go", "cmd/openvox-ca/config.go"}
 
 // inlineCredentialKeyRe matches a yaml tag whose name says it holds a secret,
-// with or without tag options such as ",omitempty". A key ending _file names a
-// path to the secret rather than the secret, and inlineCredentialKeys drops
-// those.
-var inlineCredentialKeyRe = regexp.MustCompile(`yaml:"([a-z0-9_]*(?:password|secret|token|dsn)[a-z0-9_]*)[",]`)
+// with or without tag options such as ",omitempty". The words include
+// passphrase because this tree already uses it (ca_key_passphrase_file, and
+// PUPPET_CA_KEY_PASSPHRASE inline). A key ending _file names a path to the
+// secret rather than the secret, and inlineCredentialKeys drops those.
+var inlineCredentialKeyRe = regexp.MustCompile(`yaml:"([a-z0-9_]*(?:password|passphrase|secret|token|credential|dsn)[a-z0-9_]*)[",]`)
 
 // inlineCredentialKeys returns, sorted, every config key under root that can
 // hold a credential inline. chart:test requires a reject case for each, which
@@ -4865,6 +4866,15 @@ config:
 			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'file:/srv/ca.db?password=SQLSECRET'\n",
 			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
 			notWants:   []string{"SQLSECRET"},
+		},
+		{
+			// The server trims the backend name as well as folding its case
+			// (ParseBackendKind), so a padded mysql is still mysql.
+			name:       "a postgres-looking sql_dsn under a padded mysql backend, read as MySQL",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: ' mysql '\n  sql_dsn: 'postgres://MYSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MYSECRET"},
 		},
 		{
 			// The server folds case and accepts mariadb as an alias.

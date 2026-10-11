@@ -430,6 +430,9 @@ env: {}
 # PUPPET_CA_HOSTNAME: ca.example.com
 
 extraEnv: []
+# Kubernetes substitutes $(POSTGRES_PASSWORD) verbatim, so store the password
+# URL-encoded if it contains / ? # % or @. Or keep the whole DSN in the Secret
+# and give PUPPET_CA_SQL_DSN a valueFrom.secretKeyRef of its own.
 # - name: POSTGRES_PASSWORD
 #   valueFrom:
 #     secretKeyRef:

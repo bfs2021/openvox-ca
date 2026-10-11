@@ -140,9 +140,9 @@ var _ = Describe("inlineCredentialKeys", func() {
 		It("reads both sources, sorted, skipping path keys and test files", func() {
 			write("internal/config/a.go", "type A struct {\n\tP string `yaml:\"zed_password\"`\n\tF string `yaml:\"approle_secret_id_file\"`\n\tN int `yaml:\"port\"`\n}\n")
 			write("internal/config/a_test.go", "type T struct {\n\tS string `yaml:\"fixture_secret\"`\n}\n")
-			write("cmd/openvox-ca/config.go", "type C struct {\n\tD string `yaml:\"sql_dsn\"`\n\tT string `yaml:\"api_token,omitempty\"`\n}\n")
+			write("cmd/openvox-ca/config.go", "type C struct {\n\tD string `yaml:\"sql_dsn\"`\n\tT string `yaml:\"api_token,omitempty\"`\n\tK string `yaml:\"ca_key_passphrase\"`\n\tR string `yaml:\"registry_credential\"`\n}\n")
 
-			Expect(inlineCredentialKeys(root)).To(Equal([]string{"api_token", "sql_dsn", "zed_password"}))
+			Expect(inlineCredentialKeys(root)).To(Equal([]string{"api_token", "ca_key_passphrase", "registry_credential", "sql_dsn", "zed_password"}))
 		})
 
 		It("refuses a tree where it finds no credential key", func() {

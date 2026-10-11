@@ -395,8 +395,8 @@ The one exception is a setting that can hold a credential inline. `config`
 lands in a ConfigMap, so `openvox-ca.validate` refuses every such key it lists
 in `$credentials`; a new one needs adding there, with a reject case in
 `chart:test`. `chart:test` enforces that for any key in `internal/config` or
-`cmd/openvox-ca/config.go` whose yaml tag names a password, secret, token or
-DSN (`inlineCredentialKeys` in `magefile.go`). It reads tag names, not paths:
+`cmd/openvox-ca/config.go` whose yaml tag names a password, passphrase,
+secret, token, credential or DSN (`inlineCredentialKeys` in `magefile.go`). It reads tag names, not paths:
 a key in a nested block such as `openbao` still fails the check, but needs a
 `dig` for its path in `openvox-ca.validate` rather than a top-level entry, and
 a reject case naming that path (`config.openbao.<key>: set …`). A
