@@ -159,8 +159,9 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | `kubernetesExport.fieldManager` | `""` | Server-side apply field manager |
 | `kubernetesExport.targets` | `[]` | Passed through to `kubernetes_export.targets` |
 | `kubernetesExport.rbac.create` | `true` | Create the `create`/`patch` Role and binding |
-| `kubernetesExport.rbac.scope` | `Role` | `Role` or `ClusterRole` |
+| `kubernetesExport.rbac.scope` | `Role` | `Role` or `ClusterRole`. `ClusterRole` grants cluster-wide Secret `create` and is refused unless acknowledged below |
 | `kubernetesExport.rbac.namespaces` | `[]` | Extra namespaces to bind the Role into |
+| `kubernetesExport.rbac.acknowledgeClusterWideSecretCreate` | `false` | Accept the cluster-wide Secret `create` that `scope: ClusterRole` grants; without it that scope fails at install time |
 
 ### Managed certificates
 

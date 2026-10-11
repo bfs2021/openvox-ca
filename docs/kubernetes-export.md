@@ -204,6 +204,15 @@ Create a `Role`/`RoleBinding` pair in **each** namespace you export into, or use
 a `ClusterRole` with per-namespace `RoleBinding`s. Restrict the verbs and
 resources to the minimum above.
 
+Avoid binding these rules cluster-wide with a `ClusterRoleBinding`. `create`
+cannot be restricted with `resourceNames`, and `create` on Secrets lets the
+holder create a `kubernetes.io/service-account-token` Secret for any
+ServiceAccount in scope, which the token controller then fills with a token for
+that account. Bound cluster-wide, that is every ServiceAccount in the cluster,
+`kube-system` included. The [Helm chart](helm-chart.md#kubernetes-export)
+refuses its `rbac.scope: ClusterRole` for this reason unless
+`kubernetesExport.rbac.acknowledgeClusterWideSecretCreate` is set.
+
 ## Behaviour and failure handling
 
 - The export is **auxiliary**: if the Kubernetes client cannot be constructed

@@ -1,6 +1,8 @@
 # The bring-your-own-everything path: a ConfigMap, PersistentVolumeClaim and
 # ServiceAccount managed outside the chart, an explicit argument list, and
-# cluster-scoped export RBAC.
+# cluster-scoped export RBAC. This is the one fixture that renders the
+# acknowledged ClusterRole branch, so it stays linted and schema-checked; the
+# chart refuses that scope without acknowledgeClusterWideSecretCreate.
 
 existingConfigMap: openvox-ca-config
 
@@ -29,6 +31,7 @@ kubernetesExport:
   rbac:
     create: true
     scope: ClusterRole
+    acknowledgeClusterWideSecretCreate: true
 
 configChecksumAnnotation: false
 

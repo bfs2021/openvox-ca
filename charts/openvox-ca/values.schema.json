@@ -178,7 +178,8 @@
           "properties": {
             "create": { "type": "boolean" },
             "scope": { "type": "string", "enum": ["Role", "ClusterRole"] },
-            "namespaces": { "type": "array", "items": { "type": "string" } }
+            "namespaces": { "type": "array", "items": { "type": "string" } },
+            "acknowledgeClusterWideSecretCreate": { "type": "boolean" }
           }
         }
       }

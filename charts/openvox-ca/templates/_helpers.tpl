@@ -1101,6 +1101,24 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- end -}}
 
 {{/*
+  The ClusterRole scope grants create on Secrets in every namespace, and create
+  cannot be narrowed by resourceNames. create on Secrets is enough to mint a
+  kubernetes.io/service-account-token Secret for any ServiceAccount in scope, so
+  cluster-wide it reaches kube-system's. Nothing needs it: the Role scope binds
+  into each namespace listed in rbac.namespaces, which covers every target the
+  exporter can name. So the cluster-wide grant renders only once the operator
+  has said in values that they accept it — a NOTES warning alone never reaches
+  helm template, Argo CD or Flux.
+
+  Keyed on exportRBACRendered, like the export's default-ServiceAccount refusal,
+  so it fires exactly when rbac.yaml would render the ClusterRole and never when
+  it renders nothing.
+*/}}
+{{- if and (eq (include "openvox-ca.exportRBACRendered" .) "true") (eq .Values.kubernetesExport.rbac.scope "ClusterRole") (not .Values.kubernetesExport.rbac.acknowledgeClusterWideSecretCreate) -}}
+{{- fail "kubernetesExport.rbac.scope: ClusterRole would grant the openvox-ca ServiceAccount create on Secrets and ConfigMaps in every namespace. create cannot be narrowed to the export targets, and create on Secrets lets the holder mint a token for any ServiceAccount in the cluster, kube-system included. Set kubernetesExport.rbac.scope: Role and list each namespace you export into under kubernetesExport.rbac.namespaces, or set kubernetesExport.rbac.acknowledgeClusterWideSecretCreate: true to accept the cluster-wide grant." -}}
+{{- end -}}
+
+{{/*
   extraConfigFiles is emitted into the same ConfigMap `data` map as the files the
   chart renders, and it is ranged last, so a colliding key produces two entries
   of one name and the operator's wins. Then every decision the chart made — the
@@ -1353,6 +1371,15 @@ TLS, so openvox-ca never sees an agent's client certificate and every endpoint
 authenticated by one — signing, revoking, listing — stops authenticating. Use
 gateway.tlsRoute for agent traffic, which passes the connection through intact,
 and keep the HTTPRoute for the anonymous endpoints (CRL, OCSP, health) only.
+{{- end }}
+{{- if and (eq (include "openvox-ca.exportRBACRendered" .) "true") (eq .Values.kubernetesExport.rbac.scope "ClusterRole") }}
+
+WARNING: Kubernetes export RBAC was created as a ClusterRole, so the openvox-ca
+ServiceAccount holds create on Secrets and ConfigMaps in every namespace. That
+is enough to mint a token for any ServiceAccount in the cluster, kube-system
+included. kubernetesExport.rbac.acknowledgeClusterWideSecretCreate accepted
+this; kubernetesExport.rbac.scope: Role with each target namespace listed in
+kubernetesExport.rbac.namespaces confines it to those namespaces.
 {{- end }}
 {{- if and (eq (include "openvox-ca.exportRBACRendered" .) "true") (eq (include "openvox-ca.exportTargetNames" .) "unknown") }}
 
