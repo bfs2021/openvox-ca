@@ -1612,6 +1612,7 @@ var _ = Describe("API Workflow", func() {
 			return rr
 		}
 		issue := func(h http.Handler, subject string) {
+			GinkgoHelper()
 			csrPEM, err := testutil.GenerateCSR(subject)
 			Expect(err).NotTo(HaveOccurred())
 			rr := httptest.NewRecorder()
