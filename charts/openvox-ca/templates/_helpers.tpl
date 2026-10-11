@@ -1114,8 +1114,15 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   Keyed on exportRBACRendered, like the export's default-ServiceAccount refusal,
   so it fires exactly when rbac.yaml would render the ClusterRole and never when
   it renders nothing.
+
+  Only a real boolean true allows it. Any non-empty string is true to a
+  template, so a quoted "false" would otherwise allow the grant wherever schema
+  validation is skipped — the schema's boolean type is the first refusal, not
+  the only one.
 */}}
-{{- if and (eq (include "openvox-ca.exportRBACRendered" .) "true") (eq .Values.kubernetesExport.rbac.scope "ClusterRole") (not .Values.kubernetesExport.rbac.allowClusterWideSecretCreate) -}}
+{{- $allowClusterWide := .Values.kubernetesExport.rbac.allowClusterWideSecretCreate -}}
+{{- $allowClusterWide = and (kindIs "bool" $allowClusterWide) $allowClusterWide -}}
+{{- if and (eq (include "openvox-ca.exportRBACRendered" .) "true") (eq .Values.kubernetesExport.rbac.scope "ClusterRole") (not $allowClusterWide) -}}
 {{- fail "kubernetesExport.rbac.scope: ClusterRole would grant the openvox-ca ServiceAccount create on Secrets and ConfigMaps in every namespace. create cannot be narrowed to the export targets, and create on Secrets lets the holder mint a token for any ServiceAccount in the cluster, kube-system included. Set kubernetesExport.rbac.scope: Role and list each namespace you export into under kubernetesExport.rbac.namespaces, or set kubernetesExport.rbac.allowClusterWideSecretCreate: true to allow the cluster-wide grant." -}}
 {{- end -}}
 

@@ -703,9 +703,11 @@ kubernetesExport:
 
 Prefer `Role`. Nothing needs `ClusterRole`: a target either names its namespace
 or defaults to the release namespace, which the Role always covers, so listing
-the named ones under `rbac.namespaces` covers every export the server can make. The refusal is a precondition rather than a NOTES warning because
-`helm template`, Argo CD and Flux never show NOTES; an install that allows
-the grant still prints one.
+the named ones under `rbac.namespaces` covers every export the server can make.
+
+The refusal is a precondition rather than a NOTES warning because
+`helm template`, Argo CD and Flux never show NOTES; an install that allows the
+grant still prints one.
 
 The chart mounts the ServiceAccount token automatically when the pod needs the
 Kubernetes API, and leaves it unmounted otherwise. These are the

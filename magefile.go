@@ -2452,6 +2452,9 @@ type chartRejectCase struct {
 	// swallows backslash escapes, so a value containing a real newline has to
 	// come from a file.
 	valuesYAML string
+	// skipSchema renders with --skip-schema-validation, for a refusal the
+	// template has to make on its own when the schema is not consulted.
+	skipSchema bool
 	wantErr    string
 }
 
@@ -2511,8 +2514,8 @@ data:
 `
 
 // helmRender renders the chart, optionally including the post-install notes,
-// and optionally with an extra values file.
-func helmRender(notes bool, sets []string, valuesYAML string) (string, error) {
+// and optionally with an extra values file and extra helm arguments.
+func helmRender(notes bool, sets []string, valuesYAML string, extra ...string) (string, error) {
 	dir := chartDir
 	if notes {
 		tmp, err := os.MkdirTemp("", "openvox-ca-notes")
@@ -2534,6 +2537,7 @@ func helmRender(notes bool, sets []string, valuesYAML string) (string, error) {
 	for _, s := range sets {
 		args = append(args, "--set", s)
 	}
+	args = append(args, extra...)
 	if valuesYAML != "" {
 		f, err := os.CreateTemp("", "openvox-ca-values-*.yaml")
 		if err != nil {
@@ -3413,6 +3417,15 @@ config:
 			notWants: []string{"kind: ClusterRole"},
 		},
 		{
+			// The opt-in allows a ClusterRole; it never asks for one.
+			name: "allowClusterWideSecretCreate leaves rbac.scope: Role namespaced",
+			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.allowClusterWideSecretCreate=true",
+				"kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=t",
+				"kubernetesExport.targets[0].cert=true"},
+			wants:    []string{"kind: Role\n", "kind: RoleBinding\n"},
+			notWants: []string{"kind: ClusterRole"},
+		},
+		{
 			name: "the ServiceAccount token stays unmounted when nothing needs the API",
 			sets: []string{tls},
 			// Anchored to the pod template: serviceaccount.yaml emits the same
@@ -3603,10 +3616,14 @@ config:
 			wants: []string{"created as a ClusterRole", "mint a token for any ServiceAccount in the cluster"},
 		},
 		{
+			// allowClusterWideSecretCreate is set as well, because it has no effect
+			// under Role: keying the warning on the opt-in instead of the scope
+			// would announce a ClusterRole here that was never created.
 			name:  "NOTES says nothing about cluster-wide create under rbac.scope: Role",
 			notes: true,
-			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.targets[0].kind=Secret",
-				"kubernetesExport.targets[0].metadata.name=t", "kubernetesExport.targets[0].cert=true"},
+			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.allowClusterWideSecretCreate=true",
+				"kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=t",
+				"kubernetesExport.targets[0].cert=true"},
 			wants:    []string{"has been deployed"},
 			notWants: []string{"created as a ClusterRole"},
 		},
@@ -4583,6 +4600,17 @@ config:
 				"    scope: ClusterRole\n    allowClusterWideSecretCreate: \"false\"\n",
 			wantErr: "allowClusterWideSecretCreate': got string, want boolean",
 		},
+		{
+			// The same value with the schema out of the way, as
+			// --skip-schema-validation or a GitOps controller's equivalent leaves
+			// it: the template must still refuse rather than read the string as
+			// true.
+			name: "a quoted \"false\" for allowClusterWideSecretCreate with schema validation skipped",
+			valuesYAML: "tls:\n  existingSecret: s\nkubernetesExport:\n  enabled: true\n  rbac:\n" +
+				"    scope: ClusterRole\n    allowClusterWideSecretCreate: \"false\"\n",
+			skipSchema: true,
+			wantErr:    "kube-system included",
+		},
 	}
 
 	failures := 0
@@ -4684,7 +4712,11 @@ config:
 	}
 
 	for _, tc := range rejects {
-		out, err := helmRender(false, tc.sets, tc.valuesYAML)
+		var extra []string
+		if tc.skipSchema {
+			extra = append(extra, "--skip-schema-validation")
+		}
+		out, err := helmRender(false, tc.sets, tc.valuesYAML, extra...)
 		switch {
 		case err == nil:
 			fmt.Printf("FAIL  rejects %s\n      rendered successfully instead of failing\n", tc.name)
