@@ -210,7 +210,7 @@ holder create a `kubernetes.io/service-account-token` Secret for any
 ServiceAccount in scope, which the token controller then fills with a token for
 that account. Bound cluster-wide, that is every ServiceAccount in the cluster,
 `kube-system` included. The [Helm chart](helm-chart.md#kubernetes-export)
-refuses its `rbac.scope: ClusterRole` for this reason unless
+refuses to create its `rbac.scope: ClusterRole` grant for this reason unless
 `kubernetesExport.rbac.allowClusterWideSecretCreate` is `true`.
 
 ## Behaviour and failure handling

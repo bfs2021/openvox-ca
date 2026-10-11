@@ -353,7 +353,7 @@ kubernetesExport:
     # cluster-wide. Use Role, listing each namespace you export into under
     # `namespaces` below. ClusterRole grants create on Secrets in every
     # namespace, which is enough to mint a token for any ServiceAccount in the
-    # cluster, so the chart refuses to render it unless
+    # cluster, so the chart refuses to create that ClusterRole unless
     # allowClusterWideSecretCreate is true.
     scope: Role
 
@@ -363,8 +363,10 @@ kubernetesExport:
     namespaces: []
 
     # Allow the cluster-wide Secret create that scope: ClusterRole grants.
-    # Without it, scope: ClusterRole fails at install time. Has no effect under
-    # scope: Role.
+    # Without it, the install fails whenever the chart would create the export
+    # ClusterRole: export configured, create: true and scope: ClusterRole. Has
+    # no effect under scope: Role, or with create: false, where the chart
+    # creates no export RBAC at all.
     allowClusterWideSecretCreate: false
 
 # -- Managed certificates ------------------------------------------------------

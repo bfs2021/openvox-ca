@@ -691,8 +691,8 @@ reach is limited to the release namespace and the ones you list.
 
 `rbac.scope: ClusterRole` grants the same rules cluster-wide, so the openvox-ca
 ServiceAccount could mint a token for any ServiceAccount in the cluster,
-`kube-system` included. The chart therefore refuses to render it unless you
-accept that explicitly:
+`kube-system` included. The chart therefore refuses to create that ClusterRole
+unless you accept it explicitly:
 
 ```yaml
 kubernetesExport:
@@ -704,6 +704,10 @@ kubernetesExport:
 Prefer `Role`. Nothing needs `ClusterRole`: a target either names its namespace
 or defaults to the release namespace, which the Role always covers, so listing
 the named ones under `rbac.namespaces` covers every export the server can make.
+
+The refusal applies only when the chart creates the export RBAC. With
+`rbac.create: false` it creates none, so neither the scope nor the opt-in has
+any effect, and the Role or ClusterRole you bind yourself is yours to scope.
 
 The refusal is a precondition rather than a NOTES warning because
 `helm template`, Argo CD and Flux never show NOTES; an install that allows the
