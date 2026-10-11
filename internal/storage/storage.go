@@ -1223,7 +1223,7 @@ func (s *StorageService) CheckKeyPermissions(extra ...string) []KeyPermWarning {
 		}
 	}
 
-	if l, ok := s.backend.(KeyFileLister); ok {
+	if l, ok := asKeyFileLister(s.backend); ok {
 		for _, p := range l.KeyFilePaths() {
 			check(p)
 		}

@@ -694,6 +694,38 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			return &buf
 		}
 
+		// The spelling this check could not see. SQLiteFilePath decodes %HH in
+		// the relative file: form now, so the directory it derives is
+		// ".ca b.db.locks" while the version that left one behind created
+		// ".ca%20b.db.locks". Asking only about the decoded name looked for a
+		// directory the old version never made and ignored the one it did,
+		// which is the stranded directory the warning exists for.
+		//
+		// Relative, and that is the whole point of the shape: url.Parse puts an
+		// absolute file: path in u.Path already decoded, which the parser before
+		// this change used too, so the absolute form never diverged. Only the
+		// relative form, which lands in u.Opaque and is held encoded, does. A
+		// spec written with an absolute DSN passes against the unfixed code --
+		// it did, which is how this comment came to be here.
+		It("warns about a directory left beside the escaped spelling", func() {
+			dir := GinkgoT().TempDir()
+			GinkgoT().Chdir(dir)
+
+			// The driver and this package both open "ca b.db"; an older version
+			// derived its lock directory from the undecoded text.
+			Expect(os.WriteFile(filepath.Join(dir, "ca b.db"), nil, 0o600)).To(Succeed())
+			Expect(os.Mkdir(filepath.Join(dir, ".ca%20b.db.locks"), 0o700)).To(Succeed(),
+				"what an earlier version left behind")
+
+			buf := captureWarnings()
+			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:ca%20b.db"})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = b.Close() })
+
+			Expect(buf.String()).To(ContainSubstring(".ca%20b.db.locks"),
+				"the directory beside the escaped spelling must be named")
+		})
+
 		It("warns when one exists and this version locks elsewhere", func() {
 			realDB := filepath.Join(GinkgoT().TempDir(), "real.db")
 			linkDir := GinkgoT().TempDir()

@@ -202,7 +202,7 @@ func (o *OverlayBackend) BaseDir() string {
 // The base's own files still hold whatever was not overridden.
 func (o *OverlayBackend) KeyFilePaths() []string {
 	var paths []string
-	if l, ok := o.base.(KeyFileLister); ok {
+	if l, ok := asKeyFileLister(o.base); ok {
 		paths = append(paths, l.KeyFilePaths()...)
 	}
 	if p, ok := o.overrides[KeyCAKey]; ok {

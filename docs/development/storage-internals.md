@@ -337,7 +337,7 @@ Lock names, holders, and ordering are documented in
   in a hidden `.<database>.locks/` directory beside the database, alongside the
   `-wal` and `-shm` files SQLite maintains itself; the database file is never
   flocked, because SQLite locks that. Beside the *resolved* database: the
-  backend decodes the DSN's percent-escapes and follows symlinks once
+  backend decodes the DSN's percent-escapes and follows a chain of symlinks, bounded the way the kernel bounds its own
   (`resolveSQLitePath`), and the sidecar names, the lock directory and the paths
   the permission check judges all derive from that one path, so every spelling
   of one database shares one lock directory. The backend also creates the

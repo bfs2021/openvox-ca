@@ -275,6 +275,43 @@ var _ = Describe("CheckKeyPermissions", func() {
 	// finding wider than 0600 on every start, and the refusal would fire on a
 	// correct store -- so the guard is what makes the whole check usable, not an
 	// optimisation.
+	// A wrapper that forwards nothing is the case the bare type assertion got
+	// wrong: it reported no key files rather than failing, so the whole of a
+	// backend's own key material went unjudged and the check passed silently.
+	// OverlayBackend forwards KeyFilePaths explicitly, so the defect was not
+	// reachable through any backend that exists -- which is exactly why it
+	// needed a fixture of its own rather than waiting for the next wrapper.
+	Describe("a wrapper backend that does not forward KeyFilePaths", func() {
+		It("still judges the key files the wrapped backend declares", func() {
+			dbPath := filepath.Join(GinkgoT().TempDir(), "ca.db")
+			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = b.Close() })
+			Expect(b.EnsureReady(context.Background())).To(Succeed())
+			Expect(b.Put(context.Background(), KeyCAKey, []byte("key"), BlobPrivate)).To(Succeed())
+
+			resolved, err := filepath.EvalSymlinks(dbPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.Chmod(resolved, 0o644)).To(Succeed(), "world-readable, so a finding is owed")
+
+			// Unwrap is all this wrapper offers. It deliberately has no
+			// KeyFilePaths method of its own: that is the shape under test.
+			svc := NewWithBackend(&unforwardingWrapper{Backend: b}, "")
+
+			warnings := svc.CheckKeyPermissions()
+
+			var found bool
+			for _, w := range warnings {
+				if w.Path == resolved {
+					found = true
+					Expect(w.WorldAccessible()).To(BeTrue(), "and it is judged world-accessible")
+				}
+			}
+			Expect(found).To(BeTrue(),
+				"the wrapped backend's key files must be reached through Unwrap")
+		})
+	})
+
 	DescribeTable("says nothing about a thing that is not a regular file",
 		func(create func(path string)) {
 			dir := GinkgoT().TempDir()
@@ -361,3 +398,12 @@ var _ = Describe("CheckKeyPermissions", func() {
 		Expect(NewWithBackend(b, "").CheckKeyPermissions()).To(BeEmpty(), "warnings for an in-memory store")
 	})
 })
+
+// unforwardingWrapper wraps a Backend and offers only Unwrap -- no
+// KeyFileLister, no PathProvider. Every capability probe has to walk through it
+// to find what the base declares, which is the property the spec above drives.
+type unforwardingWrapper struct {
+	Backend
+}
+
+func (w *unforwardingWrapper) Unwrap() Backend { return w.Backend }

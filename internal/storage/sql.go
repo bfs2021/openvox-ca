@@ -318,10 +318,39 @@ func NewSQLBackend(cfg SQLConfig) (*SQLBackend, error) {
 // upgrade that finished, and refusing to start over it would turn a housekeeping
 // task into an outage.
 func warnOnStrandedSQLiteLockDir(dsn, inUse string) {
-	spelling, ok := SQLiteFilePath(dsn)
-	if !ok {
-		return
+	for _, spelling := range legacySQLiteSpellings(dsn) {
+		warnOnOneStrandedLockDir(spelling, inUse)
 	}
+}
+
+// legacySQLiteSpellings returns the names an earlier version may have derived a
+// lock directory from.
+//
+// Two of them, because this PR changed the parser. SQLiteFilePath now decodes
+// %HH in the relative "file:" form, to agree with the driver; before that it
+// used the escaped text. So for a DSN of "file:ca%20b.db" an older version
+// locked in ".ca%20b.db.locks" while this one derives ".ca b.db.locks" -- and a
+// check that asked only about the decoded name would look for a directory the
+// old version never created, and miss the one it did. The stranded directory
+// the warning exists for is exactly the one it could not see.
+//
+// The undecoded candidate is read straight off the URI rather than by keeping a
+// copy of the old parser, which would be a second implementation to drift.
+func legacySQLiteSpellings(dsn string) []string {
+	decoded, ok := SQLiteFilePath(dsn)
+	if !ok {
+		return nil
+	}
+	out := []string{decoded}
+	if u, err := url.Parse(dsn); err == nil && strings.HasPrefix(dsn, "file:") && u.Opaque != "" {
+		if u.Opaque != decoded {
+			out = append(out, u.Opaque)
+		}
+	}
+	return out
+}
+
+func warnOnOneStrandedLockDir(spelling, inUse string) {
 	legacy := sqliteLockDirFor(spelling)
 	if legacy == inUse {
 		return
@@ -1142,11 +1171,19 @@ func createSQLiteDatabase(t sqliteTarget) error {
 	// to a concurrent starter lands here too, and is not an error — the winner
 	// created it under the same rule.
 	//
-	// A symlink never arrives here as a symlink: resolveSQLitePath has already
-	// followed it, deliberately, so that an operator who points the DSN at a
-	// data volume gets the database created at the other end. O_EXCL then
-	// applies at that target, which is what stops an existing file there being
-	// written through.
+	// A symlink has usually been followed before it reaches here, deliberately,
+	// so that an operator who points the DSN at a data volume gets the database
+	// created at the other end; O_EXCL then applies at that target, which is
+	// what stops an existing file there being written through.
+	//
+	// "Usually" and not "never", which an earlier version of this comment got
+	// wrong: resolveSQLitePath gives up after sqliteSymlinkHops and returns the
+	// name it last held, so a chain longer than the bound or a cycle does
+	// arrive here still a link. That is not a hole -- O_EXCL fails EEXIST on a
+	// symlink whether or not its target exists, so the give-up path refuses
+	// rather than writing through anything -- but the spec for a symlink cycle
+	// pins exactly that state, so the absolute claim was contradicted by this
+	// package's own suite.
 	//
 	// An empty file is a valid empty SQLite database, so the driver adopts this
 	// one rather than creating its own.
@@ -1240,15 +1277,23 @@ func sqliteDSNReadable(dsn string) error {
 	if !strings.HasPrefix(dsn, "file:") {
 		return nil
 	}
+	// Both messages carry the remedy, because this is the one refusal this
+	// change adds that an operator meets without having done anything wrong:
+	// a DSN that worked before, with a literal "%" in a filename, now stops
+	// startup. Telling them only that it could not be read would leave them
+	// guessing at a percent-encoding rule.
 	u, err := url.Parse(dsn)
 	if err != nil {
-		return fmt.Errorf("reading sqlite dsn %s: %w", dsn, err)
+		return fmt.Errorf("reading sqlite dsn %s: %w -- a literal %% in a path must be "+
+			"written %%25 in a file: DSN, or give the path without the file: prefix", dsn, err)
 	}
 	if u.Opaque == "" {
 		return nil
 	}
 	if _, err := url.PathUnescape(u.Opaque); err != nil {
-		return fmt.Errorf("reading the database path out of sqlite dsn %s: %w", dsn, err)
+		return fmt.Errorf("reading the database path out of sqlite dsn %s: %w -- a literal %% "+
+			"in a path must be written %%25 in a file: DSN, or give the path without the "+
+			"file: prefix", dsn, err)
 	}
 	return nil
 }

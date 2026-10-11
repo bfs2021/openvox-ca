@@ -154,6 +154,12 @@ func (w KeyPermWarning) WorldAccessible() bool {
 // StorageService already scans. The SQLite backend implements it: its database
 // holds the CA key as a blob, and the sidecars beside it hold page images of
 // the same rows.
+// A wrapper backend is reached through asKeyFileLister rather than a bare type
+// assertion, for the reason the other capability probes are: a bare assertion on
+// a wrapper that does not forward the method reports "no key files" rather than
+// failing, and a permission check that silently has nothing to judge is the one
+// failure mode this check cannot afford. OverlayBackend does forward it today,
+// so nothing is broken; this is about the next wrapper.
 type KeyFileLister interface {
 	// KeyFilePaths returns the files that may contain key material. Paths that
 	// do not exist are permitted and ignored by the caller.
@@ -347,6 +353,21 @@ type CertIndex interface {
 	// bearing serial. Used to backfill rows created from projection-less
 	// sources (legacy inventory blobs, direct AppendLine writes).
 	SetProjection(ctx context.Context, serial string, proj CertProjection) error
+}
+
+// asKeyFileLister probes b for the KeyFileLister capability, unwrapping wrapper
+// backends the same way asCertIndex does.
+func asKeyFileLister(b Backend) (KeyFileLister, bool) {
+	for {
+		if l, ok := b.(KeyFileLister); ok {
+			return l, true
+		}
+		unwrapper, ok := b.(interface{ Unwrap() Backend })
+		if !ok {
+			return nil, false
+		}
+		b = unwrapper.Unwrap()
+	}
 }
 
 // asCertIndex probes b for the CertIndex capability, unwrapping wrapper
