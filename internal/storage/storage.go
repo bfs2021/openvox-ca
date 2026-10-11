@@ -1063,7 +1063,7 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 	if err := os.MkdirAll(s.localPrivateKeyDir, DirPerm); err != nil {
 		return err
 	}
-	return os.WriteFile(s.PrivateKeyPath(subject), pemData, FilePermPrivate)
+	return AtomicWriteFile(s.PrivateKeyPath(subject), pemData, FilePermPrivate)
 }
 
 // CheckKeyPermissions reports private key files whose permissions are more

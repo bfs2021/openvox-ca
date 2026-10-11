@@ -23,6 +23,7 @@
 package storage
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -84,5 +85,32 @@ var _ = Describe("AtomicWriteFile", func() {
 		target := filepath.Join(dir, "no-such-dir", "bundle.pem")
 		err := AtomicWriteFile(target, []byte("payload"), FilePermPublic)
 		Expect(err).To(MatchError(ContainSubstring("creating a temporary file beside " + target)))
+	})
+})
+
+var _ = Describe("SavePrivateKey", func() {
+	It("replaces a permissive key and does not follow a symlink", func() {
+		dir := GinkgoT().TempDir()
+		store := New(dir)
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+
+		path := store.PrivateKeyPath("node")
+		Expect(os.WriteFile(path, []byte("old"), 0o644)).To(Succeed())
+		Expect(store.SavePrivateKey(context.Background(), "node", []byte("new-key"))).To(Succeed())
+		Expect(os.ReadFile(path)).To(Equal([]byte("new-key")))
+		info, err := os.Lstat(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(info.Mode().Perm()).To(Equal(os.FileMode(FilePermPrivate)))
+
+		outside := filepath.Join(dir, "outside")
+		Expect(os.WriteFile(outside, []byte("secret"), 0o600)).To(Succeed())
+		Expect(os.Remove(path)).To(Succeed())
+		Expect(os.Symlink(outside, path)).To(Succeed())
+		Expect(store.SavePrivateKey(context.Background(), "node", []byte("replaced"))).To(Succeed())
+		Expect(os.ReadFile(outside)).To(Equal([]byte("secret")))
+		info, err = os.Lstat(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(info.Mode() & os.ModeSymlink).To(Equal(os.FileMode(0)))
+		Expect(os.ReadFile(path)).To(Equal([]byte("replaced")))
 	})
 })
