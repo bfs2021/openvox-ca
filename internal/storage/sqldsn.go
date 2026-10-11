@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"strings"
@@ -105,23 +106,38 @@ func DSNHasPassword(dsn string) bool {
 
 // errPostgresDSNMalformed stands in for pgdriver's own parse error, which is
 // withheld because it can repeat the DSN, password included.
-var errPostgresDSNMalformed = errors.New("parsing postgres dsn: the DSN is malformed " +
+var errPostgresDSNMalformed = errors.New("parsing postgres dsn: the DSN could not be parsed " +
 	"(the parser's message is withheld because it can repeat the DSN, password included); " +
-	"check its scheme (postgres://, postgresql:// or unix://), host, port and query parameters")
+	"check its scheme (postgres://, postgresql:// or unix://), host, port and query parameters, " +
+	"including sslmode")
 
 // newPostgresConnector builds a pgdriver connector from opts, turning a panic
-// into errPostgresDSNMalformed.
+// into an error that does not repeat the DSN.
 //
 // pgdriver.WithDSN panics rather than returning an error when it cannot parse
 // the DSN, and the panic value is the parser's error -- for a url.Parse
 // failure, a *url.Error that quotes the whole DSN. Left alone, that panic
 // prints the database password to stderr, which is the journal under systemd
-// and the pod log under Kubernetes. None of the panic value is kept, because
-// there is no reliable way to tell which of pgdriver's messages repeat the DSN.
+// and the pod log under Kubernetes.
+//
+// The one cause kept is a file that could not be read. pgdriver opens the
+// sslrootcert, sslcert and sslkey files while parsing, so a Secret that is not
+// mounted yet surfaces here too, and calling that a malformed DSN would send
+// the operator to the wrong place. Its *fs.PathError names the path from the
+// query parameter and the OS error, never the userinfo, and only that error is
+// kept -- not pgdriver's message around it. Everything else is withheld,
+// because there is no reliable way to tell which of pgdriver's other messages
+// repeat the DSN.
 func newPostgresConnector(opts ...pgdriver.Option) (connector *pgdriver.Connector, err error) {
 	defer func() {
-		if recover() != nil {
-			connector, err = nil, errPostgresDSNMalformed
+		r := recover()
+		if r == nil {
+			return
+		}
+		connector, err = nil, errPostgresDSNMalformed
+		var pathErr *fs.PathError
+		if rerr, ok := r.(error); ok && errors.As(rerr, &pathErr) {
+			err = fmt.Errorf("parsing postgres dsn: reading a file it names: %w", pathErr)
 		}
 	}()
 	return pgdriver.NewConnector(opts...), nil

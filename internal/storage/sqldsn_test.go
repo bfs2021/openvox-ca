@@ -165,6 +165,12 @@ var _ = Describe("DSNHasPassword", func() {
 		Entry("a SQLite file: URI with parameters", "file:/var/lib/puppet-ca/ca.db?_pragma=busy_timeout(5000)", false),
 		Entry("a bare SQLite path", "/var/lib/puppet-ca/ca.db", false),
 		Entry("an empty DSN", "", false),
+		// A known false negative, pinned so that changing it is a decision:
+		// url.Parse rejects the port, and MySQL's grammar cannot place the
+		// host, so neither parser vouches for the password. Such a DSN cannot
+		// open a PostgreSQL backend either, so the server refuses it when it
+		// is the one in use.
+		Entry("a password-bearing postgres:// URL that url.Parse rejects", "postgres://ca:"+secret+"@db:54 32/ca", false),
 	)
 })
 
@@ -195,6 +201,35 @@ var _ = Describe("NewSQLBackend for PostgreSQL", func() {
 		}).NotTo(Panic())
 		Expect(err).To(MatchError(errPostgresDSNMalformed))
 		Expect(err.Error()).NotTo(ContainSubstring(secret))
+	})
+
+	DescribeTable("names a TLS file the DSN points at that cannot be read, without repeating the DSN",
+		func(query func(missing string) string) {
+			// pgdriver reads these files while parsing, so an unmounted
+			// Secret panics there too. That is not a malformed DSN, and the
+			// path is what the operator needs.
+			missing := filepath.Join(GinkgoT().TempDir(), "no-such.pem")
+			_, err := NewSQLBackend(SQLConfig{Dialect: SQLPostgres,
+				DSN: "postgres://ca:" + secret + "@127.0.0.1:1/ca?" + query(missing)})
+			Expect(err).To(MatchError(fs.ErrNotExist))
+			Expect(err).To(MatchError(ContainSubstring(missing)))
+			Expect(err).NotTo(MatchError(errPostgresDSNMalformed))
+			Expect(err.Error()).NotTo(ContainSubstring(secret))
+		},
+		Entry("sslrootcert", func(missing string) string {
+			return "sslmode=verify-full&sslrootcert=" + missing
+		}),
+		Entry("sslcert and sslkey", func(missing string) string {
+			return "sslmode=verify-full&sslcert=" + missing + "&sslkey=" + missing
+		}),
+	)
+
+	It("withholds a parse failure that is not a file read", func() {
+		// pgdriver's message here names only the sslmode, but which of its
+		// messages repeat the DSN is not something to rely on.
+		_, err := NewSQLBackend(SQLConfig{Dialect: SQLPostgres,
+			DSN: "postgres://ca:" + secret + "@127.0.0.1:1/ca?sslmode=bogus"})
+		Expect(err).To(MatchError(errPostgresDSNMalformed))
 	})
 
 	It("opens a well-formed DSN without dialling it", func() {
