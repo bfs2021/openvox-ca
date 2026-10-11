@@ -1204,7 +1204,12 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 
   One entry per config key that can hold a credential inline, mapped to what
   replaces it. OpenBao has none: its secret_id and token are only ever read
-  from files, and approle_role_id is an identifier the docs set inline.
+  from files, and approle_role_id is an identifier the docs set inline — the
+  approle method refuses to start without approle_secret_id_file, so a role_id
+  never authenticates on its own.
+
+  A new server setting that can hold a credential inline needs an entry here
+  and a reject case in chart:test; AGENTS.md says so too.
   sql_dsn counts only when it carries a password — see openvox-ca.dsnHasPassword
   — because a DSN without one is not a secret, and SQLite's is a file path.
 
@@ -1221,41 +1226,56 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- range $key, $remedy := $credentials -}}
 {{- $value := index $config $key -}}
 {{- if and (not (kindIs "invalid" $value)) (ne (toString $value) "") -}}
-{{- if or (ne $key "sql_dsn") (eq (include "openvox-ca.dsnHasPassword" (toString $value)) "true") -}}
+{{- if or (ne $key "sql_dsn") (eq (include "openvox-ca.dsnHasPassword" (dict "dsn" (toString $value) "backend" (dig "storage_backend" "" $config | toString))) "true") -}}
 {{- $found = append $found (printf "  config.%s: set %s instead" $key $remedy) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if $found -}}
-{{- fail (printf "config holds a credential the chart would write in clear text into its ConfigMap, where anyone allowed to read ConfigMaps in the namespace can read it. Keep it in a Secret, drop it from config, and feed it in through extraEnv with valueFrom.secretKeyRef — environment variables outrank the config file:\n%s\nSee docs/helm-chart.md for a worked example." (join "\n" $found)) -}}
+{{- fail (printf "config holds a credential the chart would write in clear text into its ConfigMap, where anyone allowed to read ConfigMaps in the namespace can read it. Keep it in a Secret, drop it from config, and feed it in through extraEnv with valueFrom.secretKeyRef — environment variables outrank the config file:\n%s\nSee https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md#how-the-chart-is-configured for a worked example." (join "\n" $found)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
 Whether a sql_dsn carries a password, splitting it the way the server's
-drivers do. The postgres://, postgresql:// and unix:// forms go through
-net/url, whose userinfo is the authority (up to the first /, ? or #) before its
-last @. Everything else goes go-sql-driver's way: cut at the last /, then take
-what precedes the last @ before that. Keying on those schemes rather than on
-any "scheme://" keeps a MySQL password that begins with // from being read as
-a URL. A password is then any text after the userinfo's first colon; an empty
-one is not a secret.
+drivers do. Takes a dict: "dsn", and "backend", the configured storage_backend.
 
-A password= parameter counts wherever it appears, sslpassword included: no
-driver here takes a password that way, but the ConfigMap would hold it all the
-same, and erring towards refusal costs the operator one extraEnv entry.
+The server picks the driver from storage_backend, not from the DSN, so a
+mysql or mariadb backend always means go-sql-driver: cut at the last /, then
+take what precedes the last @ before that. Otherwise a postgres://,
+postgresql:// or unix:// DSN goes through net/url, as pgdriver's does, whose
+userinfo is the authority (up to the first /, ? or #) before its last @.
+Keying on those schemes rather than on any "scheme://" keeps a MySQL password
+that begins with // from being read as a URL when the backend is set some
+other way, such as PUPPET_CA_STORAGE_BACKEND. Anything else goes
+go-sql-driver's way. A password is then any text after the userinfo's first
+colon; an empty one is not a secret.
+
+A URL whose authority holds no @ falls back to go-sql-driver's split too. On a
+well-formed DSN that finds nothing, but a password carrying an unencoded /, ?
+or # ends net/url's authority early: the server cannot use that DSN, yet the
+ConfigMap would hold the password all the same. The fallback reads the scheme's
+own colon as a separator, so it refuses any such DSN with an @ before its last
+/ — which can include a working one with an @ in a query value, and that is
+the direction to err in.
+
+A password= parameter counts wherever it appears, sslpassword included, for
+the same reason: no driver here takes a password that way, but erring towards
+refusal costs the operator one extraEnv entry.
 
 Returns "true", or nothing.
 */}}
 {{- define "openvox-ca.dsnHasPassword" -}}
-{{- $dsn := . -}}
+{{- $dsn := .dsn -}}
+{{- $mysql := has (lower (trim .backend)) (list "mysql" "mariadb") -}}
+{{- $authority := "" -}}
+{{- if and (not $mysql) (regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn) -}}
+{{- $authority = regexReplaceAll "(?s)^[^:]*://([^/?#]*).*$" $dsn "${1}" -}}
+{{- end -}}
 {{- $userinfo := "" -}}
-{{- if regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn -}}
-{{- $authority := regexReplaceAll "(?s)^[^:]*://([^/?#]*).*$" $dsn "${1}" -}}
 {{- if contains "@" $authority -}}
 {{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $authority "${1}" -}}
-{{- end -}}
 {{- else -}}
 {{- $head := regexReplaceAll "(?s)^(.*)/.*$" $dsn "${1}" -}}
 {{- if contains "@" $head -}}

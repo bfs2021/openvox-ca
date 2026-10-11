@@ -178,7 +178,10 @@ carries any of these:
 
 A `sql_dsn` carries a password when its user part has one
 (`postgres://user:password@…`, `user:password@tcp(…)/…`) or when it has a
-`password=` parameter. One without, such as a SQLite file path, can stay in
+`password=` parameter. The chart reads it as the server would, by
+`storage_backend`, and errs towards refusal: a password with an unescaped `/`,
+`?` or `#` in a `postgres://` DSN is refused too, although the server could not
+use it. One without a password, such as a SQLite file path, can stay in
 `config`. With `existingConfigMap` set the chart renders no ConfigMap, so
 nothing is refused, and what goes into yours is your own decision.
 

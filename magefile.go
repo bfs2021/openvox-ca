@@ -3974,6 +3974,23 @@ config:
 			wants:      []string{"sql_dsn: POSTGRESQL://ca@db/ca"},
 		},
 		{
+			// No userinfo at all: the authority has no @, so the go-sql-driver
+			// fallback runs and finds none either. Taking the authority as the
+			// userinfo would read the port's colon as a password.
+			name:       "a postgres sql_dsn with no user part stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://db:5432/ca?sslmode=require'\n",
+			wants:      []string{"sql_dsn: postgres://db:5432/ca?sslmode=require"},
+		},
+		{
+			// An empty password= parameter is no secret, as an empty userinfo
+			// password is not.
+			name:       "a sql_dsn with an empty password= parameter stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?password=&sslmode=require'\n",
+			wants:      []string{"sql_dsn: postgres://ca@db/ca?password=&sslmode=require"},
+		},
+		{
 			// pgdriver's socket form, where the host part names the database.
 			name:       "a unix-socket sql_dsn without a password stays in config",
 			sets:       []string{tls},
@@ -4623,6 +4640,68 @@ config:
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?password=PGSECRET'\n",
 			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
 			notWants:   []string{"PGSECRET"},
+		},
+		{
+			// The match is on the parameter's tail, so a prefixed name counts;
+			// anchoring it to [?&]password= would let this one through.
+			name:       "a sql_dsn carrying an sslpassword= parameter",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?sslpassword=KEYSECRET'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"KEYSECRET"},
+		},
+		{
+			name:       "a sql_dsn carrying an upper-case PASSWORD= parameter",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?PASSWORD=PGSECRET'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			// net/url ends the authority at the first /, leaving "ca:PG" with no
+			// @ and so no userinfo. The server cannot use this DSN, but the
+			// ConfigMap would hold the password, so the URL split falls back to
+			// go-sql-driver's.
+			name:       "a postgres sql_dsn whose password contains an unescaped slash",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG/SECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG/SECRET"},
+		},
+		{
+			// net/url cuts the query off before it splits the authority, so a ?
+			// in the password does the same.
+			name:       "a postgres sql_dsn whose password contains an unescaped question mark",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG?SECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG?SECRET"},
+		},
+		{
+			// The server picks the driver from storage_backend, not the DSN. To
+			// go-sql-driver this is user "postgres" with password "//MYSECRET";
+			// read as a URL it has the userinfo "MYSECRET" and no password.
+			name:       "a postgres-looking sql_dsn under a mysql backend, read as MySQL",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: mysql\n  sql_dsn: 'postgres://MYSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MYSECRET"},
+		},
+		{
+			// The server folds case and accepts mariadb as an alias.
+			name:       "a postgres-looking sql_dsn under a MariaDB backend, read as MySQL",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: MariaDB\n  sql_dsn: 'postgres://MYSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MYSECRET"},
+		},
+		{
+			// --set types an all-digit value as a number, which a check for
+			// strings alone would wave through.
+			name:     "a numeric Redis password in config",
+			sets:     []string{tls, "config.redis_password=123456"},
+			wantErr:  "config.redis_password: set PUPPET_CA_REDIS_PASSWORD instead",
+			notWants: []string{"123456"},
 		},
 		{
 			name:    "a mistyped value the schema should catch",
