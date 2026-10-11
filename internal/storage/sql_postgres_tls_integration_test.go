@@ -21,17 +21,10 @@ package storage
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"database/sql"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"math/big"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -42,58 +35,6 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/uptrace/bun/driver/pgdriver"
 )
-
-// pgTestCA is a throwaway CA minted per spec, so no key is ever committed.
-type pgTestCA struct {
-	cert *x509.Certificate
-	key  *ecdsa.PrivateKey
-	pem  []byte
-}
-
-func newPGTestCA(name string) *pgTestCA {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	Expect(err).NotTo(HaveOccurred())
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: name},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	Expect(err).NotTo(HaveOccurred())
-	cert, err := x509.ParseCertificate(der)
-	Expect(err).NotTo(HaveOccurred())
-	return &pgTestCA{cert: cert, key: key, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
-}
-
-// issueServer returns a PEM certificate and key for a server answering to
-// host, which may be a DNS name or an IP address.
-func (ca *pgTestCA) issueServer(host string) (certPEM, keyPEM []byte) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	Expect(err).NotTo(HaveOccurred())
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: host},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		tmpl.IPAddresses = []net.IP{ip}
-	} else {
-		tmpl.DNSNames = []string{host}
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
-	Expect(err).NotTo(HaveOccurred())
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	Expect(err).NotTo(HaveOccurred())
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
-}
 
 // servePostgresTLS switches the test server's TLS on with a certificate issued
 // by ca for certHost, and back off when the spec ends. The fixture runs
@@ -162,12 +103,12 @@ func servePostgresTLS(dsn string, ca *pgTestCA, certHost string) {
 	}).WithTimeout(10 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 }
 
-// "Postgres TLS" connects to a TLS-enabled PostgreSQL both ways the docs offer
-// to verify it: the sql_tls_ca_file option, loaded by loadSQLTLS exactly as the
-// server loads it, with a DSN asking for sslmode=require, which on its own
-// would skip verification; and a DSN asking for sslmode=verify-full with an
-// sslrootcert, which pgdriver handles itself. Serial, because servePostgresTLS
-// reconfigures the whole server.
+// "Postgres TLS" connects to a TLS-enabled PostgreSQL both ways an operator
+// can give it a CA: the sql_tls_ca_file option, loaded by loadSQLTLS exactly as
+// the server loads it, and the DSN's own sslrootcert, which pgdriver handles
+// itself. Each is driven under verify-full and under require, which with a CA
+// means libpq's verify-ca, to pin that one sslmode means the same thing either
+// way. Serial, because servePostgresTLS reconfigures the whole server.
 var _ = Describe("Postgres TLS", Serial, func() {
 	var (
 		host    string
@@ -200,7 +141,34 @@ var _ = Describe("Postgres TLS", Serial, func() {
 		return u.String()
 	}
 
-	verifiesTheServer := func() {
+	viaFile := func(sslmode string) func() *SQLBackend {
+		return func() *SQLBackend {
+			tlsCfg, err := loadSQLTLS(SQLSpec{TLSCAFile: caFile})
+			Expect(err).NotTo(HaveOccurred())
+			b, err := NewSQLBackend(SQLConfig{
+				Dialect: SQLPostgres,
+				DSN:     withSSL(map[string]string{"sslmode": sslmode}),
+				TLS:     tlsCfg,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = b.Close() })
+			return b
+		}
+	}
+
+	viaDSN := func(sslmode string) func() *SQLBackend {
+		return func() *SQLBackend {
+			b, err := NewSQLBackend(SQLConfig{
+				Dialect: SQLPostgres,
+				DSN:     withSSL(map[string]string{"sslmode": sslmode, "sslrootcert": caFile}),
+			})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = b.Close() })
+			return b
+		}
+	}
+
+	connectsToTheTrustedServer := func() {
 		It("connects over TLS to a server whose certificate it trusts", func() {
 			servePostgresTLS(postgresDSNFromEnv(), trusted, host)
 			b := open()
@@ -219,6 +187,10 @@ var _ = Describe("Postgres TLS", Serial, func() {
 			var unknown x509.UnknownAuthorityError
 			Expect(errors.As(err, &unknown)).To(BeTrue(), "want an unknown-authority error, got: %v", err)
 		})
+	}
+
+	checksTheName := func() {
+		connectsToTheTrustedServer()
 
 		It("refuses a trusted certificate issued for another host", func() {
 			servePostgresTLS(postgresDSNFromEnv(), trusted, "not-the-database.example")
@@ -228,23 +200,19 @@ var _ = Describe("Postgres TLS", Serial, func() {
 		})
 	}
 
-	Context("via sql_tls_ca_file", func() {
-		BeforeEach(func() {
-			open = func() *SQLBackend {
-				tlsCfg, err := loadSQLTLS(SQLSpec{TLSCAFile: caFile})
-				Expect(err).NotTo(HaveOccurred())
-				b, err := NewSQLBackend(SQLConfig{
-					Dialect: SQLPostgres,
-					DSN:     withSSL(map[string]string{"sslmode": "require"}),
-					TLS:     tlsCfg,
-				})
-				Expect(err).NotTo(HaveOccurred())
-				DeferCleanup(func() { _ = b.Close() })
-				return b
-			}
-		})
+	checksTheChainOnly := func() {
+		connectsToTheTrustedServer()
 
-		verifiesTheServer()
+		It("accepts a trusted certificate issued for another host, as libpq's verify-ca does", func() {
+			servePostgresTLS(postgresDSNFromEnv(), trusted, "not-the-database.example")
+			Expect(open().db.PingContext(context.Background())).To(Succeed())
+		})
+	}
+
+	Context("via sql_tls_ca_file with sslmode=verify-full", func() {
+		BeforeEach(func() { open = viaFile("verify-full") })
+
+		checksTheName()
 
 		// pgdriver dials a TCP host= in preference to the URL's host, so
 		// that is the name to verify: with the URL naming a decoy, only a
@@ -255,7 +223,7 @@ var _ = Describe("Postgres TLS", Serial, func() {
 			u.Host = "decoy.invalid:5432"
 			q := u.Query()
 			q.Set("host", dsn.Host)
-			q.Set("sslmode", "require")
+			q.Set("sslmode", "verify-full")
 			u.RawQuery = q.Encode()
 			tlsCfg, err := loadSQLTLS(SQLSpec{TLSCAFile: caFile})
 			Expect(err).NotTo(HaveOccurred())
@@ -266,19 +234,21 @@ var _ = Describe("Postgres TLS", Serial, func() {
 		})
 	})
 
-	Context("via the DSN's sslmode=verify-full", func() {
-		BeforeEach(func() {
-			open = func() *SQLBackend {
-				b, err := NewSQLBackend(SQLConfig{
-					Dialect: SQLPostgres,
-					DSN:     withSSL(map[string]string{"sslmode": "verify-full", "sslrootcert": caFile}),
-				})
-				Expect(err).NotTo(HaveOccurred())
-				DeferCleanup(func() { _ = b.Close() })
-				return b
-			}
-		})
+	Context("via the DSN's sslrootcert with sslmode=verify-full", func() {
+		BeforeEach(func() { open = viaDSN("verify-full") })
 
-		verifiesTheServer()
+		checksTheName()
+	})
+
+	Context("via sql_tls_ca_file with sslmode=require", func() {
+		BeforeEach(func() { open = viaFile("require") })
+
+		checksTheChainOnly()
+	})
+
+	Context("via the DSN's sslrootcert with sslmode=require", func() {
+		BeforeEach(func() { open = viaDSN("require") })
+
+		checksTheChainOnly()
 	})
 })
