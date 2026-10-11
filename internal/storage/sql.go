@@ -402,7 +402,10 @@ func openSQLDB(cfg SQLConfig, target sqliteTarget) (*sql.DB, schema.Dialect, err
 		}
 		return sqldb, sqlitedialect.New(), nil
 	case SQLPostgres:
-		connector := pgdriver.NewConnector(pgdriver.WithDSN(cfg.DSN))
+		connector, err := newPostgresConnector(pgdriver.WithDSN(cfg.DSN))
+		if err != nil {
+			return nil, nil, err
+		}
 		if cfg.TLS != nil {
 			if err := applyPostgresTLS(connector.Config(), cfg.DSN, cfg.TLS); err != nil {
 				return nil, nil, err
