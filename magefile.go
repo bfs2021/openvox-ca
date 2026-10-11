@@ -3611,6 +3611,24 @@ config:
 			notWants: []string{"created as a ClusterRole"},
 		},
 		{
+			// The warning's other conjunct. Keyed on scope alone it would announce
+			// a ClusterRole that rbac.create: false never rendered — and nothing
+			// refuses this install, so the NOTES would be all the operator sees.
+			name:  "NOTES says nothing about cluster-wide create when no Role was created",
+			notes: true,
+			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole",
+				"kubernetesExport.rbac.create=false"},
+			wants:    []string{"has been deployed"},
+			notWants: []string{"created as a ClusterRole"},
+		},
+		{
+			name:     "NOTES says nothing about cluster-wide create when export is off",
+			notes:    true,
+			sets:     []string{tls, "kubernetesExport.rbac.scope=ClusterRole"},
+			wants:    []string{"has been deployed"},
+			notWants: []string{"created as a ClusterRole"},
+		},
+		{
 			// rbac.create off means no Role, so there is nothing to disclose. The
 			// conjunct is pinned at rbac.yaml; this pins it at the disclosure,
 			// where re-splitting it would announce a grant that was never created.
@@ -4554,6 +4572,16 @@ config:
 			name:    "a mistyped value the schema should catch",
 			sets:    []string{tls, "metric.enabled=true"},
 			wantErr: "additional properties",
+		},
+		{
+			// The precondition reads allowClusterWideSecretCreate for truth, and a
+			// non-empty string is true to a template — so a quoted "false", or
+			// --set-string, would grant the ClusterRole. The schema's boolean type
+			// is what refuses it. Helm 3 and 4 both word the error this way.
+			name: "a quoted \"false\" for allowClusterWideSecretCreate",
+			valuesYAML: "tls:\n  existingSecret: s\nkubernetesExport:\n  enabled: true\n  rbac:\n" +
+				"    scope: ClusterRole\n    allowClusterWideSecretCreate: \"false\"\n",
+			wantErr: "allowClusterWideSecretCreate': got string, want boolean",
 		},
 	}
 
