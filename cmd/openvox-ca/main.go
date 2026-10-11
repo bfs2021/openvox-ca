@@ -326,8 +326,19 @@ func keyPermInsecureNotice(warnings []storage.KeyPermWarning, insecureAllow bool
 // -- it is refused earlier and separately, and has no mode to report or chmod
 // to suggest.
 //
-// One function because two callers need the same answer: the terminal notice
-// before a --daemon fork, and the slog record once a logger exists.
+// One caller, keyPermInsecureNotice, which renders the terminal notice before a
+// --daemon fork and the slog record from the same string. An earlier version of
+// this comment claimed two callers sharing one selection, and offered that as a
+// drift already repaired; it was not. logKeyPermissions partitions the findings
+// itself, in a four-way switch that also separates group access and owner-only
+// modes, and folding just its world arm through here would cost a second pass
+// over the warnings to make one line shorter.
+//
+// What keeps the two in agreement is that both ask KeyPermWarning for the
+// answer -- w.WorldAccessible(), with Unreadable excluded first in each -- so a
+// change to what world access means moves both. A predicate written out by hand
+// in either place is what would start the drift this comment used to claim had
+// been fixed.
 func worldAccessibleFindings(warnings []storage.KeyPermWarning) []storage.KeyPermWarning {
 	var out []storage.KeyPermWarning
 	for _, w := range warnings {

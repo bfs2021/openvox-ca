@@ -567,12 +567,18 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		// specs above; repeating them here meant a reword failed three specs
 		// and a wiring regression that preserved the text failed none. What
 		// this spec is for is that the notice reached the terminal at all.
+		//
+		// The comparison is the assertion, which is what an earlier version of
+		// this spec got wrong: it built expected, asserted only that it was
+		// non-empty, and then matched a hardcoded substring -- so it was
+		// re-pinning prose in miniature under a comment claiming it did not,
+		// and a round-8 PR comment reported it as fixed when it was not.
 		expected := keyPermInsecureNotice(
 			[]storage.KeyPermWarning{{Path: filepath.Join(caDir, "private", "ca_key.pem"), Mode: os.FileMode(0o644)}},
 			true)
 		Expect(expected).NotTo(BeEmpty(), "the renderer must have something to say, or this proves nothing")
-		Expect(errOut.String()).To(ContainSubstring("chmod o-rwx -- "),
-			"the notice, not its wording, reached the terminal")
+		Expect(errOut.String()).To(ContainSubstring(expected),
+			"the notice the renderer produces, verbatim, reached the terminal")
 	})
 
 	// The same path without the opt-out refuses, and must say nothing about
@@ -597,6 +603,55 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		Expect(forked).To(BeFalse(), "the refusal has to come before the fork")
 		Expect(errOut.String()).NotTo(ContainSubstring("INSECURE"),
 			"no opt-out means no start, so nothing to shout about")
+	})
+
+	// The third role, which the extraction above deliberately does not cover:
+	// runSignerMode installs its logger with a fallback to stderr, which
+	// AGENTS.md records as intentional, so it keeps its own sequence and its own
+	// call. That left the call reachable by no spec at all -- deleting it kept
+	// the suite green while a hand-started signer went silent about a store it
+	// had just judged, which is the same defect the extraction was made to fix,
+	// surviving in the one role the extraction skipped.
+	//
+	// Driven through runSignerMode itself rather than through its parts. The
+	// report happens before any store is opened, so a cfg whose store cannot be
+	// opened still exercises it: initSignerKey then returns an error and the
+	// function is left before signer.Serve, which would otherwise block.
+	It("reports the preflight's findings from the signer role too", func() {
+		dir := GinkgoT().TempDir()
+		// A cadir that is a regular file: enough for the store to fail to open,
+		// which is how this spec returns rather than serving.
+		notADir := filepath.Join(dir, "not-a-directory")
+		Expect(os.WriteFile(notADir, []byte("x"), 0o600)).To(Succeed())
+
+		// Through a configured logfile, because that is the destination that
+		// matters and the only one observable from here: runSignerMode installs
+		// its own handler, so a buffer set as the default before the call is
+		// replaced before the record is written.
+		logPath := filepath.Join(dir, "signer.log")
+		cfg := &serverConfig{CADir: notADir, LogFile: logPath}
+		// Group-accessible, which is what a role has to report. A
+		// world-accessible finding cannot reach a role at all unless the opt-out
+		// is set -- the parent refuses first -- so a fixture built from one
+		// asserts against a state this code path never sees, and the first
+		// version of this spec did exactly that and failed for it.
+		groupReadable := storage.KeyPermWarning{
+			Path: filepath.Join(dir, "private", "ca_key.pem"),
+			Mode: os.FileMode(0o640),
+		}
+		DeferCleanup(func() { slog.SetDefault(slog.New(slog.NewTextHandler(GinkgoWriter, nil))) })
+
+		err := runSignerMode(context.Background(), cfg, notADir,
+			[]storage.KeyPermWarning{groupReadable})
+
+		// The error is incidental -- it is how the spec gets control back.
+		Expect(err).To(HaveOccurred(), "the broken store is what returns control here")
+
+		written, rerr := os.ReadFile(logPath)
+		Expect(rerr).NotTo(HaveOccurred(), "the signer's logfile must exist and be written")
+		Expect(string(written)).To(ContainSubstring("accessible to its group"))
+		Expect(string(written)).To(ContainSubstring(groupReadable.Path),
+			"the signer must say what the preflight found, naming the file")
 	})
 
 	// The sequence two roles share: install the logger, then report. Before it
@@ -667,6 +722,49 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		Expect(err).To(MatchError(ContainSubstring("refusing to start")),
 			"a world-readable passphrase file unlocks the key, so it is refused like the key")
 		Expect(err).To(MatchError(ContainSubstring(passPath)), "and the refusal names it")
+	})
+
+	// The placement argument, driven rather than assumed. preflightKeyMaterial's
+	// doc comment rests on two claims; the fork one is pinned above, and this is
+	// the other: the refusal comes *before* anything writes a key, so a store
+	// that is already world-accessible never has a fresh private key minted into
+	// it first.
+	//
+	// Every other spec here draws its fixture from worldReadableCADir, which
+	// bootstraps the CA and then widens its key -- so a key always exists before
+	// the refusal and the ordering claim is satisfied whatever the order really
+	// is. A world-readable ca_key_passphrase_file is the one condition that is
+	// refusable with no CA in the store at all, which is what makes the claim
+	// observable.
+	It("refuses with no CA in the store, before any key is written", func() {
+		caDir := GinkgoT().TempDir()
+
+		passPath := filepath.Join(GinkgoT().TempDir(), "key-passphrase")
+		Expect(os.WriteFile(passPath, []byte("hunter2\n"), 0o600)).To(Succeed())
+		Expect(os.Chmod(passPath, 0o644)).To(Succeed(), "world-readable, whatever the umask")
+
+		cmd := newRootCmd()
+		cmd.SetOut(GinkgoWriter)
+		cmd.SetErr(GinkgoWriter)
+		cmd.SetArgs([]string{
+			"--cadir", caDir, "--host", "127.0.0.1", "--port", "0",
+			"--ca-key-passphrase-file", passPath,
+		})
+
+		done := make(chan error, 1)
+		go func() { done <- cmd.Execute() }()
+
+		var err error
+		Eventually(done, "30s").Should(Receive(&err),
+			"the refusal must come before the launcher forks")
+		Expect(err).To(MatchError(ContainSubstring("refusing to start")))
+
+		// The assertion the other specs cannot make: nothing was minted into a
+		// store the server had already decided not to serve.
+		Expect(filepath.Join(caDir, "private", "ca_key.pem")).NotTo(BeAnExistingFile(),
+			"no CA key may be written on the way to refusing")
+		Expect(filepath.Join(caDir, "ca_crt.pem")).NotTo(BeAnExistingFile(),
+			"and no CA certificate either")
 	})
 
 	// The check runs for every role, which is published to operators. Folding

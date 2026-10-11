@@ -345,6 +345,17 @@ var _ = Describe("StorageService", func() {
 			Expect(warnings[0].WorldAccessible()).To(BeTrue())
 		})
 
+		// The published behaviour: an unset ca_key_passphrase_file arrives here as
+		// "" and must not become a finding.
+		//
+		// This pins the behaviour and not the guard that implements it, which is
+		// worth saying plainly rather than leaving a reader to assume otherwise.
+		// Deleting the `p != ""` test in CheckKeyPermissions leaves this spec
+		// green, because os.Lstat("") returns ENOENT and the fs.ErrNotExist arm
+		// absorbs it either way. The guard is kept for being explicit -- an unset
+		// option is not a path to go looking for -- and because it does not rest
+		// on how a platform maps the error from an empty name. Neither property
+		// is observable from here, so no assertion is offered for them.
 		It("ignores an empty caller-supplied path", func() {
 			Expect(store.CheckKeyPermissions("")).To(BeEmpty(), "ca_key_passphrase_file unset")
 		})

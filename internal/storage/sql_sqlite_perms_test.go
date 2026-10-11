@@ -461,6 +461,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		// nothing was created on disk for it.
 		It("hands an in-memory DSN through in a form the driver still accepts", func() {
 			dir := GinkgoT().TempDir()
+			GinkgoT().Chdir(dir)
 			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: ":memory:"})
 			Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
 			DeferCleanup(func() { _ = b.Close() })
@@ -468,6 +469,11 @@ var _ = Describe("SQLiteFilePermissions", func() {
 				"the DSN the driver got still names an in-memory database")
 
 			Expect(b.KeyFilePaths()).To(BeEmpty(), "no file to judge")
+			// dir is where a file would land if one were created, because the
+			// spec runs from it: without the Chdir this asserted that a
+			// directory the DSN never names stayed empty, which it would have
+			// whatever the code did. The same claim is made properly further
+			// down for the bare-path case; this is the URI one.
 			entries, rerr := os.ReadDir(dir)
 			Expect(rerr).NotTo(HaveOccurred())
 			Expect(entries).To(BeEmpty(), "and nothing was created on disk")
@@ -620,10 +626,26 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		// other direction on macOS, where TempDir sits behind /var.
 		parent, perr := filepath.EvalSymlinks(filepath.Dir(a))
 		Expect(perr).NotTo(HaveOccurred(), "resolve the fixture's parent")
-		gaveUpAt := filepath.Join(parent, filepath.Base(a))
-		Expect(back.KeyFilePaths()).To(ConsistOf(
+
+		// Either member of the cycle is a correct outcome, and which one it is
+		// depends on the parity of sqliteSymlinkHops rather than on any
+		// behaviour this spec is about. Pinning "a.db" specifically made the
+		// spec fail for the wrong reason if that bound were ever changed to an
+		// odd number -- a maintenance trap rather than a guarantee. What the
+		// contract actually says is that the parent resolves and the cycling
+		// name is left as it stood, whichever of the two that is.
+		candidates := []string{
+			filepath.Join(parent, filepath.Base(a)),
+			filepath.Join(parent, filepath.Base(bLink)),
+		}
+		paths := back.KeyFilePaths()
+		Expect(paths).To(HaveLen(4), "the database and its three sidecars")
+		gaveUpAt := paths[0]
+		Expect(gaveUpAt).To(BeElementOf(candidates),
+			"the parent resolved, and one of the cycle's own names left alone")
+		Expect(paths).To(ConsistOf(
 			gaveUpAt, gaveUpAt+"-wal", gaveUpAt+"-shm", gaveUpAt+"-journal"),
-			"the parent resolved, the cycling name left alone")
+			"every derived name built from the one it gave up at")
 	})
 
 	// The upgrade boundary the resolution created. A process on a version that

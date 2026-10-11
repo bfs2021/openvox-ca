@@ -17,7 +17,7 @@
 
 //go:build !windows
 
-package storage
+package storage_test
 
 import (
 	"context"
@@ -27,6 +27,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // CheckKeyPermissions is the whole of the control now: nothing corrects a mode,
@@ -34,10 +36,10 @@ import (
 // is world versus group -- world means every local account can read the CA private
 // key and is refused at startup, group is what a Kubernetes fsGroup reapplies at
 // every mount and is only warned about.
-var _ = Describe("CheckKeyPermissions", func() {
+var _ = Describe("CheckKeyPermissions, over backends and wrappers", func() {
 	// findFor returns the warning for path, or nil. Specs assert on the classified
 	// finding rather than on list positions, which reorder as sources are added.
-	findFor := func(warnings []KeyPermWarning, path string) *KeyPermWarning {
+	findFor := func(warnings []storage.KeyPermWarning, path string) *storage.KeyPermWarning {
 		for i := range warnings {
 			if warnings[i].Path == path {
 				return &warnings[i]
@@ -51,13 +53,13 @@ var _ = Describe("CheckKeyPermissions", func() {
 
 		BeforeEach(func() {
 			dir = GinkgoT().TempDir()
-			Expect(os.MkdirAll(filepath.Join(dir, "private"), DirPerm)).To(Succeed())
+			Expect(os.MkdirAll(filepath.Join(dir, "private"), storage.DirPerm)).To(Succeed())
 			keyPath = filepath.Join(dir, "private", "ca_key.pem")
 		})
 
-		serviceOn := func() *StorageService {
+		serviceOn := func() *storage.StorageService {
 			GinkgoHelper()
-			return NewWithBackend(NewFilesystemBackend(dir), filepath.Join(dir, "private"))
+			return storage.NewWithBackend(storage.NewFilesystemBackend(dir), filepath.Join(dir, "private"))
 		}
 
 		It("says nothing about a key at 0600", func() {
@@ -101,15 +103,15 @@ var _ = Describe("CheckKeyPermissions", func() {
 
 	Describe("a backend that declares its own key files", func() {
 		var dbPath string
-		var svc *StorageService
+		var svc *storage.StorageService
 
 		BeforeEach(func() {
 			dbPath = filepath.Join(GinkgoT().TempDir(), "ca.db")
-			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
-			Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+			b, err := storage.NewSQLBackend(storage.SQLConfig{Dialect: storage.SQLitePure, DSN: "file:" + dbPath})
+			Expect(err).NotTo(HaveOccurred(), "storage.NewSQLBackend")
 			DeferCleanup(func() { _ = b.Close() })
 			Expect(b.EnsureReady(context.Background())).To(Succeed(), "EnsureReady")
-			Expect(b.Put(context.Background(), KeyCAKey, []byte("key"), BlobPrivate)).To(Succeed(), "Put CA key")
+			Expect(b.Put(context.Background(), storage.KeyCAKey, []byte("key"), storage.BlobPrivate)).To(Succeed(), "Put CA key")
 
 			// The backend reports the resolved path, since everything derived from
 			// the DSN comes from one resolution. On a host where the temp directory
@@ -122,7 +124,7 @@ var _ = Describe("CheckKeyPermissions", func() {
 
 			// No local private-key directory: the database is the only source, so a
 			// finding here can only have come through KeyFileLister.
-			svc = NewWithBackend(b, "")
+			svc = storage.NewWithBackend(b, "")
 		})
 
 		// A group-accessible database is reported, but as a group finding: the
@@ -183,7 +185,7 @@ var _ = Describe("CheckKeyPermissions", func() {
 		Expect(os.Chmod(keyDir, 0o000)).To(Succeed(), "make it unreadable")
 		DeferCleanup(func() { _ = os.Chmod(keyDir, 0o700) })
 
-		svc := NewWithBackend(NewFilesystemBackend(dir), keyDir)
+		svc := storage.NewWithBackend(storage.NewFilesystemBackend(dir), keyDir)
 
 		w := findFor(svc.CheckKeyPermissions(), keyDir)
 		Expect(w).NotTo(BeNil(), "a finding for the unreadable directory")
@@ -205,10 +207,10 @@ var _ = Describe("CheckKeyPermissions", func() {
 		link := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
 		Expect(os.Symlink(target, link)).To(Succeed(), "project it as a link, as a Secret mount does")
 
-		ov, err := NewOverlayBackend(NewFilesystemBackend(dir), map[string]string{KeyCAKey: link})
-		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+		ov, err := storage.NewOverlayBackend(storage.NewFilesystemBackend(dir), map[string]string{storage.KeyCAKey: link})
+		Expect(err).NotTo(HaveOccurred(), "storage.NewOverlayBackend")
 
-		w := findFor(NewWithBackend(ov, "").CheckKeyPermissions(), link)
+		w := findFor(storage.NewWithBackend(ov, "").CheckKeyPermissions(), link)
 		Expect(w).NotTo(BeNil(), "a finding for the symlinked key")
 		Expect(w.WorldAccessible()).To(BeTrue(), "the target is world-readable")
 	})
@@ -222,10 +224,10 @@ var _ = Describe("CheckKeyPermissions", func() {
 		link := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
 		Expect(os.Symlink(target, link)).To(Succeed(), "project it as a link")
 
-		ov, err := NewOverlayBackend(NewFilesystemBackend(dir), map[string]string{KeyCAKey: link})
-		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+		ov, err := storage.NewOverlayBackend(storage.NewFilesystemBackend(dir), map[string]string{storage.KeyCAKey: link})
+		Expect(err).NotTo(HaveOccurred(), "storage.NewOverlayBackend")
 
-		Expect(NewWithBackend(ov, "").CheckKeyPermissions()).To(BeEmpty(), "a correct key behind a link")
+		Expect(storage.NewWithBackend(ov, "").CheckKeyPermissions()).To(BeEmpty(), "a correct key behind a link")
 	})
 
 	// A dangling link is the third outcome, and the one with teeth: a Kubernetes
@@ -240,10 +242,10 @@ var _ = Describe("CheckKeyPermissions", func() {
 		link := filepath.Join(GinkgoT().TempDir(), "ca_key.pem")
 		Expect(os.Symlink(filepath.Join(dir, "gone_key.pem"), link)).To(Succeed(), "a link to nothing")
 
-		ov, err := NewOverlayBackend(NewFilesystemBackend(dir), map[string]string{KeyCAKey: link})
-		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+		ov, err := storage.NewOverlayBackend(storage.NewFilesystemBackend(dir), map[string]string{storage.KeyCAKey: link})
+		Expect(err).NotTo(HaveOccurred(), "storage.NewOverlayBackend")
 
-		Expect(NewWithBackend(ov, "").CheckKeyPermissions()).To(BeEmpty(),
+		Expect(storage.NewWithBackend(ov, "").CheckKeyPermissions()).To(BeEmpty(),
 			"nothing to judge, and nothing was written through it either")
 	})
 
@@ -254,12 +256,12 @@ var _ = Describe("CheckKeyPermissions", func() {
 	It("reports a path reachable from two sources only once", func() {
 		dir := GinkgoT().TempDir()
 		priv := filepath.Join(dir, "private")
-		Expect(os.MkdirAll(priv, DirPerm)).To(Succeed())
+		Expect(os.MkdirAll(priv, storage.DirPerm)).To(Succeed())
 		shared := filepath.Join(priv, ".ca_key_passphrase")
 		Expect(os.WriteFile(shared, nil, 0o600)).To(Succeed(), "seed it")
 		Expect(os.Chmod(shared, 0o644)).To(Succeed(), "world-readable, whatever the umask")
 
-		svc := NewWithBackend(NewFilesystemBackend(dir), priv)
+		svc := storage.NewWithBackend(storage.NewFilesystemBackend(dir), priv)
 
 		// Named by the caller as well as found by the directory scan.
 		warnings := svc.CheckKeyPermissions(shared)
@@ -284,11 +286,11 @@ var _ = Describe("CheckKeyPermissions", func() {
 	Describe("a wrapper backend that does not forward KeyFilePaths", func() {
 		It("still judges the key files the wrapped backend declares", func() {
 			dbPath := filepath.Join(GinkgoT().TempDir(), "ca.db")
-			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
+			b, err := storage.NewSQLBackend(storage.SQLConfig{Dialect: storage.SQLitePure, DSN: "file:" + dbPath})
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() { _ = b.Close() })
 			Expect(b.EnsureReady(context.Background())).To(Succeed())
-			Expect(b.Put(context.Background(), KeyCAKey, []byte("key"), BlobPrivate)).To(Succeed())
+			Expect(b.Put(context.Background(), storage.KeyCAKey, []byte("key"), storage.BlobPrivate)).To(Succeed())
 
 			resolved, err := filepath.EvalSymlinks(dbPath)
 			Expect(err).NotTo(HaveOccurred())
@@ -296,7 +298,7 @@ var _ = Describe("CheckKeyPermissions", func() {
 
 			// Unwrap is all this wrapper offers. It deliberately has no
 			// KeyFilePaths method of its own: that is the shape under test.
-			svc := NewWithBackend(&unforwardingWrapper{Backend: b}, "")
+			svc := storage.NewWithBackend(&unforwardingWrapper{Backend: b}, "")
 
 			warnings := svc.CheckKeyPermissions()
 
@@ -316,10 +318,10 @@ var _ = Describe("CheckKeyPermissions", func() {
 		func(create func(path string)) {
 			dir := GinkgoT().TempDir()
 			priv := filepath.Join(dir, "private")
-			Expect(os.MkdirAll(priv, DirPerm)).To(Succeed())
+			Expect(os.MkdirAll(priv, storage.DirPerm)).To(Succeed())
 			create(filepath.Join(priv, "notafile"))
 
-			svc := NewWithBackend(NewFilesystemBackend(dir), priv)
+			svc := storage.NewWithBackend(storage.NewFilesystemBackend(dir), priv)
 
 			Expect(svc.CheckKeyPermissions()).To(BeEmpty(), "nothing to judge")
 		},
@@ -353,10 +355,10 @@ var _ = Describe("CheckKeyPermissions", func() {
 		Expect(os.Chmod(hidden, 0o000)).To(Succeed(), "make the target unreachable")
 		DeferCleanup(func() { _ = os.Chmod(hidden, 0o700) })
 
-		ov, err := NewOverlayBackend(NewFilesystemBackend(dir), map[string]string{KeyCAKey: link})
-		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+		ov, err := storage.NewOverlayBackend(storage.NewFilesystemBackend(dir), map[string]string{storage.KeyCAKey: link})
+		Expect(err).NotTo(HaveOccurred(), "storage.NewOverlayBackend")
 
-		w := findFor(NewWithBackend(ov, "").CheckKeyPermissions(), link)
+		w := findFor(storage.NewWithBackend(ov, "").CheckKeyPermissions(), link)
 		Expect(w).NotTo(BeNil(), "a finding for the unjudgeable target")
 		Expect(w.Unreadable).To(BeTrue(), "recorded as unjudgeable, not as a mode")
 		Expect(w.WorldAccessible()).To(BeTrue(), "which fails closed")
@@ -377,11 +379,11 @@ var _ = Describe("CheckKeyPermissions", func() {
 		Expect(os.Chmod(parent, 0o000)).To(Succeed(), "make it unsearchable")
 		DeferCleanup(func() { _ = os.Chmod(parent, 0o700) })
 
-		ov, err := NewOverlayBackend(NewFilesystemBackend(GinkgoT().TempDir()),
-			map[string]string{KeyCAKey: keyPath})
-		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+		ov, err := storage.NewOverlayBackend(storage.NewFilesystemBackend(GinkgoT().TempDir()),
+			map[string]string{storage.KeyCAKey: keyPath})
+		Expect(err).NotTo(HaveOccurred(), "storage.NewOverlayBackend")
 
-		w := findFor(NewWithBackend(ov, "").CheckKeyPermissions(), keyPath)
+		w := findFor(storage.NewWithBackend(ov, "").CheckKeyPermissions(), keyPath)
 		Expect(w).NotTo(BeNil(), "a finding for the unreachable key file")
 		Expect(w.Unreadable).To(BeTrue(), "recorded as unjudgeable")
 		Expect(w.WorldAccessible()).To(BeTrue(), "fails closed")
@@ -390,12 +392,12 @@ var _ = Describe("CheckKeyPermissions", func() {
 	// An in-memory database has no files, and a backend that declares none must
 	// not produce phantom findings for paths that do not exist.
 	It("reports nothing for a backend with no files", func() {
-		b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: ":memory:"})
-		Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+		b, err := storage.NewSQLBackend(storage.SQLConfig{Dialect: storage.SQLitePure, DSN: ":memory:"})
+		Expect(err).NotTo(HaveOccurred(), "storage.NewSQLBackend")
 		DeferCleanup(func() { _ = b.Close() })
 		Expect(b.EnsureReady(context.Background())).To(Succeed(), "EnsureReady")
 
-		Expect(NewWithBackend(b, "").CheckKeyPermissions()).To(BeEmpty(), "warnings for an in-memory store")
+		Expect(storage.NewWithBackend(b, "").CheckKeyPermissions()).To(BeEmpty(), "warnings for an in-memory store")
 	})
 })
 
@@ -403,7 +405,7 @@ var _ = Describe("CheckKeyPermissions", func() {
 // KeyFileLister, no PathProvider. Every capability probe has to walk through it
 // to find what the base declares, which is the property the spec above drives.
 type unforwardingWrapper struct {
-	Backend
+	storage.Backend
 }
 
-func (w *unforwardingWrapper) Unwrap() Backend { return w.Backend }
+func (w *unforwardingWrapper) Unwrap() storage.Backend { return w.Backend }
