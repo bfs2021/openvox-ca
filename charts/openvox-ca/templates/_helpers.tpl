@@ -1106,10 +1106,11 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   cannot be narrowed by resourceNames. create on Secrets is enough to mint a
   kubernetes.io/service-account-token Secret for any ServiceAccount in scope, so
   cluster-wide it reaches kube-system's. Nothing needs it: the Role scope binds
-  into each namespace listed in rbac.namespaces, which covers every target the
-  exporter can name. So the cluster-wide grant renders only once the operator
-  has said in values that they accept it — a NOTES warning alone never reaches
-  helm template, Argo CD or Flux.
+  into the release namespace, where a target without a namespace lands, and
+  into each namespace listed in rbac.namespaces, which together cover every
+  target the exporter can name. So the cluster-wide grant renders only once the
+  operator has said in values that they accept it — a NOTES warning alone never
+  reaches helm template, Argo CD or Flux.
 
   Keyed on exportRBACRendered, like the export's default-ServiceAccount refusal,
   so it fires exactly when rbac.yaml would render the ClusterRole and never when
