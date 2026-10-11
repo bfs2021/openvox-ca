@@ -1637,9 +1637,31 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(Equal(fmt.Sprintf(withoutCSR, "signed-node")))
 		})
 
+		It("answers 409 for a subject whose certificate the inventory has no line for", func() {
+			// The certificate alone must be enough, as upstream's
+			// certificate-exists? is. Every other 409 here also has an
+			// inventory line, which would answer on its own; a cadir migrated
+			// from Puppet Server, or an inventory rolled back, can lack it.
+			ctx := context.Background()
+			issue(mux, "orphan-node")
+			Expect(os.WriteFile(myCA.Storage.InventoryPath(), nil, 0o600)).To(Succeed())
+			// Reseal it, as migration does, so the integrity check accepts
+			// the shorter inventory rather than refusing it as tampered.
+			Expect(myCA.Storage.RebuildInventoryHMAC(ctx)).To(Succeed())
+			Expect(myCA.Storage.HasCert(ctx, "orphan-node")).To(BeTrue())
+			_, err := myCA.Storage.LatestSerialForSubject(ctx, "orphan-node")
+			Expect(err).To(MatchError(os.ErrNotExist),
+				"the inventory must have no line for the subject, or it is not the certificate that answers")
+
+			rr := putStatus(mux, "orphan-node", "signed")
+			Expect(rr.Code).To(Equal(http.StatusConflict))
+			Expect(rr.Body.String()).To(Equal(fmt.Sprintf(withoutCSR, "orphan-node")))
+		})
+
 		It("answers 409 for a revoked subject, which keeps its certificate", func() {
 			issue(mux, "revoked-node")
 			Expect(putStatus(mux, "revoked-node", "revoked").Code).To(Equal(http.StatusNoContent))
+			Expect(myCA.Storage.HasCert(context.Background(), "revoked-node")).To(BeTrue())
 
 			rr := putStatus(mux, "revoked-node", "signed")
 			Expect(rr.Code).To(Equal(http.StatusConflict))
@@ -1684,7 +1706,7 @@ var _ = Describe("API Workflow", func() {
 			})
 
 			DescribeTable("answers 503 when a read fails for a reason other than absence",
-				func(key func(subject string) string) {
+				func(key func(subject string) string, names string) {
 					// Unfaulted, each of these subjects answers 404, so the
 					// fault is what moves it.
 					Expect(putStatus(handler, "fault-node", "signed").Code).To(Equal(http.StatusNotFound))
@@ -1692,13 +1714,14 @@ var _ = Describe("API Workflow", func() {
 					backend.fail[key("fault-node")] = true
 					rr := putStatus(handler, "fault-node", "signed")
 					Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+					Expect(rr.Body.String()).To(ContainSubstring(names), "the body names the read that failed")
 					Expect(rr.Body.String()).To(ContainSubstring("see the server log"))
 					Expect(rr.Body.String()).NotTo(ContainSubstring("backend unavailable"),
 						"the cause belongs in the log, not the body")
 				},
-				Entry("the CSR", storage.CSRKey),
-				Entry("the certificate", storage.CertKey),
-				Entry("the inventory", func(string) string { return storage.KeyInventory }),
+				Entry("the CSR", storage.CSRKey, "the certificate request"),
+				Entry("the certificate", storage.CertKey, "certificate or inventory entry"),
+				Entry("the inventory", func(string) string { return storage.KeyInventory }, "certificate or inventory entry"),
 			)
 		})
 	})
