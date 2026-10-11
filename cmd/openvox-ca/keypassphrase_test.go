@@ -73,7 +73,7 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 		// The fixture is worthless if it did not actually encrypt: a plaintext
 		// key needs no passphrase, so every assertion below would pass on a
 		// server that simply started.
-		keyPEM, err := os.ReadFile(filepath.Join(caDir, "private", "ca_key.pem"))
+		keyPEM, err := os.ReadFile(caKeyPathIn(caDir))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(keyPEM)).To(ContainSubstring("ENCRYPTED PRIVATE KEY"),
 			"the fixture must hold an encrypted key, or these specs prove nothing")
@@ -132,7 +132,7 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 		// preflight's placement argument is that a check after CA.Init would
 		// mint a key into a store it then declines to serve; the same holds
 		// here, and nothing else in this file would notice if it stopped.
-		Expect(filepath.Join(caDir, "private", "ca_key.pem")).NotTo(BeAnExistingFile(),
+		Expect(caKeyPathIn(caDir)).NotTo(BeAnExistingFile(),
 			"the refusal must come before a key is written")
 	})
 
@@ -170,7 +170,7 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 		caDir := GinkgoT().TempDir()
 		bootstrapCAInDir(caDir, "puppet.example.com")
 
-		keyPEM, err := os.ReadFile(filepath.Join(caDir, "private", "ca_key.pem"))
+		keyPEM, err := os.ReadFile(caKeyPathIn(caDir))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(keyPEM)).NotTo(ContainSubstring("ENCRYPTED PRIVATE KEY"),
 			"this fixture's point is that the stored key is plaintext")

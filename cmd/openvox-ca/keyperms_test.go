@@ -43,6 +43,36 @@ import (
 // The two halves are separate functions because they run at different points:
 // the refusal happens in the parent before any logger exists, and the reporting
 // once one does, so that it reaches a configured logfile.
+// caKeyPathIn asks the store where the CA private key lives, instead of
+// assembling the path from the layout.
+//
+// Any spec that touches the key file on disk goes through this. The layout is
+// the store's to define, and #399 moves the CA key out of private/ to the top
+// of the cadir, so a spec that joins "private" and "ca_key.pem" itself asserts
+// against a path that will not hold the key. The loud half of that is a spec
+// that fails; the dangerous half is quiet -- an assertion that the key does
+// *not* exist at a given path, which is how the pre-fork ordering claims here
+// are written, passes trivially once the path is wrong, and the property stops
+// being checked without anything going red.
+//
+// The emptiness check is not ceremony: CAKeyPath returns "" for a backend that
+// implements no PathProvider, and "" satisfies NotTo(BeAnExistingFile()) just
+// as readily as a moved path would.
+//
+// Three paths in this file are deliberately *not* routed through here, and the
+// difference is whether a file is involved. They build a KeyPermWarning to hand
+// to a renderer or to logKeyPermissions, where Path is a string being formatted
+// and nothing opens it -- one of them names a directory holding no CA at all.
+// A literal is the honest fixture there, and sending it through the store would
+// suggest a filesystem dependency the spec does not have.
+func caKeyPathIn(caDir string) string {
+	GinkgoHelper()
+	p := storage.New(caDir).CAKeyPath()
+	Expect(p).NotTo(BeEmpty(),
+		"the store must be able to name its CA key, or an assertion about that path proves nothing")
+	return p
+}
+
 var _ = Describe("key-material permissions at startup", func() {
 	// captureAt installs a handler at the given level and returns what was
 	// written, the idiom this package already uses for log assertions.
@@ -465,7 +495,7 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		GinkgoHelper()
 		caDir := GinkgoT().TempDir()
 		bootstrapCAInDir(caDir, "puppet.example.com")
-		keyPath := filepath.Join(caDir, "private", "ca_key.pem")
+		keyPath := caKeyPathIn(caDir)
 		Expect(keyPath).To(BeAnExistingFile(), "the bootstrapped CA key")
 		Expect(os.Chmod(keyPath, 0o644)).To(Succeed(), "make it world-readable")
 		return caDir
@@ -761,7 +791,7 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 
 		// The assertion the other specs cannot make: nothing was minted into a
 		// store the server had already decided not to serve.
-		Expect(filepath.Join(caDir, "private", "ca_key.pem")).NotTo(BeAnExistingFile(),
+		Expect(caKeyPathIn(caDir)).NotTo(BeAnExistingFile(),
 			"no CA key may be written on the way to refusing")
 		Expect(filepath.Join(caDir, "ca_crt.pem")).NotTo(BeAnExistingFile(),
 			"and no CA certificate either")
