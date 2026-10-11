@@ -4822,6 +4822,16 @@ config:
 			notWants:   []string{"PGSECRET"},
 		},
 		{
+			// The server recognises a SQLite URI by a case-sensitive "file:"
+			// (sqliteFilePath in internal/storage/sql.go), so the exemption
+			// does too: FILE: is no SQLite URI, and its colon counts.
+			name:       "an upper-case FILE: sql_dsn with an @ under a sqlite backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'FILE:ca:SQLSECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"SQLSECRET"},
+		},
+		{
 			// Even a SQLite path faces the password= check.
 			name:       "a SQLite sql_dsn carrying a password= parameter under a sqlite backend",
 			sets:       []string{tls},

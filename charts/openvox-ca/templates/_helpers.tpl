@@ -1281,7 +1281,7 @@ Returns "true", or nothing.
 {{- $dsn := .dsn -}}
 {{- $backend := lower (trim .backend) -}}
 {{- $userinfo := "" -}}
-{{- if not (and (has $backend (list "sqlite" "sqlite3")) (regexMatch "(?i)^file:" $dsn)) -}}
+{{- if not (and (has $backend (list "sqlite" "sqlite3")) (hasPrefix "file:" $dsn)) -}}
 {{- $rest := $dsn -}}
 {{- if and (not (has $backend (list "mysql" "mariadb"))) (regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn) -}}
 {{- $rest = regexReplaceAll "(?s)^[^:]*://" $dsn "" -}}
