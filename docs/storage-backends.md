@@ -697,7 +697,9 @@ arbitrary-uid platform work — one assigning the pod a fresh uid per start, suc
 as OpenShift. The database would be reachable, but the same restart has to
 reacquire the same-host lock files, and those are created `0600` in a `0750`
 directory, so a new uid fails at the lock before the database mode matters. If
-you run that topology, pin the uid.
+you run that topology, pin the uid;
+[#493](https://github.com/voxpupuli/openvox-ca/issues/493) tracks what it would
+take to support it.
 
 **`openvox-ca` never changes the mode of a file it did not create.** Not the
 database, not the sidecars, not the directory holding them. A store whose

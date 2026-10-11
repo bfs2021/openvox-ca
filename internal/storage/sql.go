@@ -121,7 +121,7 @@ const (
 	// newFileLocks below and instancelock.go. A second uid can neither open an
 	// inherited lock file nor create one, so it fails at the lock whatever the
 	// database mode is. Making that platform work means addressing the lock
-	// files, which is tracked separately; it is not something this constant can
+	// files, which is issue #493; it is not something this constant can
 	// deliver, and claiming it did sent an operator looking in the wrong place.
 	//
 	// What it costs is real and worth stating: on a systemd or package install
