@@ -194,17 +194,6 @@ on every backend; failing that, what protects it at rest is whatever protects
 the store itself. For SQLite that is the mode of the database file and its
 sidecars; see [storage backends](storage-backends.md#sqlite-backend).
 
-One historical caveat, now closed by the same change that stopped generating
-passphrases. The resolver is given a base directory by the backend and only the
-filesystem backend supplies one, so on every other backend a generated
-passphrase landed in `private/.ca_key_passphrase` relative to the **process
-working directory** rather than under `cadir` —
-[#375](https://github.com/voxpupuli/openvox-ca/issues/375). Nothing writes that
-file any more, so there is no longer a path to get wrong. A store bootstrapped
-by an older version on a non-filesystem backend may still have one in whatever
-directory the server was started from; that is where to look for it when
-configuring `ca_key_passphrase_file`.
-
 ### How it works
 
 - The private key is marshalled to PKCS#8 DER, then encrypted with AES-256-GCM.
@@ -231,11 +220,6 @@ the key it protects. That made the guarantee at the top of this page false for
 the default configuration: encryption at rest is protection against a copied
 backup, disk image or snapshot, and a copy of the cadir carried the ciphertext
 and the passphrase together. Anyone holding the copy held both halves.
-
-**If your CA was bootstrapped that way**, the generated file is still a perfectly
-good passphrase and nothing has been lost. The refusal names it, and the remedy
-is to point `ca_key_passphrase_file` at that path — after which it is worth
-moving it somewhere your cadir backups do not reach, since that was the point.
 
 A passphrase file readable by every local account makes the server **refuse to
 start** as well, whichever backend you run: it unlocks the encrypted key, so

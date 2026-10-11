@@ -732,14 +732,6 @@ at the link. Everything derived from the DSN — the sidecar names, and the
 `.<database>.locks/` directory — comes from the resolved path, so two processes
 reaching one database by different spellings still lock against each other.
 
-That is a change of location for an existing store whose DSN traverses a symlink
-— including a symlinked parent, such as a bind mount or a relocated
-`/var/lib`. Earlier versions locked beside the DSN spelling; this one locks
-beside the target, so a process on each version does **not** exclude the other.
-Upgrade the server and `openvox-ca-ctl` together, and once nothing on the old
-version remains you can remove the `.<database>.locks/` directory left beside
-the link.
-
 Because creation follows the link, the directory holding the DSN path must not
 be writable by untrusted users: whoever can plant a symlink there chooses where
 the database is created. That is the same precondition the sidecars need, for
