@@ -190,13 +190,13 @@ carries any of these:
 A `sql_dsn` carries a password when its user part has one
 (`postgres://user:password@…`, `user:password@tcp(…)/…`) or when it has a
 `password=` parameter, spaces around the `=` included. The chart errs towards
-refusal: it refuses any colon
-followed by text before the DSN's last `@`, after setting a `postgres://`,
-`postgresql://` or `unix://` scheme aside unless `storage_backend` is `mysql`
-or `mariadb`. That also catches a password containing `/`, `?` or `#`, which
-a URL DSN cannot carry unescaped. It also refuses a working DSN with an `@`
-after its host, in a database name or a query value, when a port or other
-colon comes before it; move that one to `extraEnv` as well.
+refusal: it refuses any colon followed by text before the DSN's last `@`,
+after setting a `postgres://`, `postgresql://` or `unix://` scheme aside
+unless `storage_backend` is `mysql` or `mariadb`. That also catches a password
+containing `/`, `?` or `#`, which a URL DSN cannot carry unescaped. It also
+refuses a working DSN with an `@` after its host, in a database name or a
+query value, when a port or other colon comes before it; move that one to
+`extraEnv` as well.
 
 One without a password can stay in `config`. Under a `sqlite` backend, a
 `file:` DSN faces only the `password=` check, since a SQLite path may hold an
