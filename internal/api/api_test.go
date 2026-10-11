@@ -1706,10 +1706,15 @@ var _ = Describe("API Workflow", func() {
 			})
 
 			DescribeTable("answers 503 when a read fails for a reason other than absence",
-				func(key func(subject string) string, names string) {
+				func(key func(subject string) string, names, logged string) {
 					// Unfaulted, each of these subjects answers 404, so the
 					// fault is what moves it.
 					Expect(putStatus(handler, "fault-node", "signed").Code).To(Equal(http.StatusNotFound))
+
+					logBuf := &bytes.Buffer{}
+					orig := slog.Default()
+					slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+					DeferCleanup(func() { slog.SetDefault(orig) })
 
 					backend.fail[key("fault-node")] = true
 					rr := putStatus(handler, "fault-node", "signed")
@@ -1718,10 +1723,16 @@ var _ = Describe("API Workflow", func() {
 					Expect(rr.Body.String()).To(ContainSubstring("see the server log"))
 					Expect(rr.Body.String()).NotTo(ContainSubstring("backend unavailable"),
 						"the cause belongs in the log, not the body")
+					// The body sends the operator to the log, so the log has to
+					// name the cause, on the line this branch writes.
+					Expect(strings.Split(logBuf.String(), "\n")).To(ContainElement(
+						And(ContainSubstring(logged), ContainSubstring("backend unavailable"))))
 				},
-				Entry("the CSR", storage.CSRKey, "the certificate request"),
-				Entry("the certificate", storage.CertKey, "certificate or inventory entry"),
-				Entry("the inventory", func(string) string { return storage.KeyInventory }, "certificate or inventory entry"),
+				Entry("the CSR", storage.CSRKey, "the certificate request", "Sign failed"),
+				Entry("the certificate", storage.CertKey, "certificate or inventory entry",
+					"could not determine whether the subject was ever issued"),
+				Entry("the inventory", func(string) string { return storage.KeyInventory }, "certificate or inventory entry",
+					"could not determine whether the subject was ever issued"),
 			)
 		})
 	})
