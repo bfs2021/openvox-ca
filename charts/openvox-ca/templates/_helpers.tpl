@@ -306,14 +306,14 @@ false
 Whether the export Role and its bindings are rendered — export configured *and*
 rbac.create.
 
-One definition because several places need it and they have twice drifted apart:
-rbac.yaml renders on it, the default-ServiceAccount and cluster-wide-create
-refusals guard it, and two NOTES warnings disclose the cluster-wide and the
-unnarrowed patch grants it produces. Moving rbac.yaml
-onto exportConfigured while leaving the refusal on kubernetesExport.enabled
-opened a privilege escalation; fixing the refusal while leaving the NOTES warning
-behind then hid the residual over-grant on the same route. Both were the same
-mistake: one side of a coupling moved.
+One definition because several places need it and they have twice drifted
+apart: rbac.yaml renders on it, the default-ServiceAccount and
+cluster-wide-create refusals guard it, and two NOTES warnings disclose the
+cluster-wide and the unnarrowed patch grants it produces. Moving rbac.yaml onto
+exportConfigured while leaving the refusal on kubernetesExport.enabled opened a
+privilege escalation; fixing the refusal while leaving the NOTES warning behind
+then hid the residual over-grant on the same route. Both were the same mistake:
+one side of a coupling moved.
 */}}
 {{- define "openvox-ca.exportRBACRendered" -}}
 {{- if and (eq (include "openvox-ca.exportConfigured" .) "true") .Values.kubernetesExport.rbac.create -}}

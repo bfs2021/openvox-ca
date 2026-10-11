@@ -3669,6 +3669,18 @@ config:
 			wants: []string{"patch on every"},
 		},
 		{
+			// And the cluster-wide warning by the same route, for the same
+			// reason: keyed on the chart's flag, it would stay silent about a
+			// ClusterRole the config route rendered.
+			name:  "NOTES warns about cluster-wide Secret create by the config route too",
+			notes: true,
+			sets: []string{tls, "kubernetesExport.rbac.scope=ClusterRole",
+				"kubernetesExport.rbac.allowClusterWideSecretCreate=true",
+				"config.kubernetes_export.targets[0].kind=Secret",
+				"config.kubernetes_export.targets[0].metadata.name=ca-bundle"},
+			wants: []string{"created as a ClusterRole"},
+		},
+		{
 			name:  "NOTES warns that an ephemeral cadir throws the CA away",
 			notes: true,
 			// The most consequential of the nine warnings: the filesystem
@@ -4591,10 +4603,10 @@ config:
 			wantErr: "additional properties",
 		},
 		{
-			// The precondition reads allowClusterWideSecretCreate for truth, and a
-			// non-empty string is true to a template — so a quoted "false", or
-			// --set-string, would grant the ClusterRole. The schema's boolean type
-			// is what refuses it. Helm 3 and 4 both word the error this way.
+			// A quoted "false", or --set-string, is a non-empty string, which a
+			// template reads as true. The schema's boolean type is the first
+			// refusal; the case below pins the template's own, for when the
+			// schema is skipped. Helm 3 and 4 both word this error the same way.
 			name: "a quoted \"false\" for allowClusterWideSecretCreate",
 			valuesYAML: "tls:\n  existingSecret: s\nkubernetesExport:\n  enabled: true\n  rbac:\n" +
 				"    scope: ClusterRole\n    allowClusterWideSecretCreate: \"false\"\n",
