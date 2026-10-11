@@ -1734,6 +1734,26 @@ var _ = Describe("API Workflow", func() {
 				Entry("the inventory", func(string) string { return storage.KeyInventory }, "certificate or inventory entry",
 					"could not determine whether the subject was ever issued"),
 			)
+
+			// The table's subject is absent from both sources, so it cannot
+			// show the order they are read in. These two can: the certificate
+			// settles it on its own, and only its absence consults the
+			// inventory.
+			It("answers 409 from the certificate when only the inventory cannot be read", func() {
+				issue(handler, "held-node")
+				backend.fail[storage.KeyInventory] = true
+				rr := putStatus(handler, "held-node", "signed")
+				Expect(rr.Code).To(Equal(http.StatusConflict))
+				Expect(rr.Body.String()).To(Equal(fmt.Sprintf(withoutCSR, "held-node")))
+			})
+
+			It("answers 503, not 409 from the inventory, when the certificate cannot be read", func() {
+				issue(handler, "unread-node")
+				backend.fail[storage.CertKey("unread-node")] = true
+				rr := putStatus(handler, "unread-node", "signed")
+				Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+				Expect(rr.Body.String()).To(ContainSubstring("certificate or inventory entry"))
+			})
 		})
 	})
 
