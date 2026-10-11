@@ -1193,6 +1193,76 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- fail (printf "extraConfigFiles %q contains a carriage return or a Unicode line separator. Those are not re-indented into the ConfigMap, so the text after one would land at the data-key column and could take the place of a file the chart renders. Use plain newlines." $name) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+  `config` is written verbatim into a ConfigMap, which anyone allowed to read
+  ConfigMaps in the namespace can read, and which neither Secret RBAC nor
+  Secret encryption at rest covers. So a credential set there is refused rather
+  than rendered. The server also reads each of these from a PUPPET_CA_*
+  variable, and the environment outranks the config file, so extraEnv with
+  valueFrom.secretKeyRef is the remedy.
+
+  One entry per config key that can hold a credential inline, mapped to what
+  replaces it. OpenBao has none: its secret_id and token are only ever read
+  from files, and approle_role_id is an identifier the docs set inline.
+  sql_dsn counts only when it carries a password — see openvox-ca.dsnHasPassword
+  — because a DSN without one is not a secret, and SQLite's is a file path.
+
+  Not checked with existingConfigMap, where `config` reaches no object at all.
+  The value itself is never echoed, since the error lands in CI logs.
+*/}}
+{{- if not .Values.existingConfigMap -}}
+{{- $credentials := dict -}}
+{{- $_ := set $credentials "etcd_password" "PUPPET_CA_ETCD_PASSWORD" -}}
+{{- $_ := set $credentials "redis_password" "PUPPET_CA_REDIS_PASSWORD" -}}
+{{- $_ := set $credentials "redis_sentinel_password" "PUPPET_CA_REDIS_SENTINEL_PASSWORD" -}}
+{{- $_ := set $credentials "sql_dsn" "PUPPET_CA_SQL_DSN, writing the password as $(VAR) and setting VAR from the Secret earlier in extraEnv" -}}
+{{- $found := list -}}
+{{- range $key, $remedy := $credentials -}}
+{{- $value := index $config $key -}}
+{{- if and (not (kindIs "invalid" $value)) (ne (toString $value) "") -}}
+{{- if or (ne $key "sql_dsn") (eq (include "openvox-ca.dsnHasPassword" (toString $value)) "true") -}}
+{{- $found = append $found (printf "  config.%s: set %s instead" $key $remedy) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $found -}}
+{{- fail (printf "config holds a credential the chart would write in clear text into its ConfigMap, where anyone allowed to read ConfigMaps in the namespace can read it. Keep it in a Secret, drop it from config, and feed it in through extraEnv with valueFrom.secretKeyRef — environment variables outrank the config file:\n%s\nSee docs/helm-chart.md for a worked example." (join "\n" $found)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether a sql_dsn carries a password, splitting it the way the server's
+drivers do. The postgres://, postgresql:// and unix:// forms go through
+net/url, whose userinfo is the authority (up to the first /, ? or #) before its
+last @. Everything else goes go-sql-driver's way: cut at the last /, then take
+what precedes the last @ before that. Keying on those schemes rather than on
+any "scheme://" keeps a MySQL password that begins with // from being read as
+a URL. A password is then any text after the userinfo's first colon; an empty
+one is not a secret.
+
+A password= parameter counts wherever it appears, sslpassword included: no
+driver here takes a password that way, but the ConfigMap would hold it all the
+same, and erring towards refusal costs the operator one extraEnv entry.
+
+Returns "true", or nothing.
+*/}}
+{{- define "openvox-ca.dsnHasPassword" -}}
+{{- $dsn := . -}}
+{{- $userinfo := "" -}}
+{{- if regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn -}}
+{{- $authority := regexReplaceAll "(?s)^[^:]*://([^/?#]*).*$" $dsn "${1}" -}}
+{{- if contains "@" $authority -}}
+{{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $authority "${1}" -}}
+{{- end -}}
+{{- else -}}
+{{- $head := regexReplaceAll "(?s)^(.*)/.*$" $dsn "${1}" -}}
+{{- if contains "@" $head -}}
+{{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $head "${1}" -}}
+{{- end -}}
+{{- end -}}
+{{- if or (regexMatch "(?s)^[^:]*:." $userinfo) (regexMatch "(?i)password=[^&\\s]" $dsn) -}}true{{- end -}}
 {{- end -}}
 
 {{/*

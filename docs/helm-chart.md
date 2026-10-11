@@ -162,6 +162,26 @@ its pool slowly stops refilling. Restart the pods whenever the CA changes; the
 Reloader annotation described under [TLS](#tls-the-charts-most-important-setting)
 restarts them automatically when the mounted Secret changes.
 
+Backend credentials must come through the environment from a Secret, as in the
+`extraEnv` example above. `config` is rendered into a ConfigMap,
+which anyone allowed to read ConfigMaps in the namespace can read, and which
+Secret RBAC and Secret encryption at rest do not cover. So the install is
+refused, naming each key and the variable that replaces it, when `config`
+carries any of these:
+
+| In `config` | Set instead, from a Secret |
+| --- | --- |
+| `etcd_password` | `PUPPET_CA_ETCD_PASSWORD` |
+| `redis_password` | `PUPPET_CA_REDIS_PASSWORD` |
+| `redis_sentinel_password` | `PUPPET_CA_REDIS_SENTINEL_PASSWORD` |
+| `sql_dsn`, when it carries a password | `PUPPET_CA_SQL_DSN`, as above |
+
+A `sql_dsn` carries a password when its user part has one
+(`postgres://user:password@…`, `user:password@tcp(…)/…`) or when it has a
+`password=` parameter. One without, such as a SQLite file path, can stay in
+`config`. With `existingConfigMap` set the chart renders no ConfigMap, so
+nothing is refused, and what goes into yours is your own decision.
+
 ## Choosing an image
 
 The chart defaults to the **Alpine** image variant. With `image.tag` empty it

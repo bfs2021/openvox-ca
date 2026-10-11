@@ -57,6 +57,11 @@ commonAnnotations: {}
 # and `openbao` blocks. Keys set here override anything the convenience blocks
 # below would have computed.
 #
+# Credentials are the exception: this lands in a ConfigMap, so the install is
+# refused if it carries etcd_password, redis_password, redis_sentinel_password
+# or a sql_dsn with a password in it. Feed those in from a Secret through
+# extraEnv instead (see below).
+#
 # Example:
 #   config:
 #     storage_backend: postgres
