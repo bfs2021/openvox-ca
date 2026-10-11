@@ -1221,7 +1221,7 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- $_ := set $credentials "etcd_password" "PUPPET_CA_ETCD_PASSWORD" -}}
 {{- $_ := set $credentials "redis_password" "PUPPET_CA_REDIS_PASSWORD" -}}
 {{- $_ := set $credentials "redis_sentinel_password" "PUPPET_CA_REDIS_SENTINEL_PASSWORD" -}}
-{{- $_ := set $credentials "sql_dsn" "PUPPET_CA_SQL_DSN, writing the password as $(VAR) and setting VAR from the Secret earlier in extraEnv" -}}
+{{- $_ := set $credentials "sql_dsn" "PUPPET_CA_SQL_DSN from a Secret holding the whole DSN, or with the password as $(VAR) set from a Secret earlier in extraEnv (URL-encoded, for a URL)" -}}
 {{- $found := list -}}
 {{- range $key, $remedy := $credentials -}}
 {{- $value := index $config $key -}}
@@ -1265,8 +1265,11 @@ before that @, although it works. That is the direction to err in, and moving
 such a DSN into extraEnv is harmless.
 
 SQLite's DSN is a file path, which may hold an @ and starts "file:", so with a
-sqlite backend only the password= check below applies. Without one, a file:
-path containing @ falls into the class above.
+sqlite backend a "file:" DSN faces only the password= check below; a bare path
+needs no exemption, having no colon before its @. Both conditions are needed: the backend comes from
+`config`, which PUPPET_CA_STORAGE_BACKEND outranks, so a postgres or MySQL DSN
+left beside a sqlite backend is still judged as one. Without a sqlite backend,
+a file: path containing @ falls into the class above.
 
 A password= parameter counts wherever it appears, sslpassword included: no
 driver here takes a password that way, but the ConfigMap would hold it all the
@@ -1278,7 +1281,7 @@ Returns "true", or nothing.
 {{- $dsn := .dsn -}}
 {{- $backend := lower (trim .backend) -}}
 {{- $userinfo := "" -}}
-{{- if not (has $backend (list "sqlite" "sqlite3")) -}}
+{{- if not (and (has $backend (list "sqlite" "sqlite3")) (regexMatch "(?i)^file:" $dsn)) -}}
 {{- $rest := $dsn -}}
 {{- if and (not (has $backend (list "mysql" "mariadb"))) (regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn) -}}
 {{- $rest = regexReplaceAll "(?s)^[^:]*://" $dsn "" -}}

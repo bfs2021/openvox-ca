@@ -398,7 +398,8 @@ in `$credentials`; a new one needs adding there, with a reject case in
 `cmd/openvox-ca/config.go` whose yaml tag names a password, secret, token or
 DSN (`inlineCredentialKeys` in `magefile.go`). It reads tag names, not paths:
 a key in a nested block such as `openbao` still fails the check, but needs a
-`dig` for its path in `openvox-ca.validate` rather than a top-level entry. A
+`dig` for its path in `openvox-ca.validate` rather than a top-level entry, and
+a reject case naming that path (`config.openbao.<key>: set …`). A
 credential named otherwise, or declared outside those files, it cannot see,
 and the chart would render it in clear text without a word.
 

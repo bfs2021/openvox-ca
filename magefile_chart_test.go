@@ -165,7 +165,16 @@ var _ = Describe("uncoveredCredentialKeys", func() {
 	})
 
 	It("does not count a case for a longer key that ends in this one", func() {
-		Expect(uncoveredCredentialKeys([]string{"redis_password"}, rejects)).To(Equal([]string{"redis_password"}))
+		Expect(uncoveredCredentialKeys([]string{"sentinel_password"}, rejects)).To(Equal([]string{"sentinel_password"}))
+	})
+
+	It("does not count a case for a longer key that begins with this one", func() {
+		Expect(uncoveredCredentialKeys([]string{"redis_sentinel"}, rejects)).To(Equal([]string{"redis_sentinel"}))
+	})
+
+	It("counts a case naming the key under a nested block's path", func() {
+		nested := []chartRejectCase{{wantErr: "config.openbao.client_secret: set PUPPET_CA_OPENBAO_CLIENT_SECRET instead"}}
+		Expect(uncoveredCredentialKeys([]string{"client_secret"}, nested)).To(BeEmpty())
 	})
 
 	It("returns nothing when every key is covered", func() {

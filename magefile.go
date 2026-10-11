@@ -2450,7 +2450,8 @@ type chartRenderCase struct {
 //
 // The scan reads tag names, not paths, so a key in a nested block such as
 // openbao comes back bare. That is enough to fail the check below; the fix is
-// then a dig for its path in openvox-ca.validate, not a top-level entry.
+// then a dig for its path in openvox-ca.validate, not a top-level entry, and
+// a reject case expecting "config.openbao.<key>: set ".
 var inlineCredentialSources = []string{"internal/config/*.go", "cmd/openvox-ca/config.go"}
 
 // inlineCredentialKeyRe matches a yaml tag whose name says it holds a secret,
@@ -2495,12 +2496,14 @@ func inlineCredentialKeys(root string) ([]string, error) {
 }
 
 // uncoveredCredentialKeys returns the keys no reject case refuses, judged by
-// the per-key line openvox-ca.validate prints: "config.<key>: set ".
+// the per-key line openvox-ca.validate prints: "config.<key>: set ", or
+// "config.<block>.<key>: set " for a key in a nested block, whose real path is
+// what an operator needs to see.
 func uncoveredCredentialKeys(keys []string, rejects []chartRejectCase) []string {
 	var uncovered []string
 	for _, key := range keys {
-		marker := "config." + key + ": set "
-		if !slices.ContainsFunc(rejects, func(c chartRejectCase) bool { return strings.Contains(c.wantErr, marker) }) {
+		marker := regexp.MustCompile(`config\.(?:[a-z0-9_]+\.)*` + regexp.QuoteMeta(key) + `: set `)
+		if !slices.ContainsFunc(rejects, func(c chartRejectCase) bool { return marker.MatchString(c.wantErr) }) {
 			uncovered = append(uncovered, key)
 		}
 	}
@@ -4809,6 +4812,24 @@ config:
 			notWants:   []string{"MYSECRET"},
 		},
 		{
+			// The SQLite exemption needs the DSN to look like a SQLite path as
+			// well: the backend comes from config, which
+			// PUPPET_CA_STORAGE_BACKEND outranks, so this password may be live.
+			name:       "a postgres sql_dsn with a password under a sqlite backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'postgres://ca:PGSECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			// Even a SQLite path faces the password= check.
+			name:       "a SQLite sql_dsn carrying a password= parameter under a sqlite backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'file:/srv/ca.db?password=SQLSECRET'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"SQLSECRET"},
+		},
+		{
 			// The server folds case and accepts mariadb as an alias.
 			name:       "a postgres-looking sql_dsn under a MariaDB backend, read as MySQL",
 			sets:       []string{tls},
@@ -4967,7 +4988,7 @@ config:
 	for _, key := range credentialKeys {
 		name := fmt.Sprintf("config.%s is refused by a reject case", key)
 		if slices.Contains(uncovered, key) {
-			fmt.Printf("FAIL  %s\n      no reject case expects %q; add the key to $credentials in openvox-ca.validate (or, in a nested block, a dig for its path) and a case here\n", name, "config."+key+": set ")
+			fmt.Printf("FAIL  %s\n      no reject case expects \"config.%s: set \" (or the key under its block's path); add it to $credentials in openvox-ca.validate (or, in a nested block, a dig for its path) and a case here\n", name, key)
 			failures++
 		} else {
 			fmt.Printf("ok    %s\n", name)

@@ -138,7 +138,10 @@ extraVolumeMounts:
 ```
 
 Environment variables take precedence over the config file, which is what makes
-this work.
+this work. Kubernetes substitutes `$(POSTGRES_PASSWORD)` verbatim, so a password
+containing `/`, `?`, `#`, `%` or `@` must be stored URL-encoded for a URL DSN
+like this one. Alternatively, keep the whole DSN in the Secret and set
+`PUPPET_CA_SQL_DSN` itself with `valueFrom.secretKeyRef`.
 
 `sslmode=verify-full` checks that the database's certificate was issued by the
 CA in `sslrootcert` and names the host in the DSN, so mount that CA alongside.
@@ -180,15 +183,18 @@ carries any of these:
 A `sql_dsn` carries a password when its user part has one
 (`postgres://user:password@…`, `user:password@tcp(…)/…`) or when it has a
 `password=` parameter. The chart errs towards refusal: it refuses any colon
-followed by text before the DSN's last `@`, after setting a `postgres://`
-scheme aside unless `storage_backend` is `mysql` or `mariadb`. That catches a
-password with an unescaped `/`, `?` or `#`, which the server could not use
-either. It also refuses a working DSN with an `@` after its host, in a
-database name or a query value, when a port or other colon comes before it;
-move that one to `extraEnv` as well.
+followed by text before the DSN's last `@`, after setting a `postgres://`,
+`postgresql://` or `unix://` scheme aside unless `storage_backend` is `mysql`
+or `mariadb`. That also catches a password containing `/`, `?` or `#`, which
+a URL DSN cannot carry unescaped. It also refuses a working DSN with an `@`
+after its host, in a database name or a query value, when a port or other
+colon comes before it; move that one to `extraEnv` as well.
 
-One without a password can stay in `config`. Under a `sqlite` backend only a
-`password=` parameter counts, since a SQLite path may hold an `@`.
+One without a password can stay in `config`. Under a `sqlite` backend, a
+`file:` DSN faces only the `password=` check, since a SQLite path may hold an
+`@`. The chart reads `storage_backend` from `config`, which
+`PUPPET_CA_STORAGE_BACKEND` can override, so any other DSN is still judged as a
+network one.
 
 With `existingConfigMap` set the chart renders no ConfigMap, so nothing is
 refused, and what goes into yours is your own decision.
