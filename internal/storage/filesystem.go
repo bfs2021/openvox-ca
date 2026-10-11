@@ -282,9 +282,10 @@ func (b *FilesystemBackend) AppendLine(ctx context.Context, key string, data []b
 	//
 	// The chmod applies only on creation. Reasserting a mode on a file that was
 	// already there would be changing something the operator owns, which is the
-	// one thing this package does not do -- and on an arbitrary-uid platform it is
-	// a file this process may not even own. A failure is not fatal: the content is
-	// what matters, and the mode is already no wider than the umask allowed.
+	// one thing this package does not do -- and where the uid differs from the
+	// one that created the file, chmod(2) would fail EPERM anyway. A failure is
+	// not fatal: the content is what matters, and the mode is already no wider
+	// than the umask allowed.
 	//
 	// The fallback keeps O_CREATE because O_EXCL fails on a dangling symlink as
 	// well as on a file. Without it, appending through a link planted for a path

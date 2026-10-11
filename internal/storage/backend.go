@@ -128,16 +128,24 @@ type KeyPermWarning struct {
 	Err error
 }
 
-// WorldAccessible reports whether the mode grants any access to users outside
-// the owner and the group. That is the distinction the server acts on: world
-// access means every local account can read the CA private key and is refused,
-// while group access is tolerated because it is what a Kubernetes fsGroup
-// reapplies at every mount and how an arbitrary-uid platform reaches a store it
-// did not create.
+// WorldAccessible reports whether this finding should be refused: either the
+// mode grants access to users outside the owner and the group, or the path
+// could not be judged at all.
+//
+// The second half is as much the contract as the first, and is stated here
+// rather than only in the body because a caller reading the rendered godoc has
+// to know it: a permission this process cannot read is not one it may assume is
+// safe, so an unjudgeable path counts as world-accessible and callers refuse by
+// default. Mode is meaningless when Unreadable is set. Callers that can say
+// something better about that case -- naming the path as unreadable rather than
+// as world-readable -- test Unreadable first, and all of them do.
+//
+// World access means every local account can read the CA private key, and is
+// refused. Group access is tolerated: a Kubernetes fsGroup reapplies it at
+// every mount whatever a file was created as, so refusing on it would make the
+// most common containerised deployment unserveable through no act of the
+// operator's.
 func (w KeyPermWarning) WorldAccessible() bool {
-	// An unjudgeable path counts as world-accessible so that callers refuse by
-	// default: a permission this process cannot read is not one it may assume is
-	// safe. Callers that can say something better about it check Unreadable.
 	return w.Unreadable || w.Mode&0o007 != 0
 }
 

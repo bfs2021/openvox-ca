@@ -631,6 +631,59 @@ var _ = Describe("SQLiteFilePermissions", func() {
 	// other, and nothing here can prevent that -- the other process is the one
 	// holding the wrong lock. What it can do is say so where an operator will
 	// read it.
+	// The group bit on the database used to be justified by an arbitrary-uid
+	// platform: a fresh uid per start, reaching a database the previous uid
+	// created. That reasoning was wrong, and wrong in a way no assertion about
+	// the database could show, because what defeats it is a different file. The
+	// same restart has to reacquire the same-host locks, and those are owner-only
+	// in an owner-only directory, so a second uid fails there whatever the
+	// database allows.
+	//
+	// This pins the fact the narrowed justification now rests on. If the lock
+	// files ever become group-accessible, this spec fails and the comments at
+	// sqliteFilePermCreate, in AGENTS.md and in docs/storage-backends.md all
+	// become wrong together -- which is the point of pinning it here rather than
+	// trusting five prose copies to be revisited.
+	It("creates its same-host lock files owner-only, which the group bit cannot help", func() {
+		b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(b.Close()).To(Succeed()) })
+
+		// Take a lock so the file and its directory exist to be judged.
+		unlock, err := b.AcquireSameHostLock(context.Background(), "spec-probe")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(unlock.Unlock()).To(Succeed())
+
+		lockDir := sqliteLockDirFor(dbPath)
+		entries, err := os.ReadDir(lockDir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(entries).NotTo(BeEmpty(), "a lock file must exist, or this proves nothing")
+
+		// Group write is the bit that matters for the directory: measured at
+		// 0750, so a group member can traverse and list it but cannot create a
+		// lock file in it. Asserting no group bits at all would be false and
+		// would fail for the wrong reason.
+		di, err := os.Stat(lockDir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(di.Mode().Perm()&0o020).To(BeZero(),
+			"the lock directory is not group-writable, so another uid cannot create a lock here")
+
+		for _, e := range entries {
+			fi, err := os.Stat(filepath.Join(lockDir, e.Name()))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().Perm()&0o070).To(BeZero(),
+				"lock file "+e.Name()+" is owner-only, so another uid cannot open it")
+		}
+
+		// And the database beside it *is* group-accessible under this umask, so
+		// the two really do disagree -- which is the whole content of the
+		// finding this spec records.
+		dbi, err := os.Stat(dbPath)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(dbi.Mode().Perm()&0o040).NotTo(BeZero(),
+			"the database is group-readable while its locks are not")
+	})
+
 	Describe("a lock directory stranded beside the DSN's own spelling", func() {
 		captureWarnings := func() *bytes.Buffer {
 			GinkgoHelper()

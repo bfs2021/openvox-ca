@@ -306,17 +306,29 @@ Two halves, and both matter:
   the `-wal`/`-shm`/`-journal` modes from the database at creation and never
   revisits them. `AtomicWriteFile` and `AppendLine` set the mode on the
   descriptor *after* creating it, so for those two the blob kind decides the
-  mode outright and the umask does not narrow it either. The umask-narrows rule
-  above is about the paths that pass a mode to `O_CREATE` — the SQLite database
-  and the private-key writes.
+  mode outright and the umask does not narrow it either — with one exception
+  the code names and this rule has to as well: `AppendLine`'s fallback for a
+  dangling symlink creates through the link with no chmod, at the umask. The
+  umask-narrows rule above is about the paths that pass a mode to `O_CREATE` —
+  the SQLite database and the private-key writes.
 - **Never correcting.** No `chmod` of an existing file, no `chown`, ever. Group
   access is legitimate — a Kubernetes `fsGroup` ORs it back into the volume at
-  every mount, and on an arbitrary-uid platform it is how a pod reaches a store
-  a previous pod created — and `chmod(2)` needs ownership, so tightening would
-  fail EPERM exactly there. An earlier revision of the change that became this
-  policy held a chmod primitive, and every defect five review rounds found
-  existed because of it — the issue (#351) asked for the exposure to be fixed
-  and said nothing about how, so it is the revision that is the lesson here.
+  every mount, so a store that arrives group-accessible did so without the
+  operator doing anything — and `chmod(2)` needs ownership, so tightening would
+  fail EPERM wherever the uid has changed since the file was written. An earlier
+  revision of the change that became this policy held a chmod primitive, and
+  every defect five review rounds found existed because of it — the issue (#351)
+  asked for the exposure to be fixed and said nothing about how, so it is the
+  revision that is the lesson here.
+
+  Do not extend that reasoning into a claim that group access makes an
+  arbitrary-uid platform work. It does not: such a restart also has to
+  reacquire the same-host lock files, which are created 0600 in a 0750
+  directory, so it fails at the lock whatever the data files allow. That claim
+  was in this section, in `internal/storage/sql.go`, in `backend.go`, in
+  `filesystem.go` and in `docs/storage-backends.md`, and was wrong in all five
+  — which is the more useful lesson: a rationale swept into every site that
+  mentions a mode is a rationale no single review will catch.
 
 What replaces correction is a check: `StorageService.CheckKeyPermissions` judges
 every file under the local private-key directory, every path a backend declares

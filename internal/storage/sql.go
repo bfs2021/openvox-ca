@@ -98,28 +98,36 @@ const (
 	// was about cannot be granted however the process is launched.
 	//
 	// Group is deliberately left in rather than creating at FilePermPrivate,
-	// and the reason is narrower than it first looks.
+	// for a store shared by a Unix group: the group that owns the cadir can
+	// reach the database without the CA having to widen anything afterwards,
+	// which it will not do (this package never chmods a file it did not
+	// create). The umask narrows it for anyone who does not want that -- 0640
+	// under 0022, 0600 under 0077 -- so the mode is a ceiling rather than a
+	// decision made for the operator.
 	//
-	// It is NOT fsGroup. A Kubernetes fsGroup ORs group access into the volume
+	// Two things this is NOT for, both because a justification that overreaches
+	// is worse than a narrow one:
+	//
+	// It is not fsGroup. A Kubernetes fsGroup ORs group access into the volume
 	// at every mount whatever the file was created as, so under fsGroup the
-	// creation mode makes no difference and 0600 would work just as well. A
-	// review correctly pointed that out; the earlier version of this comment
-	// gave fsGroup as the justification and was wrong to.
+	// creation mode makes no difference and 0600 would work just as well.
 	//
-	// What the group bit is for is the case with no kubelet to re-apply it: a
-	// platform that assigns the pod an arbitrary uid per start, where the gid is
-	// stable and the uid is not. There the database this process creates has to
-	// be readable by the *next* process, which is the same CA under a different
-	// uid. Created at 0600 it would not be, and the store would be unreachable
-	// after a restart. Nothing re-widens it, because this package never chmods a
-	// file it did not create.
+	// It does not make an arbitrary-uid platform work. That was the previous
+	// justification here: a platform assigning the pod a fresh uid per start,
+	// where the group bit is what lets the next process read the database this
+	// one created. True of the database and not sufficient, because the same
+	// restart has to reacquire the same-host locks, and those are created at
+	// FilePermPrivate (0600) in a DirPerm (0750) directory -- see
+	// newFileLocks below and instancelock.go. A second uid can neither open an
+	// inherited lock file nor create one, so it fails at the lock whatever the
+	// database mode is. Making that platform work means addressing the lock
+	// files, which is tracked separately; it is not something this constant can
+	// deliver, and claiming it did sent an operator looking in the wrong place.
 	//
-	// What it costs is real and worth stating: on a systemd or package install,
-	// where the uid is stable, the group bit buys nothing and every member of
-	// the owning group can read the key. That is the trade, it is disclosed in
-	// the PR that introduced it, and the startup check reports group access
-	// rather than refusing on it so an operator can see and narrow it with a
-	// umask.
+	// What it costs is real and worth stating: on a systemd or package install
+	// every member of the owning group can read the key. That is the trade, and
+	// the startup check reports group access rather than refusing on it so an
+	// operator can see it and narrow it with a umask.
 	sqliteFilePermCreate = 0o660
 
 	// sqliteSymlinkHops bounds the manual resolution of a chain of dangling
@@ -1108,10 +1116,11 @@ func sqliteDriverDSN(t sqliteTarget) string {
 // sqliteFilePermCreate keeps the world bits out and leaves the rest to the
 // operator's umask, which can only narrow it further. Group access is
 // deliberately permitted, for the reason given at the constant and for no
-// other: a platform that assigns an arbitrary uid per start, where the gid is
-// stable, needs the database this process creates to be readable by the next
-// process -- the same CA under a different uid. Not fsGroup, which re-applies
-// group access at mount time whatever the file was created as.
+// other: a store owned by a Unix group is reachable by that group without the
+// CA widening anything later. It is not for fsGroup, which re-applies group
+// access at mount time whatever the file was created as, and it does not on its
+// own make an arbitrary-uid platform work -- the same-host lock files decide
+// that, and they are 0600.
 //
 // Nothing here modifies a file that already exists — no chmod, no chown. An
 // existing database keeps whatever mode it has, and world access on it is

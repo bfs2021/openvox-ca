@@ -683,12 +683,21 @@ Your umask still applies and can narrow it further: `0022` gives `0640`, `0077`
 gives `0600`. What it cannot do is widen it, so the database is never created
 world-readable however the process is launched.
 
-Group access is deliberately allowed, and for one reason: on a platform that
-assigns an arbitrary uid per namespace — OpenShift — the gid is stable while the
-uid is not, so group access is how the CA reaches a database an earlier start
-created. Nothing re-widens it afterwards, because `openvox-ca` never changes the
-mode of a file it did not create. Removing it would break that deployment to
-protect against the pod's own group, which is not a third party.
+Group access is deliberately allowed, so that a store owned by a Unix group is
+reachable by that group without the CA widening anything afterwards — which it
+will not do, since it never changes the mode of a file it did not create. If you
+do not want it, set a umask: `0077` gives `0600` and nothing in the server
+objects.
+
+Two things that group bit does **not** do, since both have been claimed for it
+here before. It is not what makes a Kubernetes `fsGroup` volume work: the
+kubelet ORs group access in at every mount whatever the file was created as, so
+there the creation mode is irrelevant. And it is not enough to make an
+arbitrary-uid platform work — one assigning the pod a fresh uid per start, such
+as OpenShift. The database would be reachable, but the same restart has to
+reacquire the same-host lock files, and those are created `0600` in a `0750`
+directory, so a new uid fails at the lock before the database mode matters. If
+you run that topology, pin the uid.
 
 **`openvox-ca` never changes the mode of a file it did not create.** Not the
 database, not the sidecars, not the directory holding them. A store whose
