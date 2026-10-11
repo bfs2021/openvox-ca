@@ -2443,6 +2443,50 @@ type chartRenderCase struct {
 	notWants   []string
 }
 
+// inlineCredentialSources are the files that declare the server's config keys,
+// relative to the repository root.
+var inlineCredentialSources = []string{"internal/config/*.go", "cmd/openvox-ca/config.go"}
+
+// inlineCredentialKeyRe matches a yaml tag whose name says it holds a secret.
+// A key ending _file names a path to the secret rather than the secret, and
+// inlineCredentialKeys drops those.
+var inlineCredentialKeyRe = regexp.MustCompile(`yaml:"([a-z0-9_]*(?:password|secret|token|dsn)[a-z0-9_]*)"`)
+
+// inlineCredentialKeys returns, sorted, every config key under root that can
+// hold a credential inline. chart:test requires a reject case for each, which
+// is what keeps the chart's $credentials list from falling behind a new one:
+// the list itself is hand-kept, and a key it misses renders into the ConfigMap
+// in clear text.
+func inlineCredentialKeys(root string) ([]string, error) {
+	seen := map[string]bool{}
+	for _, pattern := range inlineCredentialSources {
+		files, err := filepath.Glob(filepath.Join(root, pattern))
+		if err != nil {
+			return nil, err
+		}
+		for _, file := range files {
+			if strings.HasSuffix(file, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(file)
+			if err != nil {
+				return nil, err
+			}
+			for _, m := range inlineCredentialKeyRe.FindAllSubmatch(src, -1) {
+				if key := string(m[1]); !strings.HasSuffix(key, "_file") {
+					seen[key] = true
+				}
+			}
+		}
+	}
+	// A scan that finds nothing would pass every key by default, so it fails
+	// instead: the sources have moved or their tags have changed shape.
+	if len(seen) == 0 {
+		return nil, fmt.Errorf("found no inline-credential config keys in %v under %s; update inlineCredentialSources", inlineCredentialSources, root)
+	}
+	return slices.Sorted(maps.Keys(seen)), nil
+}
+
 // chartRejectCase is one assertion that the chart refuses a configuration:
 // render with these overrides and require the failure to mention `wantErr`,
 // and none of `notWants`.
@@ -4678,6 +4722,34 @@ config:
 			notWants:   []string{"PG?SECRET"},
 		},
 		{
+			// With no database path there is no / after the password, so the
+			// fallback has to look past :// to the last @ rather than cut at the
+			// last /, which here falls inside the password.
+			name:       "a pathless postgres sql_dsn whose password contains an unescaped slash",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG/SECRET@db?sslmode=require'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG/SECRET"},
+		},
+		{
+			// Here the only slashes are the scheme's.
+			name:       "a pathless postgres sql_dsn whose password contains an unescaped question mark",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG?SECRET@db:5432'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG?SECRET"},
+		},
+		{
+			// The go-sql-driver form's fallback: with the slash inside the
+			// password and no database name, the text before the last / holds
+			// no @.
+			name:       "a pathless MySQL sql_dsn whose password contains a slash",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'ca:MY/SECRET@tcp(db:3306)'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MY/SECRET"},
+		},
+		{
 			// The server picks the driver from storage_backend, not the DSN. To
 			// go-sql-driver this is user "postgres" with password "//MYSECRET";
 			// read as a URL it has the userinfo "MYSECRET" and no password.
@@ -4835,10 +4907,28 @@ config:
 		}
 	}
 
+	// Every config key the server can take a credential in must have a reject
+	// case naming it, or a new one would render into the ConfigMap in clear
+	// text and pass every case above.
+	credentialKeys, err := inlineCredentialKeys(".")
+	if err != nil {
+		return err
+	}
+	for _, key := range credentialKeys {
+		name := fmt.Sprintf("config.%s is refused by a reject case", key)
+		marker := "config." + key + ": set "
+		if slices.ContainsFunc(rejects, func(c chartRejectCase) bool { return strings.Contains(c.wantErr, marker) }) {
+			fmt.Printf("ok    %s\n", name)
+		} else {
+			fmt.Printf("FAIL  %s\n      no reject case expects %q; add the key to $credentials in openvox-ca.validate and a case here\n", name, marker)
+			failures++
+		}
+	}
+
 	if failures > 0 {
 		return fmt.Errorf("%d chart assertion(s) failed", failures)
 	}
-	fmt.Printf("\nAll %d chart assertions passed\n", len(renders)+len(rejects)+3)
+	fmt.Printf("\nAll %d chart assertions passed\n", len(renders)+len(rejects)+len(credentialKeys)+3)
 	return nil
 }
 

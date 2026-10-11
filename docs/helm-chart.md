@@ -78,7 +78,8 @@ openvox-ca has a large configuration surface, and the chart deliberately does
 - **`config`** is written verbatim to `/etc/puppet-ca/config.yaml`, which the
   server auto-detects and the chart passes explicitly via `--config`. Every key
   in [configuring the server](configuration.md) is valid there, including the
-  nested `kubernetes_export` and `openbao` blocks.
+  nested `kubernetes_export` and `openbao` blocks — except a backend
+  credential, which the install refuses (see below).
 - **Convenience blocks** — `tls`, `ca`, `caKeyPassphrase`, `puppetServers`,
   `autosign`, `metrics`, `kubernetesExport`, `persistence` — do the Kubernetes
   half of a feature (mount the Secret, open the port, create the RBAC) *and*
@@ -179,10 +180,11 @@ carries any of these:
 A `sql_dsn` carries a password when its user part has one
 (`postgres://user:password@…`, `user:password@tcp(…)/…`) or when it has a
 `password=` parameter. The chart reads it as the server would, by
-`storage_backend`, and errs towards refusal: a password with an unescaped `/`,
-`?` or `#` in a `postgres://` DSN is refused too, although the server could not
-use it. One without a password, such as a SQLite file path, can stay in
-`config`. With `existingConfigMap` set the chart renders no ConfigMap, so
+`storage_backend`, and errs towards refusal. A password with an unescaped `/`
+(or, in a `postgres://` DSN, `?` or `#`) is refused too, although the server
+could not use it. So is a DSN with no user part that has an `@` in a query
+value after the port, although it works; move that one to `extraEnv` as well.
+One without a password, such as a SQLite file path, can stay in `config`. With `existingConfigMap` set the chart renders no ConfigMap, so
 nothing is refused, and what goes into yours is your own decision.
 
 ## Choosing an image

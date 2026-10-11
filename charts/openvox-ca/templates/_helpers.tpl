@@ -1252,13 +1252,13 @@ other way, such as PUPPET_CA_STORAGE_BACKEND. Anything else goes
 go-sql-driver's way. A password is then any text after the userinfo's first
 colon; an empty one is not a secret.
 
-A URL whose authority holds no @ falls back to go-sql-driver's split too. On a
-well-formed DSN that finds nothing, but a password carrying an unencoded /, ?
-or # ends net/url's authority early: the server cannot use that DSN, yet the
-ConfigMap would hold the password all the same. The fallback reads the scheme's
-own colon as a separator, so it refuses any such DSN with an @ before its last
-/ — which can include a working one with an @ in a query value, and that is
-the direction to err in.
+Both splits fall back when they find no @ where they look: a URL to everything
+after :// up to its last @, the go-sql-driver form to everything up to its last
+@. On a well-formed DSN that finds nothing, but a password carrying an
+unencoded / (or, in a URL, ? or #) ends the driver's userinfo early: the server
+cannot use that DSN, yet the ConfigMap would hold the password all the same.
+The cost is that a DSN with no user part and an @ in a query value, after a
+port's colon, is refused although it works. That is the direction to err in.
 
 A password= parameter counts wherever it appears, sslpassword included, for
 the same reason: no driver here takes a password that way, but erring towards
@@ -1269,17 +1269,21 @@ Returns "true", or nothing.
 {{- define "openvox-ca.dsnHasPassword" -}}
 {{- $dsn := .dsn -}}
 {{- $mysql := has (lower (trim .backend)) (list "mysql" "mariadb") -}}
-{{- $authority := "" -}}
-{{- if and (not $mysql) (regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn) -}}
-{{- $authority = regexReplaceAll "(?s)^[^:]*://([^/?#]*).*$" $dsn "${1}" -}}
-{{- end -}}
 {{- $userinfo := "" -}}
+{{- if and (not $mysql) (regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn) -}}
+{{- $authority := regexReplaceAll "(?s)^[^:]*://([^/?#]*).*$" $dsn "${1}" -}}
+{{- $rest := regexReplaceAll "(?s)^[^:]*://" $dsn "" -}}
 {{- if contains "@" $authority -}}
 {{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $authority "${1}" -}}
+{{- else if contains "@" $rest -}}
+{{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $rest "${1}" -}}
+{{- end -}}
 {{- else -}}
 {{- $head := regexReplaceAll "(?s)^(.*)/.*$" $dsn "${1}" -}}
 {{- if contains "@" $head -}}
 {{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $head "${1}" -}}
+{{- else if contains "@" $dsn -}}
+{{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $dsn "${1}" -}}
 {{- end -}}
 {{- end -}}
 {{- if or (regexMatch "(?s)^[^:]*:." $userinfo) (regexMatch "(?i)password=[^&\\s]" $dsn) -}}true{{- end -}}

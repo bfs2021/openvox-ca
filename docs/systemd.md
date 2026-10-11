@@ -26,7 +26,7 @@ $ sudo systemctl enable --now openvox-ca.service
 
 Building from source instead? `mage build:all` puts the binaries in `bin/` and the unit stays at `packaging/systemd/openvox-ca.service`; install from there.
 
-The configuration file is yours to write — it is not in the tarball — and [configuring the server](configuration.md#config-file) has a worked example. Make it **0640 root:puppet-ca**, because it can hold credentials — `etcd_password`, `redis_password`, or a `sql_dsn` with a password in it — and the service only needs to read it. The server auto-detects that path, so the unit passes no `--config` and `PUPPET_CA_CONFIG` still works in a drop-in.
+The configuration file is yours to write — it is not in the tarball — and [configuring the server](configuration.md#config-file) has a worked example. Make it **0640 root:puppet-ca**, because it can hold credentials — `etcd_password`, `redis_password`, `redis_sentinel_password`, or a `sql_dsn` with a password in it — and the service only needs to read it. The server auto-detects that path, so the unit passes no `--config` and `PUPPET_CA_CONFIG` still works in a drop-in.
 
 The unit expects the binary at `/usr/local/bin/openvox-ca` and its configuration at `/etc/puppet-ca/config.yaml`. See [configuring the server](configuration.md).
 

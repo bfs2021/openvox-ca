@@ -114,6 +114,46 @@ var _ = Describe("chartValuesFiles", func() {
 	})
 })
 
+var _ = Describe("inlineCredentialKeys", func() {
+	It("finds the server's inline credentials and no *_file path keys", func() {
+		keys, err := inlineCredentialKeys(".")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(keys).To(ContainElements("etcd_password", "redis_password", "redis_sentinel_password", "sql_dsn"))
+		for _, key := range keys {
+			Expect(key).NotTo(HaveSuffix("_file"))
+		}
+	})
+
+	Context("in a tree of its own", func() {
+		var root string
+
+		write := func(rel, body string) {
+			path := filepath.Join(root, rel)
+			Expect(os.MkdirAll(filepath.Dir(path), 0o755)).To(Succeed())
+			Expect(os.WriteFile(path, []byte(body), 0o644)).To(Succeed())
+		}
+
+		BeforeEach(func() {
+			root = GinkgoT().TempDir()
+		})
+
+		It("reads both sources, sorted, skipping path keys and test files", func() {
+			write("internal/config/a.go", "type A struct {\n\tP string `yaml:\"zed_password\"`\n\tF string `yaml:\"approle_secret_id_file\"`\n\tN int `yaml:\"port\"`\n}\n")
+			write("internal/config/a_test.go", "type T struct {\n\tS string `yaml:\"fixture_secret\"`\n}\n")
+			write("cmd/openvox-ca/config.go", "type C struct {\n\tD string `yaml:\"sql_dsn\"`\n\tT string `yaml:\"api_token\"`\n}\n")
+
+			Expect(inlineCredentialKeys(root)).To(Equal([]string{"api_token", "sql_dsn", "zed_password"}))
+		})
+
+		It("refuses a tree where it finds no credential key", func() {
+			write("internal/config/a.go", "type A struct {\n\tN int `yaml:\"port\"`\n}\n")
+
+			_, err := inlineCredentialKeys(root)
+			Expect(err).To(MatchError(ContainSubstring("found no inline-credential config keys")))
+		})
+	})
+})
+
 var _ = Describe("chartRulesBlock", func() {
 	// The RBAC parity check compares this helper's output for two renders. A
 	// parse that silently returned the whole tail would return the *same* tail

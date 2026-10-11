@@ -34,7 +34,8 @@ mirror it key by key. Instead:
 
 - **`config`** is written verbatim to `/etc/puppet-ca/config.yaml`, which the
   server reads. Every documented setting — including the nested
-  `kubernetes_export` and `openbao` blocks — is valid there.
+  `kubernetes_export` and `openbao` blocks — is valid there, except a backend
+  credential, which the install refuses (see `env` below).
 - **Convenience blocks** (`tls`, `ca`, `caKeyPassphrase`, `puppetServers`,
   `autosign`, `metrics`, `kubernetesExport`, `persistence`) do the Kubernetes
   side of a feature — mount the Secret, open the port, create the RBAC — *and*
@@ -95,7 +96,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `config` | `{}` | Written verbatim to `config.yaml`; the full [configuration reference](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md) applies |
+| `config` | `{}` | Written verbatim to `config.yaml`; the full [configuration reference](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md) applies, but the install is refused if it holds `etcd_password`, `redis_password`, `redis_sentinel_password` or a `sql_dsn` with a password: set those through `extraEnv` from a Secret |
 | `existingConfigMap` | `""` | Use a ConfigMap you manage instead of rendering one. The chart cannot checksum what it did not render, so `configChecksumAnnotation` has no effect and editing that ConfigMap will **not** restart the pods. `config.yaml` is fixed at startup, so roll them yourself. Of this ConfigMap's contents a `SIGHUP` re-reads only the allow-list file, and only if your own config sets `puppet_server_file` at a path in it. `config`, `verbosity`, `listen.host`, `puppetServers`, `autosign`, `extraConfigFiles` and `kubernetesExport.targets` stop being written anywhere in this mode — carry the ones you need into your own ConfigMap, `listen.host` included, or a dual-stack Service will front an IPv4-only socket |
 | `configMount` | `/etc/puppet-ca` | Where the config ConfigMap is mounted |
 | `extraConfigFiles` | `{}` | Extra `filename: contents` entries placed alongside `config.yaml`. Refused when the chart is rendering that file itself, since yours would take its place: `config.yaml` always, `puppet-server` with `puppetServers`, `autosign.conf` with `autosign.patterns` — none of them under `existingConfigMap`, where the chart renders no ConfigMap and these entries go nowhere. Keys must look like ConfigMap keys (letters, digits, `-`, `_`, `.`) |
