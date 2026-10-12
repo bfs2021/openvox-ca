@@ -1,15 +1,23 @@
 # openvox-ca
 
----
-
-> 🤖 LLM/AI WARNING 🤖
+> [!WARNING]
+> openvox-ca has not yet reached 1.0.0. Until a 1.0.0 release is tagged,
+> breaking changes may land at any time, without notice and without much in
+> the way of migration instructions. From 1.0.0 onwards, releases will strictly
+> follow [semantic versioning](https://semver.org/). The project is under heavy
+> development, so do not run your production fleet on it without understanding
+> the consequences.
 >
-> This project was largely written by [Claude](https://claude.ai/)
-> It has been reviewed and tested, but use in production at your own discretion.
->
-> 🤖 LLM/AI WARNING 🤖
+> If you are trying it out, and especially if you are adopting it early, come
+> and find us in the `#openvox-ca` channel on the
+> [Vox Pupuli Slack](https://voxpupuli.org/connect/). Help may be on offer
+> there, but there are no guarantees.
 
----
+<!-- Keeps the two alerts separate: markdownlint MD028 rejects adjacent blockquotes, and some renderers merge them. -->
+
+> [!NOTE]
+> openvox-ca is developed with substantial help from LLMs. Every change is
+> reviewed by a human and tested before it is merged.
 
 **openvox-ca** is a drop-in replacement for the certificate authority built into
 [OpenVox Server](https://voxpupuli.org/openvox/) (and its upstream, Puppet
