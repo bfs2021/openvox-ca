@@ -1,15 +1,23 @@
 # openvox-ca
 
----
-
-> 🤖 LLM/AI WARNING 🤖
+> [!WARNING]
+> openvox-ca has not yet reached 1.0.0. Until a 1.0.0 release is tagged,
+> breaking changes may land at any time, without notice and without much in
+> the way of migration instructions. From 1.0.0 onwards, releases will strictly
+> follow [semantic versioning](https://semver.org/). The project is under heavy
+> development, so do not run your production fleet on it without understanding
+> the consequences.
 >
-> This project was largely written by [Claude](https://claude.ai/)
-> It has been reviewed and tested, but use in production at your own discretion.
->
-> 🤖 LLM/AI WARNING 🤖
+> If you are trying it out, and especially if you are adopting it early, come
+> and find us in the `#openvox-ca` channel on the
+> [Vox Pupuli Slack](https://voxpupuli.org/connect/). Help may be on offer
+> there, but there are no guarantees.
 
----
+<!-- Keeps the two alerts separate: markdownlint MD028 rejects adjacent blockquotes, and some renderers merge them. -->
+
+> [!NOTE]
+> openvox-ca is developed with substantial help from LLMs. Every change is
+> reviewed by a human and tested before it is merged.
 
 **openvox-ca** is a drop-in replacement for the certificate authority built into
 [OpenVox Server](https://voxpupuli.org/openvox/) (and its upstream, Puppet
@@ -336,6 +344,28 @@ mTLS](#https-with-mtls)). The gate becomes load-bearing once a second issuer can
 be trusted for client authentication. There is no opt-out: an agent holding a
 certificate from a replaced CA must re-enrol. See [renewal
 eligibility](docs/migrating-from-puppet-server.md#renewal-eligibility).
+
+## Getting help
+
+openvox-ca is a [Vox Pupuli](https://voxpupuli.org/) project, and the
+community's channels are listed on the
+[Vox Pupuli connect page](https://voxpupuli.org/connect/):
+
+- **Slack:** questions about openvox-ca go in `#openvox-ca` on the
+  [Vox Pupuli Slack](https://voxpupuli.org/connect/#-slack). Early adopters are
+  especially welcome there. Broader OpenVox questions go in `#openvox`.
+- **IRC:** [`#voxpupuli` on Libera.Chat](https://web.libera.chat/?#voxpupuli).
+  Some Slack channels are bridged to IRC; the connect page lists which.
+- **Mailing list:** [voxpupuli on groups.io](https://groups.io/g/voxpupuli/topics),
+  for announcements and project decisions.
+- **Bugs and feature requests:**
+  [GitHub issues](https://github.com/voxpupuli/openvox-ca/issues).
+- **Security vulnerabilities:** report these privately, following the
+  [Vox Pupuli security policy](https://voxpupuli.org/security/), not in a
+  public channel or issue.
+
+Help is offered on a best-effort basis, with no guarantees. The Vox Pupuli
+[Code of Conduct](https://voxpupuli.org/coc/) applies in all of these spaces.
 
 ## Contributing
 
