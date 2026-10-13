@@ -73,7 +73,7 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 - **Helm chart:** an OCI-published chart, versioned in lockstep with the server, covering dual-stack Services, TLS-passthrough Ingress and Gateway API routes, an opt-in ServiceMonitor and network policies; it derives the RBAC for managed certificates kept in Secrets from the server's own configuration; and the server's settings pass straight through to its config file, so the whole configuration reference is reachable. See [deploying with Helm](docs/helm-chart.md)
 - **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a configurable window (25s default) before exiting; deferred storage and signer cleanup always runs
 - **Configuration reload:** `SIGHUP` (or `systemctl reload`) re-reads the TLS keypair and the admin allow list without dropping connections, so renewing the CA's server certificate or decommissioning a compile server needs no restart. See [reloading configuration](docs/configuration.md#reloading-configuration)
-- **systemd integration:** `Type=notify` readiness (`systemctl start` returns once the listener is actually accepting), a live status line covering the listener, CA expiry and CRL freshness, watchdog keep-alives, and `systemctl reload` for TLS certificate renewal and admin allow-list changes; ships a hardened [unit file](packaging/systemd/openvox-ca.service). See [running under systemd](docs/systemd.md)
+- **systemd integration:** `Type=notify` readiness (`systemctl start` returns once the listener is actually accepting), a live status line covering the listener, CA expiry and CRL freshness, watchdog keep-alives, and `systemctl reload` for TLS certificate renewal and admin allow-list changes; ships a hardened unit, rendered per channel from [one template](packaging/systemd/openvox-ca.service) — installed by the packages, and in every release tarball ready to use. See [running under systemd](docs/systemd.md)
 - **FIPS-compatible:** the core CA uses the standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto` (the optional Kubernetes export and a managed certificate stored in a Secret add the `client-go` dependency)
 - **`openvox-ca-ctl`:** operator CLI matching `puppetserver ca` subcommands. See the [operator CLI reference](docs/operator-cli.md)
 
@@ -95,7 +95,8 @@ root for a Docker/Podman Compose deployment.
 ### Release tarballs
 
 Each release publishes four tarballs — `linux_amd64` and `linux_arm64`, each in a standard and a
-FIPS (`_fips`) build — plus an SBOM pair per tarball, `checksums.txt`, and a signed provenance
+FIPS (`_fips`) build — plus a `.deb` and an `.rpm` for each of the two non-FIPS architectures, an
+SBOM pair per tarball, `checksums.txt`, and a signed provenance
 bundle (see [verifying what you downloaded](#verifying-what-you-downloaded)). Every archive
 contains both binaries (`openvox-ca`, `openvox-ca-ctl`) and the systemd unit
 `openvox-ca.service`. Asset names carry the release version, so set `VERSION` to the release you
@@ -112,11 +113,36 @@ $ tar xzf openvox-ca_${VERSION}_linux_amd64.tar.gz
 
 See [running under systemd](docs/systemd.md) for the rest of a VM install.
 
+### Packages (`.deb`, `.rpm`)
+
+A `.deb` and an `.rpm` per architecture install the binaries, a unit rendered
+for `/usr/bin`, a working `/etc/puppet-ca/config.yaml`, and a `Type=oneshot`
+that provisions the CA the first time you start the service — so on a host with
+no CA of its own, a package install is `install`, then `systemctl enable --now
+openvox-ca`, with no configuration to write first. They create the `puppet`
+service account and use the OpenVox/Puppet layout
+(`/etc/puppetlabs/puppet/ssl`), so they coexist with an openvox-agent or
+OpenVox Server on the same host; that is also why they listen on **8141**
+rather than 8140, which Server binds itself.
+
+**A host already enrolled against another CA has one choice to make first.** If
+this machine holds an agent certificate signed elsewhere, provisioning stops
+rather than serve it from a CA that did not issue it, and asks which CA this
+service should serve — see [installing from a
+package](docs/systemd.md#installing-from-a-package). Sharing the account and
+the layout is not the same as having no decision to make.
+
+**They are not published as release assets yet**, so for now they are built
+from a checkout. [Installing from a
+package](docs/systemd.md#installing-from-a-package) has the commands, and what
+provisioning does, what an uninstall deliberately leaves behind, and the cost of
+sharing the `puppet` account.
+
 ### Verifying what you downloaded
 
 `checksums.txt` establishes that a download arrived intact. Provenance establishes
-where it came from: every tarball, container image and chart published from a
-release tag carries a [SLSA v1.0](https://slsa.dev/spec/v1.0/provenance) build
+where it came from: every tarball, package, container image and chart published
+from a release tag carries a [SLSA v1.0](https://slsa.dev/spec/v1.0/provenance) build
 provenance attestation, signed through [Sigstore](https://www.sigstore.dev/) with a
 short-lived certificate — there is no long-lived signing key to trust or rotate.
 
@@ -154,8 +180,12 @@ $ cosign verify-blob-attestation openvox-ca_${VERSION}_linux_amd64.tar.gz \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-The bundle covers every file listed in `checksums.txt` — each tarball and each SBOM —
-so the same bundle verifies any of them.
+The bundle covers every file listed in `checksums.txt` — each tarball, each SBOM and
+each `.deb`/`.rpm` — so the same bundle verifies any of them. **Neither the `.deb` nor the
+`.rpm` carries a signature that `apt`, `dpkg` or `dnf` checks when you install it from a
+downloaded file** — `apt` verifies a repository index, and a release asset is not a
+repository. So for packages the bundle is the only provenance check available: verify it
+before installing either format.
 
 Container images and the Helm chart are both attested and signed. Because images are
 also built for pull requests, whose certificates name `refs/pull/N/merge`, pin the
@@ -329,7 +359,7 @@ The complete flag, environment-variable, and config-file reference is in
 | [Deploying with Helm](docs/helm-chart.md) | The `openvox-ca` chart: installation, TLS passthrough, ingress and Gateway API, monitoring |
 | [Kubernetes export](docs/kubernetes-export.md) | Publishing the CA cert/CRL into Secrets and ConfigMaps |
 | [Metrics & monitoring](docs/metrics.md) | The Prometheus exporter and the alerting [mixin](mixin/) |
-| [Running under systemd](docs/systemd.md) | The `Type=notify` unit, status text, `systemctl reload`, watchdog, and hardening |
+| [Running under systemd](docs/systemd.md) | The `Type=notify` unit, status text, `systemctl reload`, watchdog, hardening, and installing from a package with its first-boot provisioning |
 | [Container images](docs/container-images.md) | Pulling and running the published images |
 | [Migration guide](docs/migrating-from-puppet-server.md) | Replacing an OpenVox/Puppet Server built-in CA |
 

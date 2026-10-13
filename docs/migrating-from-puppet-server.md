@@ -73,32 +73,21 @@ OpenVox Server runs as `puppet`, and creates its key and inventory readable by
 that user and its group only. openvox-ca, sharing the directory, has to run as
 the same user: it could not read OpenVox Server's key otherwise, and OpenVox
 Server could not read the files openvox-ca creates if the directory were ever
-handed back. The shipped [systemd unit](systemd.md) runs as `puppet-ca`, so
-override it while the two share a cadir:
+handed back.
 
-```ini
-# /etc/systemd/system/openvox-ca.service.d/cadir-owner.conf
-[Service]
-User=puppet
-Group=puppet
-SupplementaryGroups=puppet-ca
-```
+**This is already satisfied: there is nothing to change.** The shipped
+[systemd unit](systemd.md) runs as `puppet`, and [running under
+systemd](systemd.md) installs `/etc/puppet-ca/config.yaml` `0640 root:puppet`,
+so both the service and the `sudo -u puppet openvox-ca …` commands later in this
+guide can read it. No drop-in and no group membership is needed.
 
-```bash
-usermod -a -G puppet-ca puppet
-```
-
-Both keep `/etc/puppet-ca/config.yaml` readable: [running under
-systemd](systemd.md) installs it `0640 root:puppet-ca`. The drop-in covers the
-service, and the group membership covers the `sudo -u puppet openvox-ca …`
-commands later in this guide.
-
-This gives up the dedicated `puppet-ca` user that [the shipped unit's
-hardening](systemd.md#hardening) relies on. OpenVox Server keeps running as
-`puppet` after step 6, so it can read what openvox-ca keeps in the cadir's
-`private/`: the inventory integrity key and any server-generated keys, as well
-as the CA key, which it could read already. Importing into a separate directory
-instead (step 5) keeps the two users apart.
+What sharing the account costs is set out in [why `puppet` and not a private
+account](systemd.md#why-puppet-and-not-a-private-account). OpenVox Server keeps
+running as `puppet` after step 6, so it can read what openvox-ca keeps in the
+cadir's `private/`: the inventory integrity key and any server-generated keys,
+as well as the CA key, which it could read already. Importing into a separate
+directory instead (step 5) does not change that, because both still run as
+`puppet`.
 
 ## Step 4: Point openvox-ca at the CA directory
 
@@ -141,7 +130,7 @@ openvox-ca-ctl import \
 cp "$PUPPET_SSL/ca/signed/"*.pem "$NEW_CADIR/signed/"
 cp "$PUPPET_SSL/ca/inventory.txt" "$NEW_CADIR/inventory.txt"
 cp "$PUPPET_SSL/ca/serial" "$NEW_CADIR/serial"
-chown -R puppet-ca:puppet-ca "$NEW_CADIR"
+chown -R puppet:puppet "$NEW_CADIR"
 ```
 
 Copy `inventory.txt` rather than rebuilding it from `signed/`: openvox-ca reads
@@ -228,6 +217,13 @@ ca_server = openvox-ca.example.com
 ca_port   = 8140
 ```
 
+**On a packaged install that is 8141, not 8140.** The `.deb` and `.rpm` ship a
+configuration file setting `port: 8141`, because a package is what gets
+installed beside OpenVox Server and Server binds 8140 itself. Release tarballs
+and container images ship no configuration file and stay on 8140. Set `ca_port`
+to whichever the CA you are migrating onto actually serves — see [installing
+from a package](systemd.md#the-packages-listen-on-8141).
+
 ## Step 7: Start openvox-ca
 
 First, generate a TLS server certificate for openvox-ca itself. Nothing renews
@@ -256,8 +252,8 @@ openvox-ca generate \
 
 This runs before the server starts, against the cadir from step 4 or 5. Run it,
 and the start below, as the user that owns the cadir: `puppet` when it is
-OpenVox Server's own (step 3), as `sudo -u puppet openvox-ca generate …`, and
-`puppet-ca` after an import into a separate directory (step 5). Run as
+OpenVox Server's own (step 3) and after an import into a separate directory
+(step 5) alike, as `sudo -u puppet openvox-ca generate …`. Run as
 root, they leave files and lock files in the cadir that the service cannot use;
 see [file permissions](configuration.md#file-permissions).
 
@@ -291,9 +287,18 @@ Whether agents need `ca_server` changed depends on where openvox-ca runs; see
 
 For a permanent installation, run it as a service rather than from a shell —
 see [running under systemd](systemd.md), which ships a hardened unit. One thing
-to watch for a migrated CA: `cadir` here is under `/etc/puppetlabs`, and the
-unit's `ProtectSystem=strict` makes that read-only until you uncomment its
-`ReadWritePaths=` line and point it at your `cadir`.
+to watch for a migrated CA: the unit's `ProtectSystem=strict` makes the whole
+filesystem read-only apart from the one path its `ReadWritePaths=` grants,
+which is `/etc/puppetlabs/puppet/ssl/ca`. A `cadir` anywhere else has to be
+granted as well — with a drop-in, since an edit to the unit file is undone by
+the next upgrade. See [using a different CA
+directory](systemd.md#using-a-different-ca-directory).
+
+**On a packaged install that is two units, not one.** The packages add
+`openvox-ca-first-boot.service`, which provisions the CA and therefore writes
+into `cadir` as well, under its own `ProtectSystem=strict`. Both units need the
+moved directory granted, or provisioning fails on a read-only filesystem the
+next time it mints.
 
 ## Step 8: Verify
 

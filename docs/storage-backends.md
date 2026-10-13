@@ -150,8 +150,8 @@ one instance, and the lock catches the case it can.
   server's next acquisition of that name fails — deliberately and loudly, with
   an error naming the file, its owner and `chown -R`, because the alternative is
   it quietly giving up on locking while the root process believes it holds an
-  exclusive one. Under systemd that means `sudo -u puppet-ca openvox-ca-ctl …`
-  (or `runuser -u puppet-ca --`), matching the `User=` in the unit. It applies
+  exclusive one. Under systemd that means `sudo -u puppet openvox-ca-ctl …`
+  (or `runuser -u puppet --`), matching the `User=` in the unit. It applies
   even to commands that only read, such as `migrate` from a live source, since
   taking the lock is what creates the file.
 
@@ -346,17 +346,15 @@ directory as it stands.
 
 Two conditions apply, and neither is about the directory's contents.
 
-1. **Both must run as the same user.** OpenVox Server runs as `puppet`, and the
-   shipped systemd unit runs openvox-ca as `puppet-ca`. openvox-ca cannot read a
-   key OpenVox Server created group-readable for `puppet`, and the files
-   openvox-ca creates are private to its own user, so OpenVox Server could not
-   read them. Run openvox-ca as `puppet` with a systemd drop-in (`User=puppet`,
-   `Group=puppet`, `SupplementaryGroups=puppet-ca`) for as long as the two
-   share a cadir, and add `puppet` to the `puppet-ca` group
-   (`usermod -a -G puppet-ca puppet`) so that `sudo -u puppet openvox-ca …`
-   can read the `0640 root:puppet-ca` configuration too. That gives up the dedicated-user isolation [the shipped unit's
-   hardening](systemd.md#hardening) describes: OpenVox Server, still running as
-   `puppet`, can read openvox-ca's `private/` files, including the inventory
+1. **Both must run as the same user.** openvox-ca cannot read a key OpenVox
+   Server created group-readable for `puppet`, and the files openvox-ca creates
+   are private to its own user, so OpenVox Server could not read them otherwise.
+   This is already satisfied: OpenVox Server runs as `puppet`, and so does the
+   shipped systemd unit, so no drop-in and no group change is needed. The
+   configuration is `0640 root:puppet`, so `sudo -u puppet openvox-ca …` can
+   read it as well. The cost is the one [sharing the `puppet`
+   account](systemd.md#why-puppet-and-not-a-private-account) describes: OpenVox
+   Server can read openvox-ca's `private/` files, including the inventory
    integrity key.
 2. **The CA key must be a plain PEM file in the cadir**, because that is the
    only kind OpenVox Server can use. With `encrypt_ca_key`, `ca_key_file`
@@ -379,8 +377,8 @@ still required for per-subject generated keys and ancillary local state.
 ```yaml
 # /etc/puppet-ca/config.yaml
 storage_backend: etcd
-cadir: /var/lib/puppet-ca                # still needed for per-subject keys
-                                         # and ancillary local state
+# still needed for per-subject keys and ancillary local state
+cadir: /etc/puppetlabs/puppet/ssl/ca
 
 etcd_endpoints:
   - https://etcd-0.example.com:2379
@@ -511,8 +509,8 @@ operators who need the strictest cross-node consistency should prefer `etcd`.
 ```yaml
 # /etc/puppet-ca/config.yaml
 storage_backend: redis                   # or "valkey"
-cadir: /var/lib/puppet-ca                # still needed for per-subject keys
-                                         # and ancillary local state
+# still needed for per-subject keys and ancillary local state
+cadir: /etc/puppetlabs/puppet/ssl/ca
 
 redis_addrs:
   - redis-0.example.com:6379             # first address is used in direct mode
@@ -543,7 +541,7 @@ failovers automatically.
 
 ```yaml
 storage_backend: redis
-cadir: /var/lib/puppet-ca
+cadir: /etc/puppetlabs/puppet/ssl/ca
 
 redis_sentinel_master_name: mymaster
 redis_sentinel_addrs:
@@ -709,8 +707,9 @@ single-node, not a clustering option.
 ```yaml
 # /etc/puppet-ca/config.yaml
 storage_backend: sqlite
-cadir: /var/lib/puppet-ca                # still needed for per-subject keys
-sql_dsn: "file:/var/lib/puppet-ca/ca.db" # SQLite database file path / URI
+cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
+# the SQLite database file path / URI
+sql_dsn: "file:/etc/puppetlabs/puppet/ssl/ca/ca.db"
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
 sql_migration_timeout_sec: 600           # whole schema-migration run (default 600)
@@ -736,7 +735,7 @@ other database.
 
 ```text
 --storage-backend sqlite
---sql-dsn         file:/var/lib/puppet-ca/ca.db
+--sql-dsn         file:/etc/puppetlabs/puppet/ssl/ca/ca.db
 ```
 
 **Operational notes.** The database file *is* the CA — back it up (with its WAL
@@ -846,7 +845,7 @@ can share it. `postgres`, `postgresql` and `pg` are accepted as aliases.
 ```yaml
 # /etc/puppet-ca/config.yaml
 storage_backend: postgres
-cadir: /var/lib/puppet-ca                # still needed for per-subject keys
+cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
 sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem"  # prefer PUPPET_CA_SQL_DSN or sql_dsn_file
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
@@ -915,7 +914,7 @@ replicas can share it. `mysql` and `mariadb` are accepted as aliases.
 ```yaml
 # /etc/puppet-ca/config.yaml
 storage_backend: mysql                   # or "mariadb"
-cadir: /var/lib/puppet-ca                # still needed for per-subject keys
+cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
 sql_dsn: "puppetca:secret@tcp(db.example.com:3306)/puppetca"  # prefer PUPPET_CA_SQL_DSN or sql_dsn_file
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
@@ -965,7 +964,7 @@ Use one of these instead:
 - **`sql_dsn_file` / `--sql-dsn-file` / `PUPPET_CA_SQL_DSN_FILE`**: the path to
   a file whose first line is the DSN. Surrounding whitespace is trimmed. Make
   it readable by the account `openvox-ca` runs as and nobody else: under the
-  shipped systemd unit that is `root:puppet-ca` with mode `0640`, as
+  shipped systemd unit that is `root:puppet` with mode `0640`, as
   [running under systemd](systemd.md) sets up the config file. In
   Kubernetes, mount the Secret as a file. The file is read when `openvox-ca`
   opens the database, not for each connection, so restart `openvox-ca` after
@@ -1054,7 +1053,7 @@ configured backend.
 
 ```yaml
 storage_backend: etcd
-cadir: /var/lib/puppet-ca
+cadir: /etc/puppetlabs/puppet/ssl/ca
 etcd_endpoints: [https://etcd:2379]
 
 # Keep the CA cert and key out of etcd; mount them from the host.
@@ -1197,8 +1196,8 @@ minimal SQLite target:
 ```yaml
 # sqlite.yaml
 storage_backend: sqlite
-cadir: /var/lib/puppet-ca
-sql_dsn: file:/var/lib/puppet-ca/ca.db
+cadir: /etc/puppetlabs/puppet/ssl/ca
+sql_dsn: file:/etc/puppetlabs/puppet/ssl/ca/ca.db
 ```
 
 The migration copies the whole CA — certificate, keys, CRL, serial, the
