@@ -28,6 +28,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -102,8 +104,6 @@ managed_certs:
 		}))
 		Expect(managed[0].Spec.DNSNames).NotTo(ContainElement(managed[0].Spec.Subject),
 			"the certname is not promoted into the SAN list for a managed certificate")
-		Expect(managed[0].Load).NotTo(BeNil())
-		Expect(managed[0].Save).NotTo(BeNil())
 	})
 
 	// Fail-fast, like the storage and kubernetes_export blocks. Every failure
@@ -334,6 +334,42 @@ managed_certs:
 		Expect(err).NotTo(HaveOccurred())
 		Expect(managed).To(HaveLen(1))
 		Expect(called).To(BeFalse(), "the pod namespace was resolved for a store that names its own")
+	})
+
+	// The case the two specs above stop short of: the namespace is resolved,
+	// and it is the one the key is written into. One fails the lookup and the
+	// other never makes it, so neither reaches a write, and nothing showed
+	// that the value buildManagedCerts resolves is the value the store uses.
+	// It decides which namespace a component's private key lands in, so it is
+	// asserted through Save and a read-back rather than from the config.
+	//
+	// Two mutants, caught by different halves. Dropping the hand-off leaves
+	// Build with no namespace for an entry that names none, and Build refuses,
+	// which fails the first assertion. Handing over the wrong value lets the
+	// build succeed and lands the key elsewhere, which only the read-back and
+	// the absence check can see.
+	It("writes into the pod's namespace when the entry names none", func() {
+		restoreClient := inClusterClientset
+		restoreNS := podNamespace
+		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
+		client := fake.NewClientset()
+		inClusterClientset = func(string) (kubernetes.Interface, error) { return client, nil }
+		podNamespace = func() (string, error) { return "pod-ns", nil }
+
+		managed, err := buildManagedCerts(writeServerConfig(secretStore), specCADir,
+			specConfigPath, stubCACerts{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(managed).To(HaveLen(1))
+		Expect(managed[0].Save(context.Background(), []byte("CERT"), []byte("KEY"))).To(Succeed())
+
+		sec, err := client.CoreV1().Secrets("pod-ns").Get(context.Background(), "a-tls", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred(),
+			"the entry names no namespace, so its key belongs in the pod's")
+		Expect(sec.Data).To(HaveKeyWithValue("tls.key", []byte("KEY")))
+
+		_, err = client.CoreV1().Secrets("default").Get(context.Background(), "a-tls", metav1.GetOptions{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+			"the key must not land in a namespace nobody resolved; got %v", err)
 	})
 })
 

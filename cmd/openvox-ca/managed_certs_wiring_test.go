@@ -239,6 +239,61 @@ managed_certs:
 			"main.go calls attachManagedCerts without checking the error it "+
 				"returns, so a configuration that can never issue would start "+
 				"the server instead of refusing it")
+
+		// checked and propagated look alike and are not redundant. They agree
+		// when the check is missing altogether -- both are false. They
+		// disagree on the case that matters most: an error compared to nil and
+		// then only logged leaves checked true and propagated false, so only
+		// propagated catches a swallowed refusal, and only checked names the
+		// shape when the comparison itself is gone.
+
+		// Order, which main.go's own comment says the call depends on.
+		// backgroundJobs reads the managed set to decide whether the reconcile
+		// loop is registered at all, so an attach written after it leaves every
+		// configured certificate unissued with nothing failing -- and passes
+		// all three assertions above, which ask only that the call exists and
+		// is honoured.
+		//
+		// What this pins is SOURCE order within one function body: some
+		// function literal must contain both calls, attach first. It cannot see
+		// execution order. An attach moved into a branch the serve path skips,
+		// or into a deferred closure that runs at exit, keeps its source
+		// position and passes. The compose integration suite, which starts the
+		// server and waits for a reconcile pass, is the behavioural cover for
+		// those; this is the one edit a unit spec can see.
+		var ordered bool
+		ast.Inspect(file, func(n ast.Node) bool {
+			fn, ok := n.(*ast.FuncLit)
+			if !ok {
+				return true
+			}
+			var attachAt, jobsAt token.Pos
+			ast.Inspect(fn.Body, func(m ast.Node) bool {
+				call, ok := m.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				switch {
+				case id.Name == "attachManagedCerts" && !attachAt.IsValid():
+					attachAt = call.Pos()
+				case id.Name == "backgroundJobs" && !jobsAt.IsValid():
+					jobsAt = call.Pos()
+				}
+				return true
+			})
+			if attachAt.IsValid() && jobsAt.IsValid() && attachAt < jobsAt {
+				ordered = true
+			}
+			return true
+		})
+		Expect(ordered).To(BeTrue(),
+			"main.go does not call attachManagedCerts before backgroundJobs in the "+
+				"same function, so the reconcile loop can be decided before there is "+
+				"anything for it to reconcile")
 	})
 
 	It("refuses to start when the configuration could never issue", func() {
