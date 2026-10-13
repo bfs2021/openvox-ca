@@ -327,9 +327,13 @@ Two halves, and both matter:
   directory, so it fails at the lock whatever the data files allow
   ([#493](https://github.com/voxpupuli/openvox-ca/issues/493)). That claim was
   in this section, in `internal/storage/sql.go`, in `backend.go`, in
-  `filesystem.go` and in `docs/storage-backends.md`, and was wrong in all five
-  — which is the more useful lesson: a rationale swept into every site that
-  mentions a mode is a rationale no single review will catch.
+  `filesystem.go`, in `docs/storage-backends.md` and twice in
+  `internal/storage/sql_sqlite_perms_test.go`, and was wrong in all seven —
+  which is the more useful lesson: a rationale swept into every site that
+  mentions a mode is a rationale no single review will catch. The sweep that
+  withdrew it first reported five, because it excluded `_test.go` files and then
+  read its own result as complete. A comment in a spec states the contract the
+  spec defends, so it is documentation: sweep it with the rest.
 
 What replaces correction is a check: `StorageService.CheckKeyPermissions` judges
 every file under the local private-key directory, every path a backend declares

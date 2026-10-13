@@ -39,13 +39,16 @@ import (
 // the filesystem backend keeps under private/.
 //
 // The invariant these specs pin is narrow and deliberate: **no world bits, ever,
-// on a file openvox-ca creates**. It is not "0600". Group access is permitted
-// because a platform that assigns an arbitrary uid per start needs the next
-// process to be able to read what the previous one created, and nothing
-// re-widens it since this package never chmods a file it did not create. The
-// reason is not fsGroup: a kubelet ORs group access in at every mount whatever
-// the creation mode was, so there 0600 would do just as well. What group access
-// cannot be is world access, and that is what is asserted here.
+// on a file openvox-ca creates**. It is not "0600". Group access is permitted so
+// that a store owned by a Unix group is reachable by that group without
+// anything being widened afterwards, which nothing here would do: this package
+// never chmods a file it did not create. The umask narrows it for anyone who
+// does not want it. The reason is not fsGroup -- a kubelet ORs group access in
+// at every mount whatever the creation mode was, so there 0600 would do just as
+// well -- and it is not an arbitrary-uid platform either, which fails at the
+// 0600 same-host lock files whatever the database allows (#493; see the spec
+// on the lock modes below). What group access cannot be is world access, and
+// that is what is asserted here.
 //
 // The modes are written as literals rather than as sqliteFilePermCreate. Asserting
 // the constant would compare the code against itself; these assert the guarantee
@@ -157,12 +160,11 @@ var _ = Describe("SQLiteFilePermissions", func() {
 	})
 
 	// The other half of the policy, and the reason this is not simply 0600: group
-	// access survives. On an arbitrary-uid platform it is how the CA reaches a
-	// database an earlier start created under a different uid, with the gid
-	// stable and nothing to re-widen the mode afterwards. Taking it away would
-	// break that deployment to protect against the pod's own group. (Not
-	// fsGroup, which re-applies group access regardless of how the file was
-	// created -- see sqliteFilePermCreate.)
+	// access survives, so a store owned by a Unix group stays reachable by that
+	// group with nothing re-widening the mode afterwards. (Not fsGroup, which
+	// re-applies group access regardless of how the file was created, and not an
+	// arbitrary-uid platform, which the 0600 lock files defeat first -- see
+	// sqliteFilePermCreate and #493.)
 	It("leaves group access in place when the umask permits it", func() {
 		old := syscall.Umask(umaskLooser)
 		DeferCleanup(func() { syscall.Umask(old) })

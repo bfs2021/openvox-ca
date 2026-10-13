@@ -82,7 +82,8 @@ var _ = Describe("AppendLine file modes", func() {
 
 	// The mode is set on creation only. A file that is already there belongs to
 	// the operator, and reasserting a mode on it is the one thing this package
-	// does not do -- on an arbitrary-uid platform it may not even own it.
+	// does not do -- and where the uid has changed since the file was written,
+	// chmod(2) would fail EPERM because this process does not own it.
 	It("leaves the mode of an existing file alone", func() {
 		p := inventoryPath()
 		Expect(os.MkdirAll(filepath.Dir(p), DirPerm)).To(Succeed(), "make the parent")
