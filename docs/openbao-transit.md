@@ -148,6 +148,14 @@ whatever you created in OpenBao). This keeps the running server's OpenBao
 policy scoped to `sign` and `read` on that one key — it never needs
 `create`/`import` rights.
 
+The key you create must be RSA or ECDSA: `rsa-2048`, `rsa-3072`, `rsa-4096`,
+`ecdsa-p256`, `ecdsa-p384` or `ecdsa-p521`. Transit hands out an `ed25519`
+key's public half as bare base64 rather than PEM, so openvox-ca refuses such a
+key as soon as it reads it, with `transit key "<name>": public_key is not valid
+PEM`. It could not use one anyway: an Ed25519 key signs with no hash, and
+openvox-ca only ever asks for SHA-256, SHA-384 or SHA-512; see
+[CA key security](ca-key-security.md#process-isolation).
+
 **Convenience:** if the named key does not exist yet, `openvox-ca` creates
 it itself on first boot (mirroring today's local-key bootstrap behaviour),
 using `ca_key_algo`/`ca_key_size` to pick the Transit key type. This requires
