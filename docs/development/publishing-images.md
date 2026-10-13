@@ -24,7 +24,7 @@ single multi-arch manifest per variant, as `ghcr.io/voxpupuli/openvox-ca`.
 | **Push to `main`** | Builds both variants on both architectures and pushes the rolling `edge` (and `main`) tags, plus their `-alpine` counterparts. `edge` always points at the latest default-branch build. |
 | **Release tag** (`git push` of a `v*` tag) | Builds both variants on both architectures and pushes the semver tags (`1.2.3`, `1.2`, and — for v1+ only — `1`), `latest`, and their `-alpine` counterparts. The major-only tag is suppressed for `v0.*` because a `0.x` major carries no compatibility promise. |
 | **Manual** (Actions → *Container images* → *Run workflow*) | Builds everything. Pushes only if you tick the **push** input; otherwise it builds and smoke-tests without publishing. |
-| **Pull request** | Always builds both variants on both architectures as a validation check. Same-repo PRs also push a throwaway `pr-<n>` tag; fork PRs build only and discard the result (their token cannot write packages). |
+| **Pull request** | Always builds both variants on both architectures as a validation check. Same-repo PRs also push a throwaway `pr-<n>` tag; fork PRs build only and discard the result (their token cannot write packages). The *Container images success* job aggregates the run, and `main`'s ruleset requires it, so a PR whose image build fails cannot merge. |
 
 Architecture builds run on native GitHub-hosted runners — `ubuntu-latest`
 (amd64) and `ubuntu-24.04-arm` (arm64) — and the per-architecture digests are

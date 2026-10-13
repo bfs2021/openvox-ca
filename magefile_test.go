@@ -1673,3 +1673,195 @@ var _ = Describe("verifyTagWorkflowsCold", func() {
 		})
 	})
 })
+
+var _ = Describe("verifyAggregateJobs", func() {
+	// Against the real ci.yml and container-images.yml (this also runs as part
+	// of `mage dev:check`).
+	It("finds the real aggregates intact", func() {
+		Expect(verifyAggregateJobs()).To(Succeed())
+	})
+
+	// Every failure spec below mutates one of these, so they are asserted to
+	// pass first: a fixture that already failed would let every spec pass for
+	// the wrong reason.
+	goodCI := `
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+jobs:
+  check:
+    steps:
+      - run: "true"
+  unit:
+    steps:
+      - run: "true"
+  ci:
+    name: CI success
+    if: always()
+    needs:
+      - check
+      - unit
+    steps:
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          jobs: ${{ toJSON(needs) }}
+  automerge:
+    needs:
+      - ci
+    steps:
+      - run: gh pr merge --auto "$PR_URL"
+`
+	goodImages := `
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  setup:
+    steps:
+      - run: "true"
+  build:
+    needs: setup
+    steps:
+      - uses: docker/build-push-action@0000000000000000000000000000000000000000
+        with:
+          push: true
+  aggregate:
+    name: Container images success
+    if: always()
+    needs: [setup, build]
+    steps:
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          allowed-skips: ${{ needs.setup.outputs.push != 'true' && 'merge' || '' }}
+          jobs: ${{ toJSON(needs) }}
+`
+	sources := func(ci, images string) map[string][]byte {
+		return map[string][]byte{"ci.yml": []byte(ci), "container-images.yml": []byte(images)}
+	}
+	// mutate replaces exactly one occurrence, so a fixture edit that stops
+	// matching fails the spec instead of silently testing the good fixture.
+	mutate := func(src, old, replacement string) string {
+		GinkgoHelper()
+		Expect(strings.Count(src, old)).To(Equal(1), "mutation anchor %q must occur exactly once", old)
+		return strings.Replace(src, old, replacement, 1)
+	}
+
+	It("accepts the good fixtures", func() {
+		Expect(verifyAggregateJobsIn(sources(goodCI, goodImages))).To(Succeed())
+	})
+
+	It("checks container-images.yml, not only ci.yml", func() {
+		bad := mutate(goodImages, "name: Container images success", "name: Images OK")
+		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
+			ContainSubstring(`container-images.yml job "aggregate" is named "Images OK"`)))
+	})
+
+	It("reports a workflow whose source was not supplied", func() {
+		Expect(verifyAggregateJobsIn(map[string][]byte{"ci.yml": []byte(goodCI)})).To(MatchError(
+			ContainSubstring("no source supplied for container-images.yml")))
+	})
+
+	It("reports a workflow it cannot parse", func() {
+		Expect(verifyAggregateJobsIn(sources(goodCI, "on: [\n"))).To(MatchError(
+			ContainSubstring("container-images.yml: yaml:")))
+	})
+
+	It("rejects a workflow with no aggregate job", func() {
+		bad := mutate(goodImages, "  aggregate:\n", "  fan-in:\n")
+		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
+			ContainSubstring(`container-images.yml has no job "aggregate"`)))
+	})
+
+	DescribeTable("the aggregate's condition",
+		func(cond string, ok bool) {
+			src := mutate(goodCI, "    if: always()\n", cond)
+			err := verifyAggregateJobsIn(sources(src, goodImages))
+			if ok {
+				Expect(err).NotTo(HaveOccurred())
+			} else {
+				Expect(err).To(MatchError(ContainSubstring(`ci.yml job "ci" has condition`)))
+			}
+		},
+		Entry("accepts always() in an expression", "    if: ${{ always() }}\n", true),
+		// The likeliest "tidy-up", and the one that fails open: a cancelled
+		// run then skips the aggregate, and a skipped check passes.
+		Entry("rejects !cancelled()", "    if: \"!cancelled()\"\n", false),
+		Entry("rejects success()", "    if: success()\n", false),
+		Entry("rejects no condition", "", false),
+	)
+
+	It("rejects an aggregate that does not decide through alls-green", func() {
+		bad := mutate(goodCI, "re-actors/alls-green@", "someone/else@")
+		Expect(verifyAggregateJobsIn(sources(bad, goodImages))).To(MatchError(
+			ContainSubstring(`ci.yml job "ci" has no re-actors/alls-green step`)))
+	})
+
+	It("rejects alls-green fed something other than the whole needs context", func() {
+		bad := mutate(goodImages, "jobs: ${{ toJSON(needs) }}", "jobs: ${{ toJSON(needs.build) }}")
+		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
+			ContainSubstring(`container-images.yml job "aggregate" has no re-actors/alls-green step`)))
+	})
+
+	It("names a job the aggregate does not need", func() {
+		bad := mutate(goodImages, "needs: [setup, build]", "needs: [setup]")
+		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
+			ContainSubstring(`container-images.yml job "aggregate" does not need job "build"`)))
+	})
+
+	It("rejects an aggregate that needs nothing", func() {
+		bad := mutate(goodImages, "    needs: [setup, build]\n", "")
+		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
+			ContainSubstring(`container-images.yml job "aggregate" needs no jobs`)))
+	})
+
+	It("accepts needs written as a bare string", func() {
+		src := mutate(goodCI, "  unit:\n    steps:\n      - run: \"true\"\n", "")
+		src = mutate(src, "    needs:\n      - check\n      - unit\n", "    needs: check\n")
+		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
+	})
+
+	// automerge needs ci, so it cannot be in ci's needs; the exemption is
+	// derived from the graph rather than listed, and reaches jobs downstream
+	// of it as well.
+	It("exempts jobs that depend on the aggregate, transitively", func() {
+		src := goodCI + "  notify:\n    needs: automerge\n    steps:\n      - run: \"true\"\n"
+		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
+	})
+
+	DescribeTable("the pull_request trigger",
+		func(trigger, want string) {
+			src := mutate(goodImages, "  pull_request:\n    types: [opened, synchronize, reopened]\n", trigger)
+			err := verifyAggregateJobsIn(sources(goodCI, src))
+			if want == "" {
+				Expect(err).NotTo(HaveOccurred())
+			} else {
+				Expect(err).To(MatchError(ContainSubstring(want)))
+			}
+		},
+		Entry("accepts an unset types list", "  pull_request:\n", ""),
+		Entry("accepts extra types", "  pull_request:\n    types: [opened, synchronize, reopened, edited]\n", ""),
+		Entry("rejects a missing trigger", "", "container-images.yml declares no pull_request trigger"),
+		Entry("rejects a branch filter", "  pull_request:\n    branches: [main]\n",
+			"container-images.yml filters pull_request by branches"),
+		Entry("rejects a branches-ignore filter", "  pull_request:\n    branches-ignore: [wip/**]\n",
+			"container-images.yml filters pull_request by branches-ignore"),
+		Entry("rejects a path filter", "  pull_request:\n    paths: [Dockerfile]\n",
+			"container-images.yml filters pull_request by paths"),
+		Entry("rejects a paths-ignore filter", "  pull_request:\n    paths-ignore: [docs/**]\n",
+			"container-images.yml filters pull_request by paths-ignore"),
+		Entry("rejects types without synchronize", "  pull_request:\n    types: [opened, reopened]\n",
+			`container-images.yml's pull_request types omit "synchronize"`),
+	)
+
+	It("reports every violation, not only the first", func() {
+		badCI := mutate(goodCI, "name: CI success", "name: CI")
+		badImages := mutate(goodImages, "needs: [setup, build]", "needs: [setup]")
+		err := verifyAggregateJobsIn(sources(badCI, badImages))
+		Expect(err).To(MatchError(ContainSubstring(`ci.yml job "ci" is named "CI"`)))
+		Expect(err).To(MatchError(ContainSubstring(`does not need job "build"`)))
+	})
+})

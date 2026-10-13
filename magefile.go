@@ -1318,6 +1318,226 @@ func verifyColdTagStepsIn(name string, doc tagCacheWorkflowDoc) (int, error) {
 	return setupGoSteps, errors.Join(errs...)
 }
 
+// requiredCheckAggregate is a fan-in job that main's ruleset requires by name.
+type requiredCheckAggregate struct {
+	workflow string // file name under .github/workflows
+	job      string // job ID
+	name     string // job name, which is the check name the ruleset matches
+}
+
+// requiredCheckAggregates mirrors the required status checks in main's
+// ruleset. Nothing here can read the ruleset, so a check added there needs an
+// entry here by hand. Each workflow gets one, because GitHub has no `needs`
+// across workflows: the image builds in container-images.yml are invisible to
+// ci.yml's "CI success", which is how #454 merged with them red.
+var requiredCheckAggregates = []requiredCheckAggregate{
+	{workflow: "ci.yml", job: "ci", name: "CI success"},
+	{workflow: "container-images.yml", job: "aggregate", name: "Container images success"},
+}
+
+// requiredPullRequestTypes are the pull_request activity types a workflow
+// carrying a required check must keep. They are GitHub's defaults, so an
+// unset `types:` passes. Dropping one leaves the PRs that event would have
+// re-checked without a check run on their head commit, waiting for ever.
+var requiredPullRequestTypes = []string{"opened", "synchronize", "reopened"}
+
+// aggregateWorkflowDoc is the slice of a workflow verifyAggregateJobsIn reads.
+type aggregateWorkflowDoc struct {
+	On   map[string]yaml.Node `yaml:"on"`
+	Jobs map[string]struct {
+		Name string `yaml:"name"`
+		If   string `yaml:"if"`
+		// Needs is a node because GitHub accepts a bare string as well as a
+		// list.
+		Needs yaml.Node `yaml:"needs"`
+		Steps []struct {
+			Uses string               `yaml:"uses"`
+			With map[string]yaml.Node `yaml:"with"`
+		} `yaml:"steps"`
+	} `yaml:"jobs"`
+}
+
+// verifyAggregateJobs asserts that every required-check aggregate still
+// reports, and still fails when it should. See verifyAggregateJobsIn for the
+// rules.
+func verifyAggregateJobs() error {
+	sources := make(map[string][]byte, len(requiredCheckAggregates))
+	for _, agg := range requiredCheckAggregates {
+		src, err := os.ReadFile(filepath.Join(".github", "workflows", agg.workflow))
+		if err != nil {
+			return err
+		}
+		sources[agg.workflow] = src
+	}
+	return verifyAggregateJobsIn(sources)
+}
+
+// verifyAggregateJobsIn is verifyAggregateJobs over caller-supplied workflow
+// contents. Every violation is reported, not only the first.
+//
+// Each rule closes a way for a required check to go quietly wrong:
+//
+//   - The pull_request trigger has no branch or path filter, and keeps the
+//     default activity types. A PR the workflow skips never gets the check,
+//     so it waits for ever rather than failing.
+//   - The job keeps its name, which is the ruleset's contract.
+//   - Its condition is `always()`. Without it, a failed need skips the
+//     aggregate, and a ruleset counts a skipped check as passing.
+//   - It decides through re-actors/alls-green over `toJSON(needs)`, so a
+//     failed or cancelled need fails it.
+//   - Its `needs` lists every other job in the workflow, except jobs that
+//     themselves depend on the aggregate (ci.yml's automerge). A job added
+//     later and left out would gate nothing.
+func verifyAggregateJobsIn(sources map[string][]byte) error {
+	var errs []error
+	for _, agg := range requiredCheckAggregates {
+		src, ok := sources[agg.workflow]
+		if !ok {
+			errs = append(errs, fmt.Errorf("no source supplied for %s", agg.workflow))
+			continue
+		}
+		var doc aggregateWorkflowDoc
+		if err := yaml.Unmarshal(src, &doc); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", agg.workflow, err))
+			continue
+		}
+		errs = append(errs, verifyRequiredCheckTrigger(agg.workflow, doc.On)...)
+
+		where := fmt.Sprintf("%s job %q", agg.workflow, agg.job)
+		job, ok := doc.Jobs[agg.job]
+		if !ok {
+			errs = append(errs, fmt.Errorf("%s has no job %q, the aggregate main's ruleset requires as %q",
+				agg.workflow, agg.job, agg.name))
+			continue
+		}
+		if job.Name != agg.name {
+			errs = append(errs, fmt.Errorf("%s is named %q, but main's ruleset requires the check %q; "+
+				"renaming it leaves every PR waiting for a check that never reports", where, job.Name, agg.name))
+		}
+		cond := stripSpace(job.If)
+		if cond != "always()" && cond != "${{always()}}" {
+			errs = append(errs, fmt.Errorf("%s has condition %q, not always(); a failed need would skip it, "+
+				"and a ruleset counts a skipped check as passing", where, job.If))
+		}
+		decides := slices.ContainsFunc(job.Steps, func(s struct {
+			Uses string               `yaml:"uses"`
+			With map[string]yaml.Node `yaml:"with"`
+		}) bool {
+			inputs, _ := foldInputs(s.With)
+			return actionPath(s.Uses) == "re-actors/alls-green" &&
+				stripSpace(inputs["jobs"].Value) == "${{toJSON(needs)}}"
+		})
+		if !decides {
+			errs = append(errs, fmt.Errorf("%s has no re-actors/alls-green step with jobs: ${{ toJSON(needs) }}, "+
+				"so nothing turns a failed need into a failed check", where))
+		}
+
+		needs, err := jobNeeds(job.Needs)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: needs: %w", where, err))
+			continue
+		}
+		if len(needs) == 0 {
+			errs = append(errs, fmt.Errorf("%s needs no jobs, so it gates nothing", where))
+		}
+		// dependsOnAggregate reports whether a job needs the aggregate,
+		// directly or through other jobs. seen bounds the walk; GitHub
+		// rejects a cyclic graph, but this runs on whatever the file says.
+		seen := map[string]bool{}
+		var dependsOnAggregate func(id string) bool
+		dependsOnAggregate = func(id string) bool {
+			deps, _ := jobNeeds(doc.Jobs[id].Needs)
+			for _, d := range deps {
+				if d == agg.job {
+					return true
+				}
+				if !seen[d] {
+					seen[d] = true
+					if dependsOnAggregate(d) {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		for _, id := range slices.Sorted(maps.Keys(doc.Jobs)) {
+			clear(seen)
+			if id == agg.job || dependsOnAggregate(id) {
+				continue
+			}
+			if !slices.Contains(needs, id) {
+				errs = append(errs, fmt.Errorf("%s does not need job %q, so that job's failure cannot fail %q",
+					where, id, agg.name))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// verifyRequiredCheckTrigger returns why a workflow carrying a required check
+// might not run on some pull request: a missing pull_request trigger, any
+// branch or path filter on it, or activity types narrower than
+// requiredPullRequestTypes.
+func verifyRequiredCheckTrigger(workflow string, on map[string]yaml.Node) []error {
+	node, ok := on["pull_request"]
+	if !ok {
+		return []error{fmt.Errorf("%s declares no pull_request trigger, so its required check never reports on a PR",
+			workflow)}
+	}
+	var trigger struct {
+		Branches       []string `yaml:"branches"`
+		BranchesIgnore []string `yaml:"branches-ignore"`
+		Paths          []string `yaml:"paths"`
+		PathsIgnore    []string `yaml:"paths-ignore"`
+		Types          []string `yaml:"types"`
+	}
+	// An empty trigger is the usual spelling, and decodes to the zero value.
+	if node.Kind != 0 && node.Tag != "!!null" {
+		if err := node.Decode(&trigger); err != nil {
+			return []error{fmt.Errorf("%s: on.pull_request: %w", workflow, err)}
+		}
+	}
+	var errs []error
+	for key, filter := range map[string][]string{
+		"branches":        trigger.Branches,
+		"branches-ignore": trigger.BranchesIgnore,
+		"paths":           trigger.Paths,
+		"paths-ignore":    trigger.PathsIgnore,
+	} {
+		if len(filter) > 0 {
+			errs = append(errs, fmt.Errorf("%s filters pull_request by %s; a PR it skips never gets its "+
+				"required check and waits for ever", workflow, key))
+		}
+	}
+	if len(trigger.Types) > 0 {
+		for _, t := range requiredPullRequestTypes {
+			if !slices.Contains(trigger.Types, t) {
+				errs = append(errs, fmt.Errorf("%s's pull_request types omit %q; a PR updated that way "+
+					"gets no required check on its head commit and waits for ever", workflow, t))
+			}
+		}
+	}
+	slices.SortFunc(errs, func(a, b error) int { return strings.Compare(a.Error(), b.Error()) })
+	return errs
+}
+
+// jobNeeds returns a job's `needs:`, which GitHub accepts as a string or a
+// list of strings.
+func jobNeeds(node yaml.Node) ([]string, error) {
+	switch node.Kind {
+	case 0:
+		return nil, nil
+	case yaml.ScalarNode:
+		return []string{node.Value}, nil
+	default:
+		var needs []string
+		if err := node.Decode(&needs); err != nil {
+			return nil, err
+		}
+		return needs, nil
+	}
+}
+
 // actionPath is a step's `uses:` without its @ref, lowercased because GitHub
 // resolves owner and repository names case-insensitively -- a guard matching
 // "actions/setup-go" exactly would miss "Actions/setup-go".
@@ -6027,6 +6247,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking tag-triggered workflows restore no cache...")
 	if err := verifyTagWorkflowsCold(); err != nil {
+		return err
+	}
+	fmt.Println("Checking the required-check aggregates...")
+	if err := verifyAggregateJobs(); err != nil {
 		return err
 	}
 	// Vet the two packages with non-Linux build-tagged files. Every CI check
