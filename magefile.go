@@ -662,7 +662,8 @@ func automergeTopLevelOr(cond string) bool {
 var baseScopedWorkflows = []string{"ci.yml", "codeql.yml"}
 
 // workflowGuardDoc, with pullRequestTrigger below, is the slice of a workflow
-// document the two guards read. The `on:` subtree is kept as raw nodes and the
+// document the two base-scoping guards read; of pullRequestTrigger they read
+// only the branch keys, and verifyRequiredCheckTrigger the rest. The `on:` subtree is kept as raw nodes and the
 // trigger decoded separately, so the two types together are the read surface,
 // not this one alone. The field lists live in the types rather than in a
 // summary here: an enumeration in prose goes stale the moment a field is
@@ -1335,6 +1336,11 @@ type requiredCheckAggregate struct {
 	// allowed skip is a job whose skipping cannot fail the check, so it is
 	// pinned here rather than left to the workflow.
 	allowedSkips string
+	// allowedSkipJobs are the job IDs allowedSkips names, each of which the
+	// aggregate must need. The expression is only text to this guard, so
+	// without this a renamed job would leave the pin matching while naming
+	// nothing, and the check would fail on every run that skips the job.
+	allowedSkipJobs []string
 }
 
 // requiredCheckAggregates mirrors the required status checks in main's
@@ -1347,7 +1353,8 @@ var requiredCheckAggregates = []requiredCheckAggregate{
 	{
 		workflow: "container-images.yml", job: "aggregate", name: "Container images success",
 		// merge runs only when the run pushes, so it may skip only then.
-		allowedSkips: "${{ needs.setup.outputs.push != 'true' && 'merge' || '' }}",
+		allowedSkips:    "${{ needs.setup.outputs.push != 'true' && 'merge' || '' }}",
+		allowedSkipJobs: []string{"merge"},
 	},
 }
 
@@ -1407,7 +1414,8 @@ func verifyAggregateJobs() error {
 //     nothing stops that decision failing the job: see verifyAggregateDecision.
 //   - Its `needs` lists every other job in the workflow, except jobs that
 //     themselves depend on the aggregate (ci.yml's automerge). A job added
-//     later and left out would gate nothing.
+//     later and left out would gate nothing. It includes every job its
+//     allowed skips name, and no needed job sets continue-on-error.
 //   - No other job in any workflow carries its name. The ruleset matches a
 //     check by name alone, so a second job of that name -- a copied block
 //     downstream of the aggregate, say, which the needs rule exempts -- makes
@@ -1455,6 +1463,22 @@ func verifyAggregateJobsIn(sources map[string][]byte) error {
 		}
 		if len(needs) == 0 {
 			errs = append(errs, fmt.Errorf("%s needs no jobs, so it gates nothing", where))
+		}
+		for _, id := range agg.allowedSkipJobs {
+			if !slices.Contains(needs, id) {
+				errs = append(errs, fmt.Errorf("%s allows job %q to skip but does not need it; a pin naming a job "+
+					"that is not there fails the check on every run that skips the job it meant", where, id))
+			}
+		}
+		// A needed job's own continue-on-error reports it to the aggregate
+		// as a success when it failed, which is allowed-failures by another
+		// route. Step-level continue-on-error stays legitimate: a step that
+		// may fail does not hide the job's other steps.
+		for _, id := range needs {
+			if mayContinue(doc.Jobs[id].ContinueOnError) {
+				errs = append(errs, fmt.Errorf("%s job %q sets continue-on-error, so its failure reaches %q as "+
+					"a success", agg.workflow, id, agg.name))
+			}
 		}
 		// dependsOnAggregate reports whether a job needs the aggregate,
 		// directly or through other jobs. seen bounds the walk; GitHub

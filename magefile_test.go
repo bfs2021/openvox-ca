@@ -1729,10 +1729,16 @@ jobs:
       - uses: docker/build-push-action@0000000000000000000000000000000000000000
         with:
           push: true
+  merge:
+    needs:
+      - setup
+      - build
+    steps:
+      - run: "true"
   aggregate:
     name: Container images success
     if: always()
-    needs: [setup, build]
+    needs: [setup, build, merge]
     steps:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
@@ -1885,20 +1891,53 @@ jobs:
 	})
 
 	It("names a job the aggregate does not need", func() {
-		bad := mutate(goodImages, "needs: [setup, build]", "needs: [setup]")
+		bad := mutate(goodImages, "needs: [setup, build, merge]", "needs: [setup, merge]")
 		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
 			ContainSubstring(`container-images.yml job "aggregate" does not need job "build"`)))
 	})
 
 	// Fails closed rather than passing: a needs it cannot read is reported.
 	It("reports a needs it cannot read", func() {
-		bad := mutate(goodImages, "needs: [setup, build]", "needs: {setup: build}")
+		bad := mutate(goodImages, "needs: [setup, build, merge]", "needs: {setup: build}")
 		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
 			ContainSubstring(`container-images.yml job "aggregate": needs:`)))
 	})
 
+	// The pin is text to the guard; tying it to needs catches a rename that
+	// would otherwise leave it naming nothing.
+	It("rejects an allowed skip naming a job the aggregate does not need", func() {
+		bad := mutate(goodImages, "  merge:\n", "  publish:\n")
+		bad = mutate(bad, "needs: [setup, build, merge]", "needs: [setup, build, publish]")
+		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
+			ContainSubstring(`container-images.yml job "aggregate" allows job "merge" to skip but does not need it`)))
+	})
+
+	DescribeTable("continue-on-error on a needed job",
+		func(option, want string) {
+			src := mutate(goodImages, "  build:\n    needs: setup\n", "  build:\n    needs: setup\n"+option)
+			err := verifyAggregateJobsIn(sources(goodCI, src))
+			if want == "" {
+				Expect(err).NotTo(HaveOccurred())
+			} else {
+				Expect(err).To(MatchError(ContainSubstring(want)))
+			}
+		},
+		Entry("rejects true", "    continue-on-error: true\n",
+			`container-images.yml job "build" sets continue-on-error`),
+		Entry("rejects an expression", "    continue-on-error: ${{ matrix.experimental }}\n",
+			`container-images.yml job "build" sets continue-on-error`),
+		Entry("accepts false", "    continue-on-error: false\n", ""),
+	)
+
+	// ci.yml's coverage summary does this, and it hides nothing.
+	It("accepts continue-on-error on a needed job's step", func() {
+		src := mutate(goodCI, "  unit:\n    steps:\n      - run: \"true\"\n",
+			"  unit:\n    steps:\n      - run: \"true\"\n        continue-on-error: true\n")
+		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
+	})
+
 	It("rejects an aggregate that needs nothing", func() {
-		bad := mutate(goodImages, "    needs: [setup, build]\n", "")
+		bad := mutate(goodImages, "    needs: [setup, build, merge]\n", "")
 		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
 			ContainSubstring(`container-images.yml job "aggregate" needs no jobs`)))
 	})
@@ -1918,7 +1957,8 @@ jobs:
 	})
 
 	// GitHub refuses a cyclic graph, but the guard reads whatever the file
-	// says; without its bound this spec never returns.
+	// says. Without its bound the walk recurses until the stack overflows,
+	// which crashes the whole test binary rather than failing this spec.
 	It("terminates on a cyclic needs graph", func() {
 		src := goodCI + "  x:\n    needs: y\n    steps:\n      - run: \"true\"\n" +
 			"  y:\n    needs: x\n    steps:\n      - run: \"true\"\n"
@@ -2009,7 +2049,7 @@ jobs:
 	It("reports every violation, not only the first", func() {
 		badCI := mutate(goodCI, "name: CI success", "name: CI")
 		badCI = mutate(badCI, "    if: always()\n", "")
-		badImages := mutate(goodImages, "needs: [setup, build]", "needs: [setup]")
+		badImages := mutate(goodImages, "needs: [setup, build, merge]", "needs: [setup, merge]")
 		err := verifyAggregateJobsIn(sources(badCI, badImages))
 		Expect(err).To(MatchError(ContainSubstring(`ci.yml job "ci" is named "CI"`)))
 		Expect(err).To(MatchError(ContainSubstring(`ci.yml job "ci" has condition`)))
