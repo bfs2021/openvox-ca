@@ -26,6 +26,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -630,6 +631,12 @@ var _ = Describe("the OpenBao environment enumeration", func() {
 	})
 })
 
+// sdkSourceNeeds is the failure message's account of what the SDK-source
+// spec depends on outside the repository.
+const sdkSourceNeeds = "the SDK-source spec reads the OpenBao client library source that go.mod pins, " +
+	"so it needs the go command on PATH and the module in the module cache. It fails rather than " +
+	"skips without them, because a skipped guard would let an SDK upgrade through unchecked"
+
 // sdkSourceDir asks the go command where the pinned api/v2 module lives. Its
 // environment has GIT_* stripped, as AGENTS.md requires of anything that
 // might run git.
@@ -641,8 +648,13 @@ func sdkSourceDir() string {
 		}
 	}
 	out, err := cmd.Output()
-	Expect(err).NotTo(HaveOccurred())
+	var stderr []byte
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		stderr = exitErr.Stderr
+	}
+	Expect(err).NotTo(HaveOccurred(), "%s.\ngo list: %s", sdkSourceNeeds, strings.TrimSpace(string(stderr)))
 	dir := strings.TrimSpace(string(out))
-	Expect(dir).NotTo(BeEmpty())
+	Expect(dir).NotTo(BeEmpty(), "%s.\ngo list printed no directory, so the module is not in the cache; run go mod download", sdkSourceNeeds)
 	return dir
 }
