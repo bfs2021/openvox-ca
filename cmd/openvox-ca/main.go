@@ -882,15 +882,7 @@ func newRootCmd() *cobra.Command {
 				handler = exporter.InstrumentHandler(handler)
 			}
 
-			server := &http.Server{
-				Addr:              addr,
-				Handler:           handler,
-				ReadHeaderTimeout: 10 * time.Second,
-				ReadTimeout:       30 * time.Second,
-				WriteTimeout:      60 * time.Second,
-				IdleTimeout:       120 * time.Second,
-				MaxHeaderBytes:    1 << 20,
-			}
+			server := newAPIServer(addr, handler)
 
 			// Start the metrics exporter on its own listener. It runs over plain
 			// HTTP regardless of the API's TLS configuration; operators should

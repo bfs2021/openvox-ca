@@ -19,12 +19,12 @@ package metrics
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/httpserver"
 )
 
 // Exporter bundles a dedicated Prometheus registry with the HTTP request
@@ -116,9 +116,32 @@ func (e *Exporter) InstrumentHandler(next http.Handler) http.Handler {
 
 // NewServer builds an *http.Server that serves the exporter's metrics at
 // /metrics on addr. The caller owns its lifecycle (ListenAndServe / Shutdown).
-// Timeouts mirror the main API server's conservative defaults so a stuck
+// Its timeouts are the main API server's, from httpserver.Defaults, so a stuck
 // scraper cannot tie up a connection indefinitely.
+//
+// Sharing them is safe only while the write budget outlasts a scrape.
+// WriteTimeout covers the whole handler, and a scrape spends up to the
+// collector's gather budget (defaultGatherTimeout) reading storage before it
+// writes a byte. A scrape that outran the write budget would be cut off
+// mid-response, and Prometheus would record a truncated scrape rather than a
+// slow one.
+//
+// Encoding is the other cost, and it scales with what the gather managed to
+// read. Against the filesystem backend, the collector measured about 45µs per
+// leaf certificate to read and parse it, and about 5µs more to encode its three
+// series and gzip them. A gather that just fits its budget is therefore
+// followed by roughly a tenth of that again in encoding, and backends that read
+// over the network spend longer per leaf, which shrinks the ratio further. A
+// 60s write budget against a 10s gather leaves a margin of several times for
+// slow hosts and slow scrapers. A spec fails if the write budget falls below
+// twice the gather budget.
 func (e *Exporter) NewServer(addr string) *http.Server {
+	return e.newServer(addr, httpserver.Defaults())
+}
+
+// newServer is NewServer with the timeouts supplied, so a spec can exercise
+// them in milliseconds rather than waiting out the real ones.
+func (e *Exporter) newServer(addr string, timeouts httpserver.Timeouts) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", e.Handler())
 	// A trivial root response makes it obvious the listener is the metrics
@@ -127,9 +150,5 @@ func (e *Exporter) NewServer(addr string) *http.Server {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("Puppet CA metrics exporter\nSee /metrics\n"))
 	})
-	return &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	return httpserver.New(addr, mux, timeouts)
 }
