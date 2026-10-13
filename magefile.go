@@ -2443,8 +2443,83 @@ type chartRenderCase struct {
 	notWants   []string
 }
 
+// inlineCredentialSources are the files that declare the server's config keys,
+// relative to the repository root. internal/k8sexport/config.go declares the
+// kubernetes_export block too, but only export targets: the exporter
+// authenticates with the pod's ServiceAccount, so no credential lives there.
+//
+// The scan reads tag names, not paths, so a key in a nested block such as
+// openbao comes back bare. That is enough to fail the check below; the fix is
+// then a dig for its path in openvox-ca.validate, not a top-level entry, and
+// a reject case expecting "config.openbao.<key>: set ".
+var inlineCredentialSources = []string{"internal/config/*.go", "cmd/openvox-ca/config.go"}
+
+// inlineCredentialKeyRe matches a yaml tag whose name says it holds a secret,
+// with or without tag options such as ",omitempty". The words include
+// passphrase because this tree already uses it (ca_key_passphrase_file, and
+// PUPPET_CA_KEY_PASSPHRASE inline). A key ending _file names a path to the
+// secret rather than the secret, and inlineCredentialKeys drops those.
+var inlineCredentialKeyRe = regexp.MustCompile(`yaml:"([a-z0-9_]*(?:password|passphrase|secret|token|credential|dsn)[a-z0-9_]*)[",]`)
+
+// inlineCredentialKeys returns, sorted, every config key under root that can
+// hold a credential inline. chart:test requires a reject case for each, which
+// is what keeps the chart's $credentials list from falling behind a new one:
+// the list itself is hand-kept, and a key it misses renders into the ConfigMap
+// in clear text.
+func inlineCredentialKeys(root string) ([]string, error) {
+	seen := map[string]bool{}
+	for _, pattern := range inlineCredentialSources {
+		files, err := filepath.Glob(filepath.Join(root, pattern))
+		if err != nil {
+			return nil, err
+		}
+		// Each source needs a floor of its own: one that has been renamed or
+		// split would otherwise stop being scanned while the others kept the
+		// total above zero.
+		if len(files) == 0 {
+			return nil, fmt.Errorf("inline-credential source %s matches no file under %s; update inlineCredentialSources", pattern, root)
+		}
+		for _, file := range files {
+			if strings.HasSuffix(file, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(file)
+			if err != nil {
+				return nil, err
+			}
+			for _, m := range inlineCredentialKeyRe.FindAllSubmatch(src, -1) {
+				if key := string(m[1]); !strings.HasSuffix(key, "_file") {
+					seen[key] = true
+				}
+			}
+		}
+	}
+	// A scan that finds nothing would pass every key by default, so it fails
+	// instead: the sources have moved or their tags have changed shape.
+	if len(seen) == 0 {
+		return nil, fmt.Errorf("found no inline-credential config keys in %v under %s; update inlineCredentialSources", inlineCredentialSources, root)
+	}
+	return slices.Sorted(maps.Keys(seen)), nil
+}
+
+// uncoveredCredentialKeys returns the keys no reject case refuses, judged by
+// the per-key line openvox-ca.validate prints: "config.<key>: set ", or
+// "config.<block>.<key>: set " for a key in a nested block, whose real path is
+// what an operator needs to see.
+func uncoveredCredentialKeys(keys []string, rejects []chartRejectCase) []string {
+	var uncovered []string
+	for _, key := range keys {
+		marker := regexp.MustCompile(`config\.(?:[a-z0-9_]+\.)*` + regexp.QuoteMeta(key) + `: set `)
+		if !slices.ContainsFunc(rejects, func(c chartRejectCase) bool { return marker.MatchString(c.wantErr) }) {
+			uncovered = append(uncovered, key)
+		}
+	}
+	return uncovered
+}
+
 // chartRejectCase is one assertion that the chart refuses a configuration:
-// render with these overrides and require the failure to mention `wantErr`.
+// render with these overrides and require the failure to mention `wantErr`,
+// and none of `notWants`.
 type chartRejectCase struct {
 	name string
 	sets []string
@@ -2453,6 +2528,9 @@ type chartRejectCase struct {
 	// come from a file.
 	valuesYAML string
 	wantErr    string
+	// notWants holds what helm's output must not repeat, such as the
+	// credential a refusal is about: that output ends up in CI logs.
+	notWants []string
 }
 
 // renderWithAppVersion renders a throwaway copy of the chart whose appVersion
@@ -3951,6 +4029,97 @@ config:
 			sets:  []string{tls},
 			wants: []string{"app.kubernetes.io/name: openvox-ca\n          maxSkew: 1"},
 		},
+		{
+			// The credential refusal keys on a password, not on sql_dsn being
+			// set. Left in place, the scheme's colon would precede the @ — so
+			// this also pins that a postgres scheme is set aside first.
+			name:       "a postgres sql_dsn without a password stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db:5432/ca?sslmode=verify-full'\n",
+			wants:      []string{"sql_dsn: postgres://ca@db:5432/ca?sslmode=verify-full"},
+		},
+		{
+			// The same for the other spellings pgdriver accepts: net/url
+			// lowercases the scheme, and postgresql:// is an alias.
+			name:       "an upper-case postgresql sql_dsn without a password stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'POSTGRESQL://ca@db/ca'\n",
+			wants:      []string{"sql_dsn: POSTGRESQL://ca@db/ca"},
+		},
+		{
+			// No user part at all, and no @: the port's colon is not a password.
+			name:       "a postgres sql_dsn with no user part stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://db:5432/ca?sslmode=verify-full'\n",
+			wants:      []string{"sql_dsn: postgres://db:5432/ca?sslmode=verify-full"},
+		},
+		{
+			// An empty password= parameter is no secret, as an empty userinfo
+			// password is not.
+			name:       "a sql_dsn with an empty password= parameter stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?password=&sslmode=verify-full'\n",
+			wants:      []string{"sql_dsn: postgres://ca@db/ca?password=&sslmode=verify-full"},
+		},
+		{
+			// pgdriver's socket form, where the host part names the database.
+			name:       "a unix-socket sql_dsn without a password stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'unix://ca@ca/var/run/postgresql/.s.PGSQL.5432'\n",
+			wants:      []string{"sql_dsn: unix://ca@ca/var/run/postgresql/.s.PGSQL.5432"},
+		},
+		{
+			// An empty password is no secret. The colon is there, but nothing
+			// follows it.
+			name:       "a postgres sql_dsn with an empty password stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:@db/ca'\n",
+			wants:      []string{"sql_dsn: postgres://ca:@db/ca"},
+		},
+		{
+			// allowNativePasswords is a parameter whose name contains
+			// "Password", so this pins that the password= match stays a match on
+			// that parameter rather than on the word.
+			name:       "a MySQL sql_dsn without a password stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'ca@tcp(db:3306)/ca?allowNativePasswords=true'\n",
+			wants:      []string{"sql_dsn: ca@tcp(db:3306)/ca?allowNativePasswords=true"},
+		},
+		{
+			// A SQLite path may hold an @, and its "file:" colon precedes it, so
+			// under a sqlite backend only a password= parameter counts.
+			name:       "a SQLite sql_dsn whose path holds an @ stays in config under a sqlite backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'file:/srv/ca@prod/ca.db'\n",
+			wants:      []string{"sql_dsn: file:/srv/ca@prod/ca.db"},
+		},
+		{
+			// The server folds case and accepts sqlite3 as an alias.
+			name:       "a SQLite sql_dsn whose path holds an @ stays in config under a SQLite3 backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: SQLite3\n  sql_dsn: 'file:/srv/ca@prod/ca.db'\n",
+			wants:      []string{"sql_dsn: file:/srv/ca@prod/ca.db"},
+		},
+		{
+			name:       "a SQLite sql_dsn, which is a file path, stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'file:/var/lib/puppet-ca/ca.db'\n",
+			wants:      []string{"sql_dsn: file:/var/lib/puppet-ca/ca.db"},
+		},
+		{
+			name:  "an empty backend password is not a credential",
+			sets:  []string{tls, "config.redis_password="},
+			wants: []string{`redis_password: ""`},
+		},
+		{
+			// With existingConfigMap the chart renders no ConfigMap, so `config`
+			// reaches nothing and there is nothing to refuse. The positive
+			// control is the volume naming the operator's ConfigMap.
+			name:     "a credential in config is not refused when existingConfigMap replaces the ConfigMap",
+			sets:     []string{"existingConfigMap=mine", "config.redis_password=HUNTER2"},
+			wants:    []string{"name: mine"},
+			notWants: []string{"HUNTER2"},
+		},
 	}
 
 	rejects := []chartRejectCase{
@@ -4491,6 +4660,280 @@ config:
 			wantErr:    "no carriage return or Unicode line separator",
 		},
 		{
+			name:     "an etcd password in config, which would land in the ConfigMap",
+			sets:     []string{tls, "config.etcd_password=ETCDSECRET"},
+			wantErr:  "config.etcd_password: set PUPPET_CA_ETCD_PASSWORD instead",
+			notWants: []string{"ETCDSECRET"},
+		},
+		{
+			name:     "a Redis password in config, which would land in the ConfigMap",
+			sets:     []string{tls, "config.redis_password=HUNTER2"},
+			wantErr:  "config.redis_password: set PUPPET_CA_REDIS_PASSWORD instead",
+			notWants: []string{"HUNTER2"},
+		},
+		{
+			name:     "a Redis Sentinel password in config, which would land in the ConfigMap",
+			sets:     []string{tls, "config.redis_sentinel_password=SENTINELSECRET"},
+			wantErr:  "config.redis_sentinel_password: set PUPPET_CA_REDIS_SENTINEL_PASSWORD instead",
+			notWants: []string{"SENTINELSECRET"},
+		},
+		{
+			// Every offending key is named, so one round trip fixes them all.
+			// Sorted, because the helper ranges over a dict.
+			name:     "two credentials in config, both named in one refusal",
+			sets:     []string{tls, "config.etcd_password=ETCDSECRET", "config.redis_password=HUNTER2"},
+			wantErr:  "config.etcd_password: set PUPPET_CA_ETCD_PASSWORD instead\n  config.redis_password: set PUPPET_CA_REDIS_PASSWORD instead",
+			notWants: []string{"ETCDSECRET", "HUNTER2"},
+		},
+		{
+			name:       "a postgres sql_dsn carrying a password",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PGSECRET@db:5432/ca?sslmode=verify-full'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			name:       "a MySQL sql_dsn carrying a password",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'ca:MYSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MYSECRET"},
+		},
+		{
+			// go-sql-driver cuts at the last slash, so a slash in the password
+			// is legal, and the chart has to look past it to the @.
+			name:       "a MySQL sql_dsn whose password contains a slash",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'ca:MY/SECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MY/SECRET"},
+		},
+		{
+			// Read as a URL this has the userinfo "MYSECRET" and no password,
+			// which is why only the postgres schemes are split as URLs.
+			name:       "a MySQL sql_dsn whose password begins with //",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'ca://MYSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MYSECRET"},
+		},
+		{
+			// No driver here authenticates with it, but the ConfigMap would hold
+			// it all the same.
+			name:       "a sql_dsn carrying a password= parameter",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?password=PGSECRET'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			// The match is on the parameter's tail, so a prefixed name counts;
+			// anchoring it to [?&]password= would let this one through.
+			name:       "a sql_dsn carrying an sslpassword= parameter",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?sslpassword=KEYSECRET'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"KEYSECRET"},
+		},
+		{
+			name:       "a sql_dsn carrying an upper-case PASSWORD= parameter",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?PASSWORD=PGSECRET'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			// net/url ends the authority at the first /, leaving "ca:PG" with no
+			// @ and so no userinfo. The server cannot use this DSN, but the
+			// ConfigMap would hold the password, so the chart looks to the last
+			// @ instead.
+			name:       "a postgres sql_dsn whose password contains an unescaped slash",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG/SECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG/SECRET"},
+		},
+		{
+			// net/url cuts the query off before it splits the authority, so a ?
+			// in the password does the same.
+			name:       "a postgres sql_dsn whose password contains an unescaped question mark",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG?SECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG?SECRET"},
+		},
+		{
+			// The third character that ends net/url's authority early.
+			name:       "a postgres sql_dsn whose password contains an unescaped hash",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG#SECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG#SECRET"},
+		},
+		{
+			// The other two schemes set aside before the check. Their
+			// password-less render cases pin that they are set aside; these
+			// pin that a password in them is still refused.
+			name:       "a postgresql sql_dsn carrying a password",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgresql://ca:PGSECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			name:       "a unix-socket sql_dsn carrying a password",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'unix://ca:PGSECRET@ca/var/run/postgresql/.s.PGSQL.5432'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			// The documented false refusal: this DSN has no password and works,
+			// but the port's colon comes before the @ in its query value. The
+			// chart refuses it on purpose; a rule narrowed to let it through
+			// would change the documented contract, and should fail here first.
+			name:       "a working sql_dsn with an @ in a query value after a port, refused by design",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db:5432/ca?application_name=a@b'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+		},
+		{
+			// With no database path the last / falls inside the password, so
+			// cutting there, as go-sql-driver would, finds no @.
+			name:       "a pathless postgres sql_dsn whose password contains an unescaped slash",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG/SECRET@db?sslmode=verify-full'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG/SECRET"},
+		},
+		{
+			// Here the only slashes are the scheme's.
+			name:       "a pathless postgres sql_dsn whose password contains an unescaped question mark",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG?SECRET@db:5432'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG?SECRET"},
+		},
+		{
+			// The same in go-sql-driver's form: with the slash inside the
+			// password and no database name, the text before the last / holds
+			// no @.
+			name:       "a pathless MySQL sql_dsn whose password contains a slash",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'ca:MY/SECRET@tcp(db:3306)'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MY/SECRET"},
+		},
+		{
+			// An @ in the user part, as in Azure's user@server convention, puts
+			// one in net/url's authority too, so its userinfo is just "ca" and
+			// the password after the / goes unseen. Only the last @ counts.
+			name:       "a postgres sql_dsn with an @ in its user part and a slash in its password",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@tenant:PG/SECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG/SECRET"},
+		},
+		{
+			// The same in go-sql-driver's form, where the last / is inside the
+			// password and the last @ before it is the user part's.
+			name:       "a pathless MySQL sql_dsn with an @ in its user part and a slash in its password",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'ca@tenant:MY/SECRET@tcp(db:3306)'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MY/SECRET"},
+		},
+		{
+			// The server picks the driver from storage_backend, not the DSN. To
+			// go-sql-driver this is user "postgres" with password "//MYSECRET";
+			// read as a URL it has the userinfo "MYSECRET" and no password.
+			name:       "a postgres-looking sql_dsn under a mysql backend, read as MySQL",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: mysql\n  sql_dsn: 'postgres://MYSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MYSECRET"},
+		},
+		{
+			// The SQLite exemption needs the DSN to look like a SQLite path as
+			// well: the backend comes from config, which
+			// PUPPET_CA_STORAGE_BACKEND outranks, so this password may be live.
+			name:       "a postgres sql_dsn with a password under a sqlite backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'postgres://ca:PGSECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			// The server recognises a SQLite URI by a case-sensitive "file:"
+			// (sqliteFilePath in internal/storage/sql.go), so the exemption
+			// does too: FILE: is no SQLite URI, and its colon counts.
+			name:       "an upper-case FILE: sql_dsn with an @ under a sqlite backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'FILE:ca:SQLSECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"SQLSECRET"},
+		},
+		{
+			// The other half of the SQLite exemption: a file: DSN is exempt only
+			// under a sqlite backend. To go-sql-driver this is user "file" with
+			// password "SQLSECRET".
+			name:       "a file: sql_dsn with a password under a mysql backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: mysql\n  sql_dsn: 'file:SQLSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"SQLSECRET"},
+		},
+		{
+			// And with no backend in config at all, as the docs promise.
+			name:       "a file: sql_dsn with an @ and no storage_backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'file:SQLSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"SQLSECRET"},
+		},
+		{
+			// libpq's keyword/value form allows spaces around the =. pgdriver
+			// cannot parse this DSN at all, but the ConfigMap would hold it.
+			name:       "a keyword/value sql_dsn with spaces around password =",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'host=db user=ca password = PGSECRET'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			// Even a SQLite path faces the password= check.
+			name:       "a SQLite sql_dsn carrying a password= parameter under a sqlite backend",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'file:/srv/ca.db?password=SQLSECRET'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"SQLSECRET"},
+		},
+		{
+			// The server trims the backend name as well as folding its case
+			// (ParseBackendKind), so a padded mysql is still mysql.
+			name:       "a postgres-looking sql_dsn under a padded mysql backend, read as MySQL",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: ' mysql '\n  sql_dsn: 'postgres://MYSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MYSECRET"},
+		},
+		{
+			// The server folds case and accepts mariadb as an alias.
+			name:       "a postgres-looking sql_dsn under a MariaDB backend, read as MySQL",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  storage_backend: MariaDB\n  sql_dsn: 'postgres://MYSECRET@tcp(db:3306)/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"MYSECRET"},
+		},
+		{
+			// --set types an all-digit value as a number, which a check for
+			// strings alone would wave through.
+			name:     "a numeric Redis password in config",
+			sets:     []string{tls, "config.redis_password=123456"},
+			wantErr:  "config.redis_password: set PUPPET_CA_REDIS_PASSWORD instead",
+			notWants: []string{"123456"},
+		},
+		{
 			name:    "a mistyped value the schema should catch",
 			sets:    []string{tls, "metric.enabled=true"},
 			wantErr: "additional properties",
@@ -4605,14 +5048,45 @@ config:
 			fmt.Printf("FAIL  rejects %s\n      failed, but not with %q: %v\n", tc.name, tc.wantErr, err)
 			failures++
 		default:
-			fmt.Printf("ok    rejects %s\n", tc.name)
+			// helm's own output only: err is mage's, which quotes the whole
+			// command line, --set values included.
+			ok := true
+			for _, notWant := range tc.notWants {
+				if strings.Contains(out, notWant) {
+					fmt.Printf("FAIL  rejects %s\n      failed, but repeated %q\n", tc.name, notWant)
+					ok = false
+				}
+			}
+			if ok {
+				fmt.Printf("ok    rejects %s\n", tc.name)
+			} else {
+				failures++
+			}
+		}
+	}
+
+	// Every config key the server can take a credential in must have a reject
+	// case naming it, or a new one would render into the ConfigMap in clear
+	// text and pass every case above.
+	credentialKeys, err := inlineCredentialKeys(".")
+	if err != nil {
+		return err
+	}
+	uncovered := uncoveredCredentialKeys(credentialKeys, rejects)
+	for _, key := range credentialKeys {
+		name := fmt.Sprintf("config.%s is refused by a reject case", key)
+		if slices.Contains(uncovered, key) {
+			fmt.Printf("FAIL  %s\n      no reject case expects \"config.%s: set \" (or the key under its block's path); add it to $credentials in openvox-ca.validate (or, in a nested block, a dig for its path) and a case here\n", name, key)
+			failures++
+		} else {
+			fmt.Printf("ok    %s\n", name)
 		}
 	}
 
 	if failures > 0 {
 		return fmt.Errorf("%d chart assertion(s) failed", failures)
 	}
-	fmt.Printf("\nAll %d chart assertions passed\n", len(renders)+len(rejects)+3)
+	fmt.Printf("\nAll %d chart assertions passed\n", len(renders)+len(rejects)+len(credentialKeys)+3)
 	return nil
 }
 

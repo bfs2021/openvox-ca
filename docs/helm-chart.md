@@ -78,7 +78,8 @@ openvox-ca has a large configuration surface, and the chart deliberately does
 - **`config`** is written verbatim to `/etc/puppet-ca/config.yaml`, which the
   server auto-detects and the chart passes explicitly via `--config`. Every key
   in [configuring the server](configuration.md) is valid there, including the
-  nested `kubernetes_export` and `openbao` blocks.
+  nested `kubernetes_export` and `openbao` blocks — except a backend
+  credential, which the install refuses (see below).
 - **Convenience blocks** — `tls`, `ca`, `caKeyPassphrase`, `puppetServers`,
   `autosign`, `metrics`, `kubernetesExport`, `persistence` — do the Kubernetes
   half of a feature (mount the Secret, open the port, create the RBAC) *and*
@@ -161,6 +162,55 @@ rotation, connections a pod already holds keep working but new ones fail, so
 its pool slowly stops refilling. Restart the pods whenever the CA changes; the
 Reloader annotation described under [TLS](#tls-the-charts-most-important-setting)
 restarts them automatically when the mounted Secret changes.
+
+The simplest route for a DSN is to keep all of it in the Secret and set
+`PUPPET_CA_SQL_DSN` itself with `valueFrom.secretKeyRef`. If you splice a
+password in as above, Kubernetes substitutes `$(POSTGRES_PASSWORD)` verbatim,
+so for a URL DSN like this one the Secret must hold the password
+percent-encoded: every character other than a letter, a digit or `-._~`. A
+character URL parsing refuses outright stops the server at startup, and the
+parse error it reports carries the DSN, password included, into the pod log.
+go-sql-driver's `user:password@tcp(…)` form takes the password raw, so leave
+it unencoded there.
+
+Backend credentials must come through the environment from a Secret, as in the
+`extraEnv` example above. `config` is rendered into a ConfigMap,
+which anyone allowed to read ConfigMaps in the namespace can read, and which
+Secret RBAC and Secret encryption at rest do not cover. So the install is
+refused, naming each key and the variable that replaces it, when `config`
+carries any of these:
+
+| In `config` | Set instead, from a Secret |
+| --- | --- |
+| `etcd_password` | `PUPPET_CA_ETCD_PASSWORD` |
+| `redis_password` | `PUPPET_CA_REDIS_PASSWORD` |
+| `redis_sentinel_password` | `PUPPET_CA_REDIS_SENTINEL_PASSWORD` |
+| `sql_dsn`, when it carries a password | `PUPPET_CA_SQL_DSN`, as above |
+
+A `sql_dsn` carries a password when its user part has one
+(`postgres://user:password@…`, `user:password@tcp(…)/…`) or when it has a
+`password=` parameter, spaces around the `=` included. The chart errs towards
+refusal: it refuses any colon followed by text before the DSN's last `@`,
+after setting a `postgres://`, `postgresql://` or `unix://` scheme aside
+unless `storage_backend` is `mysql` or `mariadb`. That also catches a password
+containing `/`, `?` or `#`, which a URL DSN cannot carry unescaped. It also
+refuses a working DSN with an `@` after its host, in a database name or a
+query value, when a port or other colon comes before it; move that one to
+`extraEnv` as well.
+
+One without a password can stay in `config`. Under a `sqlite` backend, a
+`file:` DSN faces only the `password=` check, since a SQLite path may hold an
+`@`. The chart reads `storage_backend` from `config`, which
+`PUPPET_CA_STORAGE_BACKEND` can override, so any other DSN is still judged as a
+network one.
+
+With `existingConfigMap` set the chart renders no ConfigMap, so nothing is
+refused, and what goes into yours is your own decision.
+
+The check reads only the merged `config`. It does not see a password written
+literally into an `extraEnv` `value:` rather than fed from
+`valueFrom.secretKeyRef`, nor anything inside an `existingConfigMap`, so a
+render that passes proves only that `config` holds no credential.
 
 ## Choosing an image
 

@@ -648,7 +648,7 @@ can share it. `postgres`, `postgresql` and `pg` are accepted as aliases.
 # /etc/puppet-ca/config.yaml
 storage_backend: postgres
 cadir: /var/lib/puppet-ca                # still needed for per-subject keys
-sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem"
+sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem"  # prefer PUPPET_CA_SQL_DSN
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
 sql_migration_timeout_sec: 600           # whole schema-migration run (default 600)
@@ -714,7 +714,7 @@ replicas can share it. `mysql` and `mariadb` are accepted as aliases.
 # /etc/puppet-ca/config.yaml
 storage_backend: mysql                   # or "mariadb"
 cadir: /var/lib/puppet-ca                # still needed for per-subject keys
-sql_dsn: "puppetca:secret@tcp(db.example.com:3306)/puppetca"
+sql_dsn: "puppetca:secret@tcp(db.example.com:3306)/puppetca"  # prefer PUPPET_CA_SQL_DSN
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
 sql_migration_timeout_sec: 600           # whole schema-migration run (default 600)

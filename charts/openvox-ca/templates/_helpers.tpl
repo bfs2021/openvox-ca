@@ -1193,6 +1193,105 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- fail (printf "extraConfigFiles %q contains a carriage return or a Unicode line separator. Those are not re-indented into the ConfigMap, so the text after one would land at the data-key column and could take the place of a file the chart renders. Use plain newlines." $name) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+  `config` is written verbatim into a ConfigMap, which anyone allowed to read
+  ConfigMaps in the namespace can read, and which neither Secret RBAC nor
+  Secret encryption at rest covers. So a credential set there is refused rather
+  than rendered. The server also reads each of these from a PUPPET_CA_*
+  variable, and the environment outranks the config file, so extraEnv with
+  valueFrom.secretKeyRef is the remedy.
+
+  One entry per config key that can hold a credential inline, mapped to what
+  replaces it. OpenBao has none: its secret_id and token are only ever read
+  from files, and approle_role_id is an identifier the docs set inline — the
+  approle method refuses to start without approle_secret_id_file, so a role_id
+  never authenticates on its own.
+
+  A new server setting that can hold a credential inline needs an entry here
+  and a reject case in chart:test; AGENTS.md says so too.
+  sql_dsn counts only when it carries a password — see openvox-ca.dsnHasPassword
+  — because a DSN without one is not a secret, and SQLite's is a file path.
+
+  Not checked with existingConfigMap, where `config` reaches no object at all.
+  The value itself is never echoed, since the error lands in CI logs.
+*/}}
+{{- if not .Values.existingConfigMap -}}
+{{- $credentials := dict -}}
+{{- $_ := set $credentials "etcd_password" "PUPPET_CA_ETCD_PASSWORD" -}}
+{{- $_ := set $credentials "redis_password" "PUPPET_CA_REDIS_PASSWORD" -}}
+{{- $_ := set $credentials "redis_sentinel_password" "PUPPET_CA_REDIS_SENTINEL_PASSWORD" -}}
+{{- $_ := set $credentials "sql_dsn" "PUPPET_CA_SQL_DSN from a Secret holding the whole DSN, or with the password as $(VAR) set from a Secret earlier in extraEnv (percent-encoded, for a URL)" -}}
+{{- $found := list -}}
+{{- range $key, $remedy := $credentials -}}
+{{- $value := index $config $key -}}
+{{- if and (not (kindIs "invalid" $value)) (ne (toString $value) "") -}}
+{{- if or (ne $key "sql_dsn") (eq (include "openvox-ca.dsnHasPassword" (dict "dsn" (toString $value) "backend" (dig "storage_backend" "" $config | toString))) "true") -}}
+{{- $found = append $found (printf "  config.%s: set %s instead" $key $remedy) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $found -}}
+{{- fail (printf "config holds a credential the chart would write in clear text into its ConfigMap, where anyone allowed to read ConfigMaps in the namespace can read it. Keep it in a Secret, drop it from config, and feed it in through extraEnv with valueFrom.secretKeyRef — environment variables outrank the config file:\n%s\nSee https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md#how-the-chart-is-configured for a worked example." (join "\n" $found)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether a sql_dsn carries a password. Takes a dict: "dsn", and "backend", the
+configured storage_backend.
+
+Both drivers the server uses put the password between the first colon and an
+@: pgdriver's URLs (postgres://, postgresql://, unix://) through net/url, and
+go-sql-driver's user:password@tcp(host)/db. Mirroring either split exactly lets
+a malformed DSN through: a password carrying an unencoded / (or, in a URL, ?
+or #), or a user part carrying an @, cuts the driver's userinfo short, and
+although the server cannot use that DSN the ConfigMap would hold the password
+all the same. So this asks one question instead: is there a colon followed by
+text anywhere before the DSN's last @? An empty password ("user:@host") is not
+a secret.
+
+A URL's scheme is set aside first, since its colon is not a separator, but only
+for those three schemes and only when the backend is not mysql or mariadb: the
+server picks the driver from storage_backend, not from the DSN, and to
+go-sql-driver "postgres://x@tcp(db)/ca" is user "postgres" with password "//x".
+Keying on those schemes rather than on any "scheme://" keeps a MySQL password
+that begins with // from being read as a URL when the backend is set some other
+way, such as PUPPET_CA_STORAGE_BACKEND.
+
+The cost is one class of false refusal: a DSN with an @ after its host, in a
+database name or a query value, is refused when a port or any other colon comes
+before that @, although it works. That is the direction to err in, and moving
+such a DSN into extraEnv is harmless.
+
+SQLite's DSN is a file path, which may hold an @ and starts "file:", so with a
+sqlite backend a "file:" DSN faces only the password= check below; a bare path
+needs no exemption, having no colon before its @. Both conditions are needed: the backend comes from
+`config`, which PUPPET_CA_STORAGE_BACKEND outranks, so a postgres or MySQL DSN
+left beside a sqlite backend is still judged as one. Without a sqlite backend,
+a file: path containing @ falls into the class above.
+
+A password= parameter counts wherever it appears, sslpassword included, and
+with spaces around the = as libpq's keyword/value form allows: no driver here
+takes a password that way, but the ConfigMap would hold it all the same. Only
+an empty value is not a secret.
+
+Returns "true", or nothing.
+*/}}
+{{- define "openvox-ca.dsnHasPassword" -}}
+{{- $dsn := .dsn -}}
+{{- $backend := lower (trim .backend) -}}
+{{- $userinfo := "" -}}
+{{- if not (and (has $backend (list "sqlite" "sqlite3")) (hasPrefix "file:" $dsn)) -}}
+{{- $rest := $dsn -}}
+{{- if and (not (has $backend (list "mysql" "mariadb"))) (regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn) -}}
+{{- $rest = regexReplaceAll "(?s)^[^:]*://" $dsn "" -}}
+{{- end -}}
+{{- if contains "@" $rest -}}
+{{- $userinfo = regexReplaceAll "(?s)^(.*)@.*$" $rest "${1}" -}}
+{{- end -}}
+{{- end -}}
+{{- if or (regexMatch "(?s)^[^:]*:." $userinfo) (regexMatch "(?i)password\\s*=\\s*[^&\\s]" $dsn) -}}true{{- end -}}
 {{- end -}}
 
 {{/*

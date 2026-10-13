@@ -114,6 +114,91 @@ var _ = Describe("chartValuesFiles", func() {
 	})
 })
 
+var _ = Describe("inlineCredentialKeys", func() {
+	It("finds the server's inline credentials and no *_file path keys", func() {
+		keys, err := inlineCredentialKeys(".")
+		Expect(err).NotTo(HaveOccurred())
+		// Exact, not a subset: a new key, or a tag pattern that starts matching
+		// something it should not, has to be seen here first, where the cause
+		// is plain, rather than as a chart:test demand for a reject case.
+		Expect(keys).To(Equal([]string{"etcd_password", "redis_password", "redis_sentinel_password", "sql_dsn"}))
+	})
+
+	Context("in a tree of its own", func() {
+		var root string
+
+		write := func(rel, body string) {
+			path := filepath.Join(root, rel)
+			Expect(os.MkdirAll(filepath.Dir(path), 0o755)).To(Succeed())
+			Expect(os.WriteFile(path, []byte(body), 0o644)).To(Succeed())
+		}
+
+		BeforeEach(func() {
+			root = GinkgoT().TempDir()
+		})
+
+		It("reads both sources, sorted, skipping path keys and test files", func() {
+			write("internal/config/a.go", "type A struct {\n\tP string `yaml:\"zed_password\"`\n\tF string `yaml:\"approle_secret_id_file\"`\n\tN int `yaml:\"port\"`\n}\n")
+			write("internal/config/a_test.go", "type T struct {\n\tS string `yaml:\"fixture_secret\"`\n}\n")
+			write("cmd/openvox-ca/config.go", "type C struct {\n\tD string `yaml:\"sql_dsn\"`\n\tT string `yaml:\"api_token,omitempty\"`\n\tK string `yaml:\"ca_key_passphrase\"`\n\tR string `yaml:\"registry_credential\"`\n\tS string `yaml:\"client_secret\"`\n}\n")
+
+			Expect(inlineCredentialKeys(root)).To(Equal([]string{"api_token", "ca_key_passphrase", "client_secret", "registry_credential", "sql_dsn", "zed_password"}))
+		})
+
+		It("refuses a tree where it finds no credential key", func() {
+			write("internal/config/a.go", "type A struct {\n\tN int `yaml:\"port\"`\n}\n")
+			write("cmd/openvox-ca/config.go", "type C struct {\n\tH string `yaml:\"host\"`\n}\n")
+
+			_, err := inlineCredentialKeys(root)
+			Expect(err).To(MatchError(ContainSubstring("found no inline-credential config keys")))
+		})
+
+		It("refuses a tree where one of its sources has gone", func() {
+			write("internal/config/a.go", "type A struct {\n\tP string `yaml:\"zed_password\"`\n}\n")
+
+			_, err := inlineCredentialKeys(root)
+			Expect(err).To(MatchError(ContainSubstring("cmd/openvox-ca/config.go matches no file")))
+		})
+
+		It("refuses a source it cannot read rather than skipping it", func() {
+			write("internal/config/a.go", "type A struct {\n\tP string `yaml:\"zed_password\"`\n}\n")
+			Expect(os.MkdirAll(filepath.Join(root, "cmd/openvox-ca/config.go"), 0o755)).To(Succeed())
+
+			_, err := inlineCredentialKeys(root)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("config.go"))
+		})
+	})
+})
+
+var _ = Describe("uncoveredCredentialKeys", func() {
+	rejects := []chartRejectCase{
+		{wantErr: "config.etcd_password: set PUPPET_CA_ETCD_PASSWORD instead"},
+		{wantErr: "config.redis_sentinel_password: set PUPPET_CA_REDIS_SENTINEL_PASSWORD instead"},
+	}
+
+	It("returns exactly the keys no reject case refuses", func() {
+		Expect(uncoveredCredentialKeys([]string{"etcd_password", "sql_dsn"}, rejects)).To(Equal([]string{"sql_dsn"}))
+	})
+
+	It("does not count a case for a longer key that ends in this one", func() {
+		Expect(uncoveredCredentialKeys([]string{"sentinel_password"}, rejects)).To(Equal([]string{"sentinel_password"}))
+	})
+
+	It("does not count a case for a longer key that begins with this one", func() {
+		Expect(uncoveredCredentialKeys([]string{"redis_sentinel"}, rejects)).To(Equal([]string{"redis_sentinel"}))
+	})
+
+	It("counts a case naming the key under a nested block's path", func() {
+		nested := []chartRejectCase{{wantErr: "config.openbao.client_secret: set PUPPET_CA_OPENBAO_CLIENT_SECRET instead"}}
+		Expect(uncoveredCredentialKeys([]string{"client_secret"}, nested)).To(BeEmpty())
+	})
+
+	It("returns nothing when every key is covered", func() {
+		Expect(uncoveredCredentialKeys([]string{"etcd_password", "redis_sentinel_password"}, rejects)).To(BeEmpty())
+	})
+})
+
 var _ = Describe("chartRulesBlock", func() {
 	// The RBAC parity check compares this helper's output for two renders. A
 	// parse that silently returned the whole tail would return the *same* tail
