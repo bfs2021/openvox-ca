@@ -174,7 +174,7 @@ var _ = Describe("The managed-certificate reconcile job", func() {
 	// the code, which is how a package ends up with coverage that moves when an
 	// unrelated layer is refactored.
 	DescribeTable("reports a pass at the level its outcome deserves",
-		func(rig func(*ca.CA), wantLevel, wantText string) {
+		func(rig func(*ca.CA), wantLevel, wantText, wantAttr string) {
 			c := fastCA()
 			rig(c)
 
@@ -189,6 +189,14 @@ var _ = Describe("The managed-certificate reconcile job", func() {
 
 			Expect(buf.String()).To(ContainSubstring("level=" + wantLevel))
 			Expect(buf.String()).To(ContainSubstring(wantText))
+			// The count is the only thing that tells a partial success from a
+			// total failure in the warning, and the only thing the info line
+			// reports at all. Guarded rather than asserting ContainSubstring(""),
+			// which passes for any output and would make the debug row look
+			// covered when it carries no count to check.
+			if wantAttr != "" {
+				Expect(buf.String()).To(ContainSubstring(wantAttr))
+			}
 		},
 		Entry("a failing entry is a warning, carrying what still got issued",
 			func(c *ca.CA) {
@@ -200,17 +208,17 @@ var _ = Describe("The managed-certificate reconcile job", func() {
 				working.Save = func(context.Context, []byte, []byte) error { return nil }
 				c.ManagedCerts = []ca.ManagedCert{failing, working}
 			},
-			"WARN", "Managed-certificate reconcile pass had failures"),
+			"WARN", "Managed-certificate reconcile pass had failures", "issued=1"),
 		Entry("an issuance is info",
 			func(c *ca.CA) {
 				working := managed("managed.test")
 				working.Save = func(context.Context, []byte, []byte) error { return nil }
 				c.ManagedCerts = []ca.ManagedCert{working}
 			},
-			"INFO", "Managed certificates issued"),
+			"INFO", "Managed certificates issued", "issued=1"),
 		Entry("nothing due is debug, not silence",
 			func(c *ca.CA) { c.ManagedCerts = nil },
-			"DEBUG", "nothing due"),
+			"DEBUG", "nothing due", ""),
 	)
 })
 
