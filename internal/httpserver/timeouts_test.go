@@ -54,10 +54,3 @@ var _ = Describe("New", func() {
 		Expect(srv.Handler).To(BeIdenticalTo(handler))
 	})
 })
-
-var _ = Describe("Defaults", func() {
-	It("sets every timeout", func() {
-		d := httpserver.Defaults()
-		Expect([]time.Duration{d.ReadHeader, d.Read, d.Write, d.Idle}).NotTo(ContainElement(BeZero()))
-	})
-})

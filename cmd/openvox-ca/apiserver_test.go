@@ -36,19 +36,17 @@ var _ = Describe("newAPIServer", func() {
 		return [4]time.Duration{s.ReadHeaderTimeout, s.ReadTimeout, s.WriteTimeout, s.IdleTimeout}
 	}
 
-	It("bounds every phase of a connection", func() {
-		Expect(timeouts(newAPIServer("127.0.0.1:0", http.NotFoundHandler()))).To(Equal([4]time.Duration{
-			10 * time.Second, 30 * time.Second, 60 * time.Second, 120 * time.Second,
-		}))
-	})
-
 	It("caps request headers at 1 MiB", func() {
 		Expect(newAPIServer("127.0.0.1:0", http.NotFoundHandler()).MaxHeaderBytes).To(Equal(1 << 20))
 	})
 
 	// The metrics listener's comment claims it mirrors this one. Comparing the
 	// built servers, not the shared definition, catches either side being given
-	// its own literals.
+	// its own literals -- including a change that moves one listener and its
+	// own spec together, which two separate literal pins would both accept.
+	//
+	// It is also what pins this server's values: the metrics listener's specs
+	// hold the literals, and this one holds the API server to them.
 	It("uses the same timeouts as the metrics listener", func() {
 		exporter := metrics.NewExporter(
 			ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test"))
