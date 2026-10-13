@@ -68,6 +68,15 @@ The config file is located by checking, in order:
 
 ## Config file
 
+**The `.deb` and `.rpm` ship one already.** A packaged install has
+`/etc/puppet-ca/config.yaml` written for it, setting `cadir`, `tls_cert`,
+`tls_key` and `port: 8141` — enough to start without an edit, and marked as a
+configuration file in both formats so your changes survive upgrades. Everything
+below applies to it; what it sets and why 8141 rather than 8140 is in
+[installing from a package](systemd.md#installing-from-a-package). Release
+tarballs and container images ship no configuration file at all, so on those
+the settings below are yours to write.
+
 **Example `/etc/puppet-ca/config.yaml`:**
 
 ```yaml
@@ -347,14 +356,28 @@ common name for years.
 
 ### Issuing one
 
+**On a packaged install you do not need this procedure.** The `.deb` and
+`.rpm` provision a serving credential on the first `systemctl start openvox-ca`
+and point `tls_cert`/`tls_key` at it — see [installing from a
+package](systemd.md#installing-from-a-package). What follows is for a release
+tarball, a container, or a packaged CA whose certificate you are replacing by
+hand.
+
 `generate` needs a running server, so the first serving certificate is issued
-against this CA started temporarily on loopback with TLS switched off. Stop the
-service first if one is already running on port 8140, then:
+against this CA started temporarily on loopback with TLS switched off. **Stop
+the service first if one is running.** That is not just courtesy on
+`filesystem` and `sqlite`: those permit exactly one instance. The store lock
+will normally refuse the second process rather than let it corrupt anything, so
+with the service up the command below usually fails outright — but that is a
+backstop and not a guarantee, and [what the lock cannot
+do](storage-backends.md#what-the-lock-cannot-do-and-why-the-rule-matters-more-than-it-does)
+says where it does not hold. Stop the service rather than rely on it. Then:
 
 ```bash
 # Your configured cadir. The CA writes the serving key under it, and pointing
 # --out-dir at the same place keeps a second copy from being left elsewhere.
-# The systemd unit's default is /var/lib/puppet-ca, not the path below.
+# The path the systemd unit grants as its one writable directory, so this is
+# also what the unit expects cadir to be.
 CADIR=/etc/puppetlabs/puppet/ssl/ca
 
 openvox-ca --tls-cert= --tls-key= --host 127.0.0.1 --port 8140 &
@@ -451,9 +474,11 @@ relying on one.
 The block above assumes a shell that owns the CA process, which is not how the
 two production deployments in these docs work:
 
-- Under [systemd](systemd.md) the unit is already bound to 8140, so stop it
-  first. It also runs as a dedicated user, so run both commands as that user
-  rather than under plain `sudo` — `sudo -u puppet-ca openvox-ca --tls-cert=
+- Under [systemd](systemd.md) the unit is already bound to the port it
+  serves — 8140 from a release tarball, 8141 from a package — so stop it
+  first; on `filesystem` or `sqlite` it also holds the store's lock, and the
+  temporary CA is refused while it runs. It also runs as a dedicated user, so run both commands as that user
+  rather than under plain `sudo` — `sudo -u puppet openvox-ca --tls-cert=
   ...`. Anything created as `root` is left behind for a service that is not
   root: directories most of all, since they are created `0750` and the service
   then cannot write in them at all, and the private key, which is written
@@ -1392,8 +1417,9 @@ guess — and since the component shares the CA's user, the question is which
 
 **Under the shipped systemd unit it must also be writable, which takes one
 line.** The unit sets `ProtectSystem=strict`, so the whole filesystem is
-read-only to the CA except its `StateDirectory` — `/var/lib/puppet-ca` — and
-that directory is the `cadir`, which a store may not write to. A file store
+read-only to the CA except the CA directory it names in `ReadWritePaths=` —
+`/etc/puppetlabs/puppet/ssl/ca` — and that directory is the `cadir`, which a
+store may not write to. A file store
 therefore needs its directory named in `ReadWritePaths=`:
 
 ```ini
@@ -1407,11 +1433,11 @@ Name the directory the entries actually write to — the example above uses
 drop-in is not read. Without it the write fails with a permission error the CA
 cannot distinguish from a genuine one; it is logged each pass, and
 `PuppetCAManagedCertificateNeverIssued` fires an hour later. The unit already
-ships a commented `ReadWritePaths=` line for a migrated `cadir`; this is the
-same mechanism for a different directory.
+grants the CA directory with `ReadWritePaths=`; a drop-in adds another
+directory the same way.
 
 `ReadWritePaths=` lifts systemd's own read-only mount and nothing more. The
-shipped unit runs as `User=puppet-ca`, so the directory's ownership and mode
+shipped unit runs as `User=puppet`, so the directory's ownership and mode
 still have to let that user create files in it: a root-owned `/etc/openvox/ssl`
 refuses the write whatever the drop-in says. Both are needed, and each fails the
 same way on its own.
@@ -1600,7 +1626,7 @@ ways round it:
 - **Leave `cadir` alone** and put the serving pair somewhere outside it instead —
   any directory the CA can write that is not under `cadir`. Under systemd that
   means a `ReadWritePaths=` drop-in naming it, because `ProtectSystem=strict`
-  makes `StateDirectory` the only writable path; see [systemd](systemd.md). In
+  makes the CA directory the only writable path; see [systemd](systemd.md). In
   Kubernetes it must still be under `persistence.mountPath`, which the chart
   refuses at install time if it is not; see [the Helm chart](helm-chart.md).
 
@@ -1611,16 +1637,16 @@ issuing.
 > stops the CA starting rather than being retried.**
 >
 > 1. **Writable by the CA.** The shipped systemd unit sets
->    `ProtectSystem=strict` with `StateDirectory=puppet-ca`, so anything outside
->    `/var/lib/puppet-ca` needs a `ReadWritePaths` drop-in — see
->    [the store](#the-store), which describes the same constraint for a
->    component certificate.
+>    `ProtectSystem=strict` and makes only the CA directory writable, so the
+>    pair's directory always needs a `ReadWritePaths` drop-in: rule 2 puts it
+>    outside the one writable path. See [the store](#the-store), which
+>    describes the same constraint for a component certificate.
 > 2. **Outside the `cadir`.** The CA reserves that whole subtree against every
->    file store, its own included. The example above therefore assumes the
->    default `cadir` has been narrowed — `cadir: /var/lib/puppet-ca/ca` — with
->    the pair at the `StateDirectory` root beside it.
+>    file store, its own included. The example above therefore narrows
+>    `cadir` to `/var/lib/puppet-ca/ca`, with the pair at `/var/lib/puppet-ca`
+>    beside it — the layout of the Helm chart's persistent volume.
 > 3. **In a directory that already exists.** The store will not create one, and
->    `StateDirectory` creates only the top level. A `serving/` subdirectory is
+>    nothing creates a subdirectory for it. A `serving/` subdirectory is
 >    the obvious layout and it is the one that fails: the CA starts, writes, and
 >    exits.
 >

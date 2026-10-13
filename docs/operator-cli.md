@@ -900,12 +900,11 @@ is the one preparation step for returning to openvox-ca:
 3. Run it again with `--yes-re-bless`, then start openvox-ca.
 
 Run both as the user OpenVox Server and openvox-ca share
-(`sudo -u puppet openvox-ca rebuild-inventory-hmac …`), not as root and not as
-`puppet-ca`. The rebuild does no `chown`, as described below, so a file it
-writes as anyone else is one the server cannot read. `puppet` must be in the
-`puppet-ca` group to read the server's configuration, which the [migration
-guide's step 3](migrating-from-puppet-server.md#step-3-run-openvox-ca-as-the-directorys-owner)
-sets up.
+(`sudo -u puppet openvox-ca rebuild-inventory-hmac …`), not as root. The
+rebuild does no `chown`, as described below, so a file it writes as anyone else
+is one the server cannot read. `puppet` can read the server's configuration
+without any further setup: the shipped unit runs as `puppet`, and the
+configuration is `0640 root:puppet`.
 
 Nothing else in the directory needs changing: openvox-ca reads OpenVox Server's
 inventory lines as they are.
@@ -1010,7 +1009,7 @@ command and deliberately never removes it. The file is named for a digest of the
 lock name, so `ls` shows only `<hex>.lock` and there is nothing to match by eye.
 A root-owned lock file makes the server's next start fail on the lock rather
 than on integrity. Prefer the
-positive form — `sudo -u puppet-ca openvox-ca rebuild-inventory-hmac …` under
+positive form — `sudo -u puppet openvox-ca rebuild-inventory-hmac …` under
 the shipped systemd unit. If you have already run it as root, `chown` both files
 and `chown -R` the `locks/` directory back to the server's user.
 
