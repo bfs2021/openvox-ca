@@ -4988,7 +4988,7 @@ config:
 		},
 		{
 			// The server recognises a SQLite URI by a case-sensitive "file:"
-			// (sqliteFilePath in internal/storage/sql.go), so the exemption
+			// (SQLiteFilePath in internal/storage/sql.go), so the exemption
 			// does too: FILE: is no SQLite URI, and its colon counts.
 			name:       "an upper-case FILE: sql_dsn with an @ under a sqlite backend",
 			sets:       []string{tls},
