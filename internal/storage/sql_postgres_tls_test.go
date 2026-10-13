@@ -64,6 +64,27 @@ func newPGTestCA(name string) *pgTestCA {
 	return &pgTestCA{cert: cert, key: key, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
 }
 
+// issueIntermediate returns a CA signed by ca rather than by itself, as the
+// issuing CA of most real PKIs is.
+func (ca *pgTestCA) issueIntermediate(name string) *pgTestCA {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(3),
+		Subject:               pkix.Name{CommonName: name},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	Expect(err).NotTo(HaveOccurred())
+	cert, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+	return &pgTestCA{cert: cert, key: key, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
+}
+
 // issueServer returns a PEM certificate and key for a server answering to
 // host, which may be a DNS name or an IP address.
 func (ca *pgTestCA) issueServer(host string) (certPEM, keyPEM []byte) {
@@ -229,6 +250,28 @@ var _ = Describe("PostgreSQL sql_tls_* configuration", func() {
 
 		It("refuses a server that presents no certificate", func() {
 			Expect(check(tls.ConnectionState{})).To(MatchError(ContainSubstring("no certificate")))
+		})
+
+		Context("when the server's certificate comes from an intermediate CA", func() {
+			// Only the root is trusted, so the chain completes only through
+			// the intermediate the server sends alongside its own certificate.
+			var leaf, intermediate *x509.Certificate
+
+			BeforeEach(func() {
+				issuing := trusted.issueIntermediate("issuing")
+				leaf = presenting(issuing, "db.example.com").PeerCertificates[0]
+				intermediate = issuing.cert
+			})
+
+			It("accepts the chain through the intermediate the server presents", func() {
+				Expect(check(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf, intermediate}})).To(Succeed())
+			})
+
+			It("refuses the leaf when the server omits the intermediate", func() {
+				err := check(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}})
+				var unknown x509.UnknownAuthorityError
+				Expect(errors.As(err, &unknown)).To(BeTrue(), "want an unknown-authority error, got: %v", err)
+			})
 		})
 	})
 

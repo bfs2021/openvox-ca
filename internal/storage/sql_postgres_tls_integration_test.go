@@ -251,4 +251,55 @@ var _ = Describe("Postgres TLS", Serial, func() {
 
 		checksTheChainOnly()
 	})
+
+	Context("via sql_tls_ca_file with sslmode=verify-ca", func() {
+		BeforeEach(func() { open = viaFile("verify-ca") })
+
+		checksTheChainOnly()
+	})
+
+	Context("via the DSN's sslrootcert with sslmode=verify-ca", func() {
+		BeforeEach(func() { open = viaDSN("verify-ca") })
+
+		checksTheChainOnly()
+	})
+
+	// With only a client certificate and sslmode=require there is no CA to
+	// check against, and libpq checks nothing: the connection is encrypted
+	// but any server is accepted. The fixture does not ask for a client
+	// certificate, so this also shows sql_tls_cert_file and sql_tls_key_file
+	// load and open without disturbing the handshake.
+	Context("via sql_tls_cert_file alone with sslmode=require", func() {
+		BeforeEach(func() {
+			certPEM, keyPEM := newPGTestCA("client CA").issueServer("openvox-ca")
+			dir := GinkgoT().TempDir()
+			certFile := filepath.Join(dir, "client.pem")
+			keyFile := filepath.Join(dir, "client-key.pem")
+			Expect(os.WriteFile(certFile, certPEM, 0o600)).To(Succeed())
+			Expect(os.WriteFile(keyFile, keyPEM, 0o600)).To(Succeed())
+			open = func() *SQLBackend {
+				tlsCfg, err := loadSQLTLS(SQLSpec{TLSCertFile: certFile, TLSKeyFile: keyFile})
+				Expect(err).NotTo(HaveOccurred())
+				b, err := NewSQLBackend(SQLConfig{
+					Dialect: SQLPostgres,
+					DSN:     withSSL(map[string]string{"sslmode": "require"}),
+					TLS:     tlsCfg,
+				})
+				Expect(err).NotTo(HaveOccurred())
+				DeferCleanup(func() { _ = b.Close() })
+				return b
+			}
+		})
+
+		It("encrypts the connection to a server from any CA", func() {
+			servePostgresTLS(postgresDSNFromEnv(), newPGTestCA("some other CA"), "not-the-database.example")
+			b := open()
+			ctx := context.Background()
+			Expect(b.db.PingContext(ctx)).To(Succeed())
+			var encrypted bool
+			Expect(b.db.QueryRowContext(ctx,
+				"SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").Scan(&encrypted)).To(Succeed())
+			Expect(encrypted).To(BeTrue(), "the session is not using TLS")
+		})
+	})
 })
