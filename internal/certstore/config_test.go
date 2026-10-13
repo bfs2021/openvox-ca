@@ -880,6 +880,56 @@ managed_certs:
 		// pod's namespace instead of the component's own. The NotFound half is
 		// as much of the assertion as the Get: a build that wrote the Secret
 		// into BOTH namespaces satisfies the Get alone.
+		// The trim, which is in place: SecretConfig.validate rewrites Name and
+		// Namespace, and both the duplicate check and Build read the result.
+		// Every other trim in this package has a spec driving it; this one had
+		// none, so dropping it left a padded name free to slip past the
+		// collision check and be sent to the API server verbatim.
+		//
+		// Two specs, for its two consumers. Validate is exercised by a pair
+		// that collides only once trimmed; Build by a padded entry that has to
+		// land at the trimmed name, which needs Validate first -- the order the
+		// server itself uses.
+		It("refuses a padded Secret that is the same one once trimmed", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: a-tls, namespace: openvox}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {secret: {name: "  a-tls  ", namespace: " openvox "}}
+`).Validate()
+			// The refusal names the trimmed spelling, which shows it is the
+			// spelling that was compared and not merely the one reported.
+			Expect(err).To(MatchError(ContainSubstring("Secret openvox/a-tls is already the store for managed_certs[0]")))
+		})
+
+		It("writes a padded Secret at its trimmed name and namespace", func() {
+			cfg := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: "  a-tls  ", namespace: " openvox "}}
+`)
+			Expect(cfg.Validate()).To(Succeed())
+			client := fake.NewClientset()
+			managed, err := cfg.Build(certstore.Deps{
+				CACerts: stubCA{pem: []byte("CA")},
+				Client:  client,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(managed[0].Save(context.Background(), []byte("CERT"), []byte("KEY"))).To(Succeed())
+
+			sec, err := client.CoreV1().Secrets("openvox").
+				Get(context.Background(), "a-tls", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred(), "the key belongs at the trimmed name")
+			Expect(sec.Data).To(HaveKeyWithValue("tls.key", []byte("KEY")))
+		})
+
 		It("prefers the namespace an entry names over the CA pod's", func() {
 			cfg := decode(`
 managed_certs:
@@ -1176,6 +1226,30 @@ managed_certs:
 		// A directory boundary, not a string one. Without the separator in the
 		// prefix test every sibling starting with the same characters would be
 		// refused, and the spec above would pass for that reason instead.
+		// An unset reserved setting is skipped rather than refused. The caller
+		// passes optional settings such as autosign_config and crl_chain_file,
+		// which are usually empty; without the skip an empty path reaches the
+		// "not an absolute path" refusal and every deployment leaving one unset
+		// fails to start.
+		//
+		// The empty entry goes FIRST, deliberately. The skip has to be a
+		// continue: a return in its place would quietly stop checking every
+		// reserved path after the empty one. With the empty entry last, cadir
+		// would already have been checked before the return and the second
+		// assertion would pass anyway -- so the order is what lets it see that
+		// mistake.
+		It("skips an unset reserved setting, and still checks the rest", func() {
+			reserved := []certstore.ReservedPath{
+				{Setting: "autosign_config", Path: ""},
+				cadir,
+			}
+			Expect(files("/srv/a.pem", "/srv/a-key.pem").CheckReservedPaths(reserved)).
+				To(Succeed(), "an unset setting must not refuse an unrelated store")
+			Expect(files("/var/lib/openvox-ca/ca/a.pem", "/srv/a-key.pem").CheckReservedPaths(reserved)).
+				To(MatchError(ContainSubstring("is inside cadir")),
+					"an unset setting earlier in the list must not end the check")
+		})
+
 		It("allows a sibling whose name starts with the reserved tree's", func() {
 			Expect(files("/var/lib/openvox-ca-components/a.pem", "/var/lib/openvox-ca-components/a-key.pem").
 				CheckReservedPaths([]certstore.ReservedPath{cadir})).To(Succeed())
