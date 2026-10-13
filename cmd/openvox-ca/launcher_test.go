@@ -1079,14 +1079,44 @@ var _ = Describe("The shipped systemd unit", func() {
 		start, err := time.ParseDuration(unit["TimeoutStartSec"])
 		Expect(err).NotTo(HaveOccurred())
 
-		// Two of internal/ca's lock budgets, not one. Init spends the first on
-		// the inventory-HMAC step (EnsureHMACKey's `hmac-key` lock on a cold
+		// Three of internal/ca's lock budgets, not one. Init spends the first
+		// on the inventory-HMAC step (EnsureHMACKey's `hmac-key` lock on a cold
 		// start, plus verification) and the second on `bootstrap`; they are
 		// separate context.WithTimeout calls in sequence, not one shared
-		// budget. A contended cold start against a shared backend is also
-		// exactly when a CA key has to be generated, so both terms land
-		// together and the floor has to clear the pair.
-		Expect(start).To(BeNumerically(">", 2*ca.LockTimeout),
-			"TimeoutStartSec must outlast both of Init's sequential lock budgets with room for key generation")
+		// budget. A CA using serving_cert spends a third issuing its own
+		// serving certificate, between Init and the listener bind. A contended
+		// cold start against a shared backend is also exactly when a CA key has
+		// to be generated, so the terms land together and the floor has to
+		// clear all of them.
+		//
+		// This floor is what the unit's own comment cites, so the two have to
+		// say the same thing: it gained its third term with the serving
+		// certificate. It bounds the lock waits only -- whether TimeoutStartSec
+		// clears the whole pre-listen path is a separate question, since that
+		// path installs budgets not derived from LockTimeout at all. The one
+		// the unit counts, the Secret store read after the serving pass, is
+		// certstore's unexported 30s API timeout; copying the number here
+		// would drift from it as silently as a bare multiplier does.
+		//
+		// Summed from named terms rather than written as 3*LockTimeout, so a
+		// failure says which budgets the floor is made of, and a new term is a
+		// line here rather than a multiplier to re-derive.
+		terms := []struct {
+			name   string
+			budget time.Duration
+		}{
+			{"Init's hmac-key lock on a cold start", ca.LockTimeout},
+			{"Init's bootstrap lock", ca.LockTimeout},
+			{"serving_cert's pre-bind reconcile", ca.LockTimeout},
+		}
+		var floor time.Duration
+		named := make([]string, 0, len(terms))
+		for _, t := range terms {
+			floor += t.budget
+			named = append(named, fmt.Sprintf("%s (%s)", t.name, t.budget))
+		}
+		Expect(start).To(BeNumerically(">", floor),
+			"TimeoutStartSec must outlast %s, with room for key generation",
+			strings.Join(named, " + "))
 	})
 })
