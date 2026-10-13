@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -195,6 +196,13 @@ var _ = Describe("certname in request and file paths", func() {
 			Expect(os.ReadFile(keyPath)).To(Equal([]byte("KEY")))
 		})
 
+		// One property of writeKeyFile has no spec: that it narrows the mode
+		// before it truncates, so a failed fchmod leaves the old contents
+		// rather than an emptied file. Reaching that branch needs an fchmod
+		// that fails on a file the open could write, which means a file owned
+		// by another user. An unprivileged process cannot create one, and a
+		// root one cannot make fchmod fail, so the ordering is pinned by
+		// writeKeyFile's comment and by review rather than here.
 		It("overwrites an existing key file and narrows its mode to 0600", func() {
 			// Overwriting is the documented case, not an accident: the
 			// serving-certificate procedure points --out-dir at the server's
@@ -359,6 +367,18 @@ var _ = Describe("certname in request and file paths", func() {
 			DeferCleanup(os.Chmod, outDir, os.FileMode(0o700))
 
 			err := run("generate", certname)
+
+			Expect(err).To(MatchError(ContainSubstring("checking private key path")))
+			Expect(hits).To(BeZero())
+		})
+
+		It("refuses a key path too long to inspect, whoever runs it", func() {
+			// The same branch as above without relying on permissions, so it
+			// runs under root too: ValidateSubject sets no length limit, and a
+			// file name past NAME_MAX fails the Lstat with ENAMETOOLONG.
+			long := strings.Repeat("a", 300)
+
+			err := run("generate", long)
 
 			Expect(err).To(MatchError(ContainSubstring("checking private key path")))
 			Expect(hits).To(BeZero())
