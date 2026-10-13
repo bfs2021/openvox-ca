@@ -378,9 +378,11 @@ func signerEnv(baseEnv []string) []string {
 // /proc/<pid>/environ for the life of the process, so whatever the frontend
 // inherits, it holds; unsetting it in the child would not help.
 //
-// passphraseVar is the variable the CA reads the passphrase from. The default
-// name is withheld as well when the two differ, since the launcher cannot know
-// which of them the operator actually set.
+// passphraseVar is the variable the CA reads the passphrase from. Nothing makes
+// that name configurable today, so it is always the default; the default is
+// withheld unconditionally as well, so that if the name ever does become
+// configurable, a value left in the old variable still does not reach the
+// frontend.
 //
 // A targeted list rather than a PUPPET_CA_* prefix filter: the frontend is this
 // binary re-executed, and reads its own configuration from PUPPET_CA_*, so a
