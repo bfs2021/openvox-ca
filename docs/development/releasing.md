@@ -533,7 +533,14 @@ rather than because anyone intends to fix them. (Two entries that stood here
 previously — unsigned artefacts, and tag builds restoring Go caches saved on
 `main` — are closed: the first with [signing and
 provenance](#verifying-a-release), the second by building the binaries and
-packaging the chart without restoring a Go cache.)
+packaging the chart without restoring a Go cache. `mage dev:check` keeps the
+second closed: it fails if a workflow whose `push` trigger can fire on a tag
+has an `actions/setup-go` step without `cache: false`, an `actions/cache`
+step, or a BuildKit cache on `docker/build-push-action`. It reads only the
+steps written in those workflow files. A composite action or reusable
+workflow they call is not opened, and a workflow that reaches a tag by
+another trigger, such as `create`, is not selected. None of those restores a
+cache today.)
 
 | Gap | Impact |
 | --- | --- |

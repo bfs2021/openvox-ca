@@ -33,6 +33,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	yaml "go.yaml.in/yaml/v3"
 
 	"github.com/voxpupuli/openvox-ca/internal/version"
 )
@@ -1398,6 +1399,277 @@ jobs:
 			src := []byte("on:\n  pull_request: main\njobs: {}\n")
 			Expect(verifyPullRequestUnfilteredIn("ci.yml", src)).To(
 				MatchError(ContainSubstring("on.pull_request")))
+		})
+	})
+})
+
+var _ = Describe("verifyTagWorkflowsCold", func() {
+	// Runs against the repository's real workflows: every one that can run on
+	// a tag keeps setup-go cold and restores no cache (this also runs as part
+	// of `mage dev:check`).
+	It("finds the real tag-triggered workflows restoring no cache", func() {
+		Expect(verifyTagWorkflowsCold()).To(Succeed())
+	})
+
+	const (
+		tagOn    = "  push:\n    tags: [\"v*\"]\n"
+		branchOn = "  push:\n    branches: [\"main\"]\n"
+		coldGo   = "      - uses: actions/setup-go@abc\n        with:\n          cache: false\n"
+		warmGo   = "      - uses: actions/setup-go@abc\n        with:\n          cache: true\n"
+	)
+	workflow := func(on, steps string) []byte {
+		return []byte("on:\n" + on + "jobs:\n  build:\n    steps:\n" + steps)
+	}
+
+	// The baseline the must-fail specs below perturb, so that each of them
+	// fails for its own reason rather than because the fixture was never
+	// acceptable to begin with.
+	It("accepts a tag-triggered workflow whose setup-go is cold", func() {
+		Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+			"release.yml": workflow(tagOn, coldGo),
+		})).To(Succeed())
+	})
+
+	Describe("rules", func() {
+		// Any value but the literal false is refused. setup-go reads True as
+		// warm, and an expression can evaluate to true, so a check that
+		// refused only "true" would pass both; these entries pin the refusal
+		// of warm values. That False is refused too is strictness, not
+		// safety -- setup-go reads it as cold -- so no entry pins it.
+		DescribeTable("rejects setup-go with any cache value but false",
+			func(value string) {
+				Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+					"release.yml": workflow(tagOn,
+						"      - uses: actions/setup-go@abc\n        with:\n          cache: "+value+"\n"),
+				})).To(MatchError(ContainSubstring(
+					`release.yml job "build" step 1 (actions/setup-go) sets ` + "`cache: " + value + "`")))
+			},
+			Entry("true", "true"),
+			Entry("True, which setup-go also reads as warm", "True"),
+			Entry("an expression", "${{ inputs.cache }}"),
+		)
+
+		// The case the guard exists for: setup-go defaults to warm, so the
+		// step that merely says nothing is the one that looks harmless.
+		It("rejects setup-go with the cache key omitted", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn, "      - uses: actions/setup-go@abc\n"),
+			})).To(MatchError(ContainSubstring(
+				`release.yml job "build" step 1 (actions/setup-go) has no ` + "`cache:` input")))
+		})
+
+		It("matches the action name case-insensitively, as GitHub resolves it", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn, "      - uses: Actions/Setup-Go@abc\n"),
+			})).To(MatchError(ContainSubstring("(Actions/Setup-Go) has no `cache:` input")))
+		})
+
+		DescribeTable("rejects an actions/cache step",
+			func(uses string) {
+				Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+					"release.yml": workflow(tagOn, coldGo+"      - uses: "+uses+"@abc\n"),
+				})).To(MatchError(ContainSubstring(
+					`release.yml job "build" step 2 (` + uses + `) restores or saves a cache`)))
+			},
+			Entry("the action itself", "actions/cache"),
+			Entry("its restore sub-action", "actions/cache/restore"),
+			Entry("its save sub-action", "actions/cache/save"),
+		)
+
+		DescribeTable("rejects a BuildKit cache on docker/build-push-action",
+			func(key, input string) {
+				Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+					"release.yml": workflow(tagOn, coldGo+
+						"      - uses: docker/build-push-action@abc\n        with:\n          "+
+						key+": type=gha\n"),
+				})).To(MatchError(ContainSubstring(
+					`release.yml job "build" step 2 (docker/build-push-action) sets ` + input)))
+			},
+			Entry("cache-from", "cache-from", "cache-from"),
+			Entry("cache-to", "cache-to", "cache-to"),
+			// The runner upper-cases input names into INPUT_* variables, so
+			// this spelling configures the cache exactly as cache-from does.
+			Entry("Cache-From, which the runner reads as cache-from", "Cache-From", "cache-from"),
+		)
+
+		It("accepts setup-go's cache input spelled in another case", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn,
+					"      - uses: actions/setup-go@abc\n        with:\n          Cache: false\n"),
+			})).To(Succeed())
+		})
+
+		// Two spellings of one input are one input to the runner, so a cold
+		// spelling beside a warm one must not read as cold.
+		It("rejects setup-go's cache input set twice under different cases", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn,
+					"      - uses: actions/setup-go@abc\n        with:\n          cache: false\n          Cache: true\n"),
+			})).To(MatchError(ContainSubstring(
+				"step 1 (actions/setup-go) sets `cache:` more than once under different cases")))
+		})
+
+		// The refusal is confined to the one value the guard reads: an
+		// unrelated input repeated is not this check's business.
+		It("ignores another setup-go input set twice under different cases", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn, "      - uses: actions/setup-go@abc\n        with:\n"+
+					"          cache: false\n          go-version: '1.25'\n          Go-Version: '1.26'\n"),
+			})).To(Succeed())
+		})
+
+		It("accepts docker/build-push-action with no cache inputs", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn, coldGo+
+					"      - uses: docker/build-push-action@abc\n        with:\n          push: true\n"),
+			})).To(Succeed())
+		})
+
+		It("reports every violation across workflows, not only the first", func() {
+			err := verifyTagWorkflowsColdIn(map[string][]byte{
+				"helm-chart.yml": workflow(tagOn, warmGo),
+				"release.yml":    workflow(tagOn, "      - uses: actions/setup-go@abc\n"),
+			})
+			Expect(err).To(MatchError(ContainSubstring("helm-chart.yml job")))
+			Expect(err).To(MatchError(ContainSubstring("release.yml job")))
+		})
+
+		// Within one workflow: the violations sit in the job that sorts last,
+		// behind a clean one, so a check that stopped at the first job or the
+		// first violation would miss them. Every real setup-go step on a tag
+		// sits in its workflow's first-sorting job, so nothing else pins this.
+		It("reports every violation in every job of one workflow", func() {
+			err := verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": []byte("on:\n" + tagOn + "jobs:\n" +
+					"  aaa:\n    steps:\n" + coldGo +
+					"  zzz:\n    steps:\n" +
+					"      - uses: actions/setup-go@abc\n" +
+					"      - uses: actions/cache@abc\n" +
+					"      - uses: docker/build-push-action@abc\n        with:\n" +
+					"          cache-from: type=gha\n          cache-to: type=gha\n"),
+			})
+			for _, want := range []string{
+				`job "zzz" step 1 (actions/setup-go) has no ` + "`cache:` input",
+				`job "zzz" step 2 (actions/cache) restores or saves a cache`,
+				`job "zzz" step 3 (docker/build-push-action) sets cache-from`,
+				`job "zzz" step 3 (docker/build-push-action) sets cache-to`,
+			} {
+				Expect(err).To(MatchError(ContainSubstring(want)))
+			}
+		})
+
+		// Asserted on the parse failure itself: a file that failed to parse
+		// would otherwise surface as the floor's "found nothing to check",
+		// which says nothing about which file is broken.
+		It("reports a malformed workflow against its file name", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn, coldGo),
+				"nightly.yml": []byte("on: [\n"),
+			})).To(MatchError(ContainSubstring("nightly.yml: yaml:")))
+		})
+
+		It("reports a push trigger that is neither empty nor a mapping", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn, coldGo),
+				"nightly.yml": []byte("on:\n  push: main\njobs: {}\n"),
+			})).To(MatchError(ContainSubstring("nightly.yml: on.push:")))
+		})
+	})
+
+	Describe("selection", func() {
+		// Decoy: ci.yml keeps its warm caches on purpose, and a guard keyed on
+		// anything but the trigger would trip over it.
+		It("ignores a branch-only workflow with a warm cache", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn, coldGo),
+				"ci.yml":      workflow(branchOn, warmGo),
+			})).To(Succeed())
+		})
+
+		// Decoy: no list names nightly.yml, so this fails only because the
+		// trigger was read.
+		It("checks a workflow that gains a tag trigger without editing any list", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn, coldGo),
+				"nightly.yml": workflow(branchOn+"    tags: [\"nightly-*\"]\n", warmGo),
+			})).To(MatchError(ContainSubstring(`nightly.yml job "build" step 1`)))
+		})
+
+		DescribeTable("pushCanFireOnTag",
+			func(src string, want bool) {
+				var doc tagCacheWorkflowDoc
+				Expect(yaml.Unmarshal([]byte(src), &doc)).To(Succeed())
+				Expect(pushCanFireOnTag(doc.On)).To(Equal(want))
+			},
+			Entry("no on: at all", "jobs: {}\n", false),
+			Entry("on: push, which fires for every ref", "on: push\n", true),
+			Entry("on: some other event", "on: workflow_dispatch\n", false),
+			Entry("a list including push", "on: [pull_request, push]\n", true),
+			Entry("a list without push", "on: [pull_request]\n", false),
+			Entry("a mapping without push", "on:\n  pull_request:\n", false),
+			// Every real workflow lists push first; this ordering is the one
+			// that pins skipping past the keys that are not push.
+			Entry("push after another trigger", "on:\n  workflow_dispatch:\n"+tagOn, true),
+			Entry("push with no value", "on:\n  push:\n", true),
+			Entry("push filtered only by paths", "on:\n  push:\n    paths: [\"charts/**\"]\n", true),
+			Entry("push filtered by tags", "on:\n"+tagOn, true),
+			// Paired with branches, as the real workflows are: a tag filter
+			// alone would be selected by the no-branch-filter rule anyway,
+			// so these are the entries that pin the tag filters themselves.
+			Entry("push filtered by branches and tags", "on:\n"+branchOn+"    tags: [\"v*\"]\n", true),
+			Entry("push filtered by branches and tags-ignore",
+				"on:\n"+branchOn+"    tags-ignore: [\"v*\"]\n", true),
+			Entry("push filtered by branches only", "on:\n"+branchOn, false),
+			Entry("push filtered by branches-ignore only",
+				"on:\n  push:\n    branches-ignore: [\"main\"]\n", false),
+		)
+	})
+
+	// Without a floor, a selection that silently matched nothing would read
+	// as a clean bill of health.
+	Describe("floor", func() {
+		It("rejects an empty set of workflows", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{})).To(MatchError(
+				ContainSubstring("no workflow has a push trigger that can fire on a tag")))
+		})
+
+		It("rejects a set in which no workflow runs on a tag", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"ci.yml": workflow(branchOn, coldGo),
+			})).To(MatchError(ContainSubstring("no workflow has a push trigger that can fire on a tag")))
+		})
+
+		It("rejects tag-triggered workflows with no setup-go step among them", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"release.yml": workflow(tagOn, "      - run: make\n"),
+			})).To(MatchError(ContainSubstring(
+				"the tag-triggered workflows (release.yml) have no actions/setup-go step")))
+		})
+
+		// The floor counts across the set: a later workflow with no setup-go
+		// step must not reset the count an earlier one contributed. The real
+		// tree cannot pin this, since its last-sorting tag workflow uses
+		// setup-go.
+		It("counts setup-go steps across every tag-triggered workflow", func() {
+			Expect(verifyTagWorkflowsColdIn(map[string][]byte{
+				"a.yml": workflow(tagOn, coldGo),
+				"b.yml": workflow(tagOn, "      - run: make\n"),
+			})).To(Succeed())
+		})
+	})
+
+	Describe("readWorkflowSources", func() {
+		It("reads both workflow extensions and nothing else", func() {
+			dir := GinkgoT().TempDir()
+			for _, name := range []string{"a.yml", "b.yaml", "README.md"} {
+				Expect(os.WriteFile(filepath.Join(dir, name), []byte("on: push\n"), 0o644)).To(Succeed())
+			}
+			Expect(os.Mkdir(filepath.Join(dir, "sub.yml"), 0o755)).To(Succeed())
+			sources, err := readWorkflowSources(dir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sources).To(HaveLen(2))
+			Expect(sources).To(HaveKeyWithValue("a.yml", []byte("on: push\n")))
+			Expect(sources).To(HaveKey("b.yaml"))
 		})
 	})
 })

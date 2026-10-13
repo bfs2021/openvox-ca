@@ -1153,6 +1153,250 @@ func verifyAutomergeBasePinIn(name string, src []byte) error {
 // reusable-workflow call has no steps for the step-level check to walk.
 var automergeActionRE = regexp.MustCompile(`(?i)auto-?merge`)
 
+// verifyTagWorkflowsCold asserts that no workflow able to run on a tag push
+// restores a build cache. Wired into dev:check with its own banner.
+//
+// The reason is provenance. actions/setup-go restores ~/.cache/go-build and
+// the module cache unless a step says `cache: false`, and a restored build
+// cache is not checksum-verified the way modules are -- so a tag job that
+// restores one can link something a job on main wrote into a published
+// artefact. release.yml's build job was made cold for that reason while the
+// chart publish job in helm-chart.yml stayed warm until openvox-ca#448, and a
+// new setup-go step with no `cache:` key is warm while looking harmless in
+// review. The rules themselves are in verifyColdTagStepsIn.
+//
+// Every file in .github/workflows is read, and the tag-triggered ones are
+// picked out by their trigger rather than from a list, since a list would miss
+// exactly the workflow that gains a tag trigger later.
+func verifyTagWorkflowsCold() error {
+	sources, err := readWorkflowSources(filepath.Join(".github", "workflows"))
+	if err != nil {
+		return err
+	}
+	return verifyTagWorkflowsColdIn(sources)
+}
+
+// readWorkflowSources returns every workflow file in dir, keyed by base name.
+// GitHub runs both .yml and .yaml there, so both are read; anything else is
+// not a workflow and is skipped.
+func readWorkflowSources(dir string) (map[string][]byte, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	sources := map[string][]byte{}
+	for _, e := range entries {
+		ext := filepath.Ext(e.Name())
+		if e.IsDir() || (ext != ".yml" && ext != ".yaml") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		sources[e.Name()] = src
+	}
+	return sources, nil
+}
+
+// verifyTagWorkflowsColdIn is verifyTagWorkflowsCold over caller-supplied
+// workflow contents, split out so which files get checked is itself testable.
+// Every violation is reported, not only the first.
+//
+// It has a floor: at least one tag-triggered workflow, and at least one
+// actions/setup-go step among them. Without one, a parsing regression that
+// selected nothing would pass. The setup-go half counts across the whole
+// set, so it fires only when no tag-triggered workflow uses setup-go at all:
+// it is not a per-workflow check, and release.yml alone moving to another
+// toolchain installer would leave it satisfied by helm-chart.yml.
+func verifyTagWorkflowsColdIn(sources map[string][]byte) error {
+	var errs []error
+	var tagged []string
+	setupGoSteps := 0
+	for _, name := range slices.Sorted(maps.Keys(sources)) {
+		var doc tagCacheWorkflowDoc
+		if err := yaml.Unmarshal(sources[name], &doc); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		onTag, err := pushCanFireOnTag(doc.On)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: on.push: %w", name, err))
+			continue
+		}
+		if !onTag {
+			continue
+		}
+		tagged = append(tagged, name)
+		n, err := verifyColdTagStepsIn(name, doc)
+		setupGoSteps += n
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	if len(tagged) == 0 {
+		return errors.New("no workflow has a push trigger that can fire on a tag, so the tag-build " +
+			"cache check found nothing to check; release.yml at least should be one. Fix the " +
+			"trigger parsing rather than deleting the check")
+	}
+	if setupGoSteps == 0 {
+		return fmt.Errorf("the tag-triggered workflows (%s) have no actions/setup-go step, so the "+
+			"tag-build cache check checked no Go toolchain at all; if tag builds really stopped "+
+			"using setup-go, revisit verifyTagWorkflowsCold rather than letting it go quiet",
+			strings.Join(tagged, ", "))
+	}
+	return nil
+}
+
+// verifyColdTagStepsIn applies the rules to one tag-triggered workflow and
+// returns how many actions/setup-go steps it found, for the floor:
+//
+//  1. every actions/setup-go step sets `cache: false` -- an absent key fails,
+//     because setup-go defaults it to true;
+//  2. no actions/cache step, including its restore and save sub-actions;
+//  3. no `cache-from` or `cache-to` on docker/build-push-action.
+//
+// Input names are matched case-insensitively, as the runner reads them (see
+// foldInputs), so `Cache-From:` is caught as surely as `cache-from:`.
+//
+// Scope, stated because it is narrower than "nothing a tag build runs restores
+// a cache": the rules read only the steps written in the workflow file, and
+// never follow a reference. A local composite action (`uses: ./...`) or a
+// reusable workflow the job calls is not opened, and a workflow that reaches a
+// tag ref by some trigger other than push -- release, create, or a
+// workflow_dispatch run on a tag -- is not selected. None of those carries a
+// cache today; closing any of them means extending this guard.
+//
+// The Dockerfiles' `RUN --mount=type=cache` is out of scope deliberately, and
+// neither uses one. Such a mount lives in the builder, which starts empty on a
+// hosted runner, and BuildKit's cache export does not carry cache mounts -- so
+// the only route from main's cache into a tag build's image is the cache-from
+// that rule 3 forbids.
+func verifyColdTagStepsIn(name string, doc tagCacheWorkflowDoc) (int, error) {
+	var errs []error
+	setupGoSteps := 0
+	for _, job := range slices.Sorted(maps.Keys(doc.Jobs)) {
+		for i, s := range doc.Jobs[job].Steps {
+			uses, _, _ := strings.Cut(s.Uses, "@")
+			where := fmt.Sprintf("%s job %q step %d (%s)", name, job, i+1, uses)
+			inputs, repeated := foldInputs(s.With)
+			switch action := actionPath(s.Uses); {
+			case action == "actions/setup-go":
+				setupGoSteps++
+				cache, ok := inputs["cache"]
+				if repeated["cache"] {
+					errs = append(errs, fmt.Errorf("%s sets `cache:` more than once under different "+
+						"cases, and the runner reads them as one input, so this check cannot tell which "+
+						"value setup-go sees; keep a single `cache: false`", where))
+				} else if !ok {
+					errs = append(errs, fmt.Errorf("%s has no `cache:` input, and setup-go defaults it "+
+						"to true, so a tag build would restore a Go build cache that main can write; "+
+						"set `cache: false`", where))
+				} else if cache.Value != "false" {
+					errs = append(errs, fmt.Errorf("%s sets `cache: %s`; a workflow that runs on a tag "+
+						"must set `cache: false`, so the release links nothing a job on main wrote",
+						where, cache.Value))
+				}
+			case action == "actions/cache" || strings.HasPrefix(action, "actions/cache/"):
+				errs = append(errs, fmt.Errorf("%s restores or saves a cache in a workflow that runs "+
+					"on a tag; a tag build must not link anything a job on main wrote", where))
+			case action == "docker/build-push-action":
+				// Presence alone is refused, so every spelling of these
+				// inputs is caught by the fold without reading a value.
+				for _, key := range []string{"cache-from", "cache-to"} {
+					if _, ok := inputs[key]; ok {
+						errs = append(errs, fmt.Errorf("%s sets %s in a workflow that runs on a tag; "+
+							"a tag build's image must not share a BuildKit cache with main's", where, key))
+					}
+				}
+			}
+		}
+	}
+	return setupGoSteps, errors.Join(errs...)
+}
+
+// actionPath is a step's `uses:` without its @ref, lowercased because GitHub
+// resolves owner and repository names case-insensitively -- a guard matching
+// "actions/setup-go" exactly would miss "Actions/setup-go".
+func actionPath(uses string) string {
+	path, _, _ := strings.Cut(uses, "@")
+	return strings.ToLower(path)
+}
+
+// foldInputs returns a step's `with:` keyed by lowercased input name, and the
+// lowercased names that appear more than once when case is ignored. The runner
+// hands an action its inputs as INPUT_<NAME> environment variables,
+// upper-cased, so `Cache-From:` reaches docker/build-push-action exactly as
+// `cache-from:` would; and two spellings of one name are one input, so
+// `cache: false` beside `Cache: true` cannot be read as cold.
+func foldInputs(with map[string]yaml.Node) (map[string]yaml.Node, map[string]bool) {
+	folded := make(map[string]yaml.Node, len(with))
+	repeated := map[string]bool{}
+	for key, value := range with {
+		lower := strings.ToLower(key)
+		if _, dup := folded[lower]; dup {
+			repeated[lower] = true
+		}
+		folded[lower] = value
+	}
+	return folded, repeated
+}
+
+// pushCanFireOnTag reports whether a workflow's `on:` includes a push trigger
+// that a tag push fires. That is wider than "on.push.tags is set": GitHub runs
+// an unfiltered push trigger -- `on: push`, `push:` with no value, or one
+// filtered only by paths -- for tags as well as branches. Only a push filtered
+// by branches or branches-ignore, and by neither tags nor tags-ignore, is
+// confined to branches.
+func pushCanFireOnTag(on yaml.Node) (bool, error) {
+	switch on.Kind {
+	case yaml.ScalarNode:
+		return on.Value == "push", nil
+	case yaml.SequenceNode:
+		return slices.ContainsFunc(on.Content, func(n *yaml.Node) bool { return n.Value == "push" }), nil
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(on.Content); i += 2 {
+			if on.Content[i].Value != "push" {
+				continue
+			}
+			// `push:` with no value decodes to an empty filter, which the
+			// last line reads as unfiltered, so it needs no case of its own.
+			push := on.Content[i+1]
+			var filter struct {
+				Branches       []string `yaml:"branches"`
+				BranchesIgnore []string `yaml:"branches-ignore"`
+				Tags           []string `yaml:"tags"`
+				TagsIgnore     []string `yaml:"tags-ignore"`
+			}
+			if err := push.Decode(&filter); err != nil {
+				return false, err
+			}
+			if len(filter.Tags) > 0 || len(filter.TagsIgnore) > 0 {
+				return true, nil
+			}
+			return len(filter.Branches) == 0 && len(filter.BranchesIgnore) == 0, nil
+		}
+	}
+	return false, nil
+}
+
+// tagCacheWorkflowDoc is the slice of a workflow document
+// verifyTagWorkflowsCold reads. `on:` is kept as a raw node because GitHub
+// accepts it as a string, a list or a map, and workflowGuardDoc's map would
+// refuse the first two.
+type tagCacheWorkflowDoc struct {
+	On   yaml.Node `yaml:"on"`
+	Jobs map[string]struct {
+		Steps []struct {
+			Uses string               `yaml:"uses"`
+			With map[string]yaml.Node `yaml:"with"`
+		} `yaml:"steps"`
+	} `yaml:"jobs"`
+}
+
 // distVariantSpec describes one release artefact: its short name (the
 // artefact-name suffix, e.g. "linux_arm64_fips") and the build environment
 // that produces it.
@@ -4197,6 +4441,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking workflow base scoping...")
 	if err := verifyWorkflowBaseScoping(); err != nil {
+		return err
+	}
+	fmt.Println("Checking tag-triggered workflows restore no cache...")
+	if err := verifyTagWorkflowsCold(); err != nil {
 		return err
 	}
 	// Vet the two packages with non-Linux build-tagged files. Every CI check
