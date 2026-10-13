@@ -22,6 +22,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -36,12 +37,20 @@ import (
 	. "github.com/onsi/gomega"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/concurrency"
 	"go.etcd.io/etcd/server/v3/embed"
 )
 
 // startEmbeddedEtcd boots an in-process etcd server on an ephemeral port and
 // returns a client connected to it plus a teardown function.
 func startEmbeddedEtcd() (*clientv3.Client, func()) {
+	cli, _, cleanup := startEmbeddedEtcdServer()
+	return cli, cleanup
+}
+
+// startEmbeddedEtcdServer is startEmbeddedEtcd, plus a function that stops
+// only the server, so a spec can make etcd unreachable from a live client.
+func startEmbeddedEtcdServer() (*clientv3.Client, func(), func()) {
 	dir := GinkgoT().TempDir()
 
 	peerURL, err := url.Parse("http://127.0.0.1:0")
@@ -84,12 +93,14 @@ func startEmbeddedEtcd() (*clientv3.Client, func()) {
 		Expect(err).NotTo(HaveOccurred(), "etcd client: %v", err)
 	}
 
+	var stopOnce sync.Once
+	stopServer := func() { stopOnce.Do(e.Close) }
 	cleanup := func() {
 		cli.Close()
-		e.Close()
+		stopServer()
 		os.RemoveAll(dir)
 	}
-	return cli, cleanup
+	return cli, stopServer, cleanup
 }
 
 func newBackend(cli *clientv3.Client, prefix string) *EtcdBackend {
@@ -413,6 +424,397 @@ var _ = Describe("EtcdBackendAcquireLockSerialisesConcurrentCallers", func() {
 		}
 		wg.Wait()
 		Expect(maxConcurrent.Load()).To(Equal(int32(1)), "maxConcurrent = %d, want 1 (lock did not serialise writers)", maxConcurrent.Load())
+	})
+})
+
+// EtcdBackendLockSessionLifetime pins the lifetime of the lease-backed
+// session every lock on a backend shares (#442). The session outlives the
+// AcquireLock call that happened to create it, so it must not be bound to
+// that call's context; and a lock is only granted on a session that is still
+// renewing its lease.
+var _ = Describe("EtcdBackendLockSessionLifetime", func() {
+	const (
+		prefix = "/test-lock-lifetime"
+		// The server raises any lease TTL below 1.5 election timeouts to
+		// that floor, which on the embedded server's defaults is 2s.
+		shortTTL = 2
+		// lapseWindow is long enough for a lease nobody renews to expire
+		// and for the server to hand its lock to the next waiter: the
+		// twin spec below holds the harness to that.
+		lapseWindow = 3 * shortTTL * time.Second
+	)
+
+	errInjected := errors.New("injected failure")
+
+	var (
+		cli        *clientv3.Client
+		stopServer func()
+		a          *EtcdBackend
+		other      *EtcdBackend
+	)
+
+	BeforeEach(func() {
+		var stop func()
+		cli, stopServer, stop = startEmbeddedEtcdServer()
+		DeferCleanup(stop)
+		a = newBackend(cli, prefix)
+		other = newBackend(cli, prefix)
+		a.lockTTL = shortTTL
+		other.lockTTL = shortTTL
+		DeferCleanup(other.Close)
+		DeferCleanup(a.Close)
+	})
+
+	// otherAcquires has the second replica try for name within d, releasing
+	// it again if it gets it. It runs the attempt in a goroutine because the
+	// process-local mutex ignores contexts: a regression that leaves other's
+	// local lock held must fail the spec, not hang the suite.
+	otherAcquires := func(name string, d time.Duration) error {
+		GinkgoHelper()
+		ch := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), d)
+			defer cancel()
+			ul, err := other.AcquireLock(ctx, name)
+			if err == nil {
+				_ = ul.Unlock()
+			}
+			ch <- err
+		}()
+		select {
+		case err := <-ch:
+			return err
+		case <-time.After(d + 5*time.Second):
+			Fail(fmt.Sprintf("other's AcquireLock(%q) ignored its %v deadline: its process-local lock is held", name, d))
+			return nil
+		}
+	}
+
+	currentSession := func(b *EtcdBackend) *concurrency.Session {
+		b.sessionMu.Lock()
+		defer b.sessionMu.Unlock()
+		return b.session
+	}
+
+	Context("when the call that created the session has returned", func() {
+		It("keeps a lock held on that session past the lease TTL", func() {
+			firstCtx, cancelFirst := context.WithCancel(context.Background())
+			ulFirst, err := a.AcquireLock(firstCtx, "subject:first")
+			Expect(err).NotTo(HaveOccurred(), "first AcquireLock")
+			ulHeld, err := a.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred(), "AcquireLock crl")
+			DeferCleanup(ulHeld.Unlock)
+
+			// The request that created the session finishes, as every
+			// CA request path does: unlock, then cancel its context.
+			Expect(ulFirst.Unlock()).To(Succeed(), "first Unlock")
+			cancelFirst()
+
+			Expect(otherAcquires("crl", lapseWindow)).To(MatchError(context.DeadlineExceeded),
+				"another replica took crl while this one still held it: the session lease lapsed with its creator's context")
+		})
+
+		It("hands the lock over within that window once the lease stops being renewed", func() {
+			_, err := a.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred(), "AcquireLock crl")
+
+			currentSession(a).Orphan()
+
+			Expect(otherAcquires("crl", lapseWindow)).To(Succeed(),
+				"a lease nobody renews must lapse within the window, or the spec above cannot fail")
+		})
+	})
+
+	Context("when the session lapses while an acquisition waits", func() {
+		type acquired struct {
+			ul  Unlocker
+			err error
+		}
+		var res acquired
+
+		// Just-before, so a nested Context can install a hook first.
+		JustBeforeEach(func() {
+			// Long enough that the orphaned lease, and the waiter key it
+			// carries, outlive everything the specs below assert.
+			a.lockTTL = 10
+
+			ulOther, err := other.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred(), "other AcquireLock")
+
+			ch := make(chan acquired, 1)
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				ul, err := a.AcquireLock(ctx, "crl")
+				ch <- acquired{ul: ul, err: err}
+			}()
+
+			// Wait until a has queued its own key behind other's.
+			Eventually(func() (int64, error) {
+				resp, err := cli.Get(context.Background(), prefix+"/locks/crl/", clientv3.WithPrefix(), clientv3.WithCountOnly())
+				if err != nil {
+					return 0, err
+				}
+				return resp.Count, nil
+			}).WithTimeout(5 * time.Second).Should(Equal(int64(2)))
+
+			// The keepalive stops, but the lease is still live on the
+			// server, so the queued key survives and Lock goes on to win.
+			currentSession(a).Orphan()
+			Expect(ulOther.Unlock()).To(Succeed(), "other Unlock")
+
+			Eventually(ch).WithTimeout(5 * time.Second).Should(Receive(&res))
+			if res.ul != nil {
+				DeferCleanup(res.ul.Unlock)
+			}
+		})
+
+		It("refuses the lock rather than grant it on a lease nobody renews", func() {
+			Expect(res.err).To(MatchError(concurrency.ErrSessionExpired))
+		})
+
+		It("gives up its place, so other replicas need not wait out the lease", func() {
+			Expect(otherAcquires("crl", time.Second)).To(Succeed())
+		})
+
+		It("lets this backend lock again, on a fresh session", func() {
+			// In a goroutine because the process-local mutex ignores
+			// contexts: if the refusal kept it, this would hang, not fail.
+			ch := make(chan error, 1)
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				ul, err := a.AcquireLock(ctx, "crl")
+				if err == nil {
+					err = ul.Unlock()
+				}
+				ch <- err
+			}()
+
+			var err error
+			Eventually(ch).WithTimeout(5*time.Second).Should(Receive(&err),
+				"the refused acquisition kept this backend's process-local lock on crl")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(currentSession(a).Done()).NotTo(BeClosed())
+		})
+
+		Context("and giving the key back fails too", func() {
+			BeforeEach(func() {
+				a.unlockHook = func() error { return errInjected }
+			})
+
+			It("reports both failures, and frees this backend's process-local lock on the name", func() {
+				Expect(res.err).To(MatchError(concurrency.ErrSessionExpired))
+				Expect(res.err).To(MatchError(errInjected))
+
+				// The stranded key outlives this window on its orphaned
+				// lease, so the attempt must time out in the distributed
+				// wait; held locally, it would never return at all.
+				ch := make(chan error, 1)
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					defer cancel()
+					_, err := a.AcquireLock(ctx, "crl")
+					ch <- err
+				}()
+				var err error
+				Eventually(ch).WithTimeout(5*time.Second).Should(Receive(&err),
+					"the retry on the lapsed session kept this backend's process-local lock on crl")
+				Expect(err).To(MatchError(context.DeadlineExceeded))
+			})
+		})
+	})
+
+	Context("when an acquisition fails with its key already on the server", func() {
+		It("deletes the key, so other replicas need not wait for this one to take the name again", func() {
+			// Long enough that the key could not lapse on its own within
+			// the window below.
+			a.lockTTL = 10
+			_, err := a.AcquireLock(context.Background(), "subject:other")
+			Expect(err).NotTo(HaveOccurred(), "AcquireLock to create the session")
+
+			// The state a commit whose answer was lost leaves behind: the
+			// waiter key, written by the library itself on this backend's
+			// lease, and a Mutex with no revision for Unlock to act on.
+			planted := concurrency.NewMutex(currentSession(a), prefix+"/locks/subject:abandoned")
+			Expect(planted.Lock(context.Background())).To(Succeed(), "plant the waiter key")
+
+			// A cancelled context fails tryAcquire's Txn before it sets a
+			// revision, just as a lost answer does.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			_, err = a.AcquireLock(ctx, "subject:abandoned")
+			Expect(err).To(MatchError(context.Canceled))
+
+			Expect(otherAcquires("subject:abandoned", time.Second)).To(Succeed())
+		})
+	})
+
+	// Built through NewEtcdBackend, the constructor production uses, rather
+	// than the shared-client one every other spec here goes through.
+	Context("when built as production builds it", func() {
+		var b *EtcdBackend
+
+		BeforeEach(func() {
+			var err error
+			b, err = NewEtcdBackend(EtcdConfig{Endpoints: cli.Endpoints(), KeyPrefix: prefix})
+			Expect(err).NotTo(HaveOccurred(), "NewEtcdBackend")
+			// Close is asserted below; this only guards an early failure.
+			DeferCleanup(func() { _ = b.Close() })
+		})
+
+		It("grants leases with the documented TTL", func() {
+			ul, err := b.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred(), "AcquireLock crl")
+			DeferCleanup(ul.Unlock)
+
+			resp, err := cli.TimeToLive(context.Background(), currentSession(b).Lease())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.GrantedTTL).To(Equal(int64(30)))
+		})
+
+		It("closes the client it owns", func() {
+			Expect(b.Close()).To(Succeed())
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, err := b.client.Get(ctx, prefix+"/probe")
+			Expect(err).To(HaveOccurred(), "the backend's own client still answered after Close")
+		})
+	})
+
+	Context("when the caller's context ends before a session exists", func() {
+		It("fails the lease grant and leaves no session behind", func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			_, err := a.AcquireLock(ctx, "crl")
+			Expect(err).To(MatchError(context.Canceled))
+			Expect(currentSession(a)).To(BeNil())
+		})
+	})
+
+	Context("when deleting the lock key fails", func() {
+		var (
+			failing atomic.Bool
+			ul      Unlocker
+		)
+
+		BeforeEach(func() {
+			// Long enough that the stranded key cannot lapse on its own
+			// within any window below.
+			a.lockTTL = 10
+			failing.Store(true)
+			a.unlockHook = func() error {
+				if failing.Load() {
+					return errInjected
+				}
+				return nil
+			}
+			// Deletes succeed again before the backend's own Close, so
+			// that cleanup does not depend on the retry giving up.
+			DeferCleanup(func() { failing.Store(false) })
+
+			var err error
+			ul, err = a.AcquireLock(context.Background(), "subject:stranded")
+			Expect(err).NotTo(HaveOccurred(), "AcquireLock")
+			Expect(ul.Unlock()).To(MatchError(errInjected))
+		})
+
+		// aAcquires has this backend try for the stranded name in a
+		// goroutine, since the process-local mutex ignores contexts.
+		aAcquires := func() chan error {
+			ch := make(chan error, 1)
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				ul, err := a.AcquireLock(ctx, "subject:stranded")
+				if err == nil {
+					err = ul.Unlock()
+				}
+				ch <- err
+			}()
+			return ch
+		}
+
+		It("goes on retrying, so other replicas need not wait for this one to take the name again", func() {
+			Expect(otherAcquires("subject:stranded", time.Second)).To(MatchError(context.DeadlineExceeded),
+				"the injected failure did not leave the key behind, so this spec proves nothing")
+
+			failing.Store(false)
+
+			// Far short of the 10s lease the key would otherwise sit on.
+			Expect(otherAcquires("subject:stranded", 3*time.Second)).To(Succeed())
+		})
+
+		It("keeps this backend from taking the name until the key is gone", func() {
+			ch := aAcquires()
+			Consistently(ch, time.Second).ShouldNot(Receive(),
+				"this backend re-took the name while the stranded key could still be deleted from under it")
+
+			failing.Store(false)
+
+			var err error
+			Eventually(ch).WithTimeout(5 * time.Second).Should(Receive(&err))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("stops retrying once the session lapses, which takes the key with it", func() {
+			sess := currentSession(a)
+			_, err := cli.Revoke(context.Background(), sess.Lease())
+			Expect(err).NotTo(HaveOccurred(), "Revoke")
+			Eventually(sess.Done()).WithTimeout(10 * time.Second).Should(BeClosed())
+
+			// Deletes still fail: only the session ending can free the
+			// process-local lock here.
+			Eventually(aAcquires()).WithTimeout(5*time.Second).Should(Receive(&err),
+				"the retry held this backend's process-local lock past the end of its session")
+			Expect(err).To(MatchError(errInjected),
+				"the fresh acquisition's own release should still hit the injected failure")
+		})
+	})
+
+	Context("when the backend is closed", func() {
+		BeforeEach(func() {
+			a.lockTTL = 10
+		})
+
+		It("revokes the lease, so a lock it still held frees at once", func() {
+			_, err := a.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred(), "AcquireLock crl")
+
+			Expect(a.Close()).To(Succeed())
+
+			Expect(otherAcquires("crl", time.Second)).To(Succeed())
+		})
+
+		It("stops waiting to revoke at the request timeout when etcd cannot be reached", func() {
+			a.timeout = 500 * time.Millisecond
+			_, err := a.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred(), "AcquireLock crl")
+
+			stopServer()
+
+			done := make(chan error, 1)
+			go func() { done <- a.Close() }()
+			// Far short of the 10s TTL the revoke would otherwise wait out.
+			Eventually(done).WithTimeout(3*time.Second).Should(Receive(&err),
+				"Close waited on the unreachable server for the lease TTL")
+			// A revoke that cannot reach etcd is not Close's failure: the
+			// lease lapses on its TTL instead. Close still finishes closing.
+			// (A name this spec has not taken: crl's process-local lock is
+			// still held above, and waiting on it would hang, not fail.)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = a.AcquireLock(context.Background(), "subject:after-close")
+			Expect(err).To(MatchError(errEtcdBackendClosed))
+		})
+
+		It("refuses to start a new session", func() {
+			Expect(a.Close()).To(Succeed())
+
+			_, err := a.AcquireLock(context.Background(), "crl")
+			Expect(err).To(MatchError(errEtcdBackendClosed))
+		})
 	})
 })
 

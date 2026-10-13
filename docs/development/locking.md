@@ -186,6 +186,27 @@ revoke/sign fails at that timeout; the recovery action is to terminate the
 orphaned backend session (`pg_terminate_backend` / `KILL`) or to lower those
 server-side keepalives for HA deployments.
 
+The etcd lease belongs to the backend, not to a request. Every lock an
+`EtcdBackend` takes shares one lease-backed session, so the `AcquireLock` call
+that creates it is only its first user, and its context must bound the lease
+grant and nothing else. Passing it to `concurrency.WithContext`, as the session
+once did, stops the keepalive when that request returns, and every other lock
+on the session lapses one TTL later, part-way through its read-modify-write
+([#442](https://github.com/voxpupuli/openvox-ca/issues/442)).
+
+Two rules follow from a lease that outlives requests, and
+[storage internals](storage-internals.md#cross-node-coordination) describes the
+mechanism behind both. A lock is refused if the session has stopped renewing by
+the time it is won, because its key would lapse within the TTL with the caller
+mid-way through its critical section. And a lock key the backend fails to
+delete no longer lapses on its own, so the backend retries the delete until it
+succeeds or the session lapses, holding the per-name process-local mutex
+throughout. That second rule has a cost at this layer: in-process callers of
+that name wait out an etcd stall, and like every wait on that mutex they ignore
+their contexts. Neither rule covers a lease lost *after* the lock is granted;
+rule 6 of [Rules for new or changed code](#rules-for-new-or-changed-code)
+covers that.
+
 Every implementation of either capability first takes a **per-name
 process-local mutex** before touching the network or the filesystem. This is
 load-bearing, not an optimisation: etcd's `concurrency.Mutex` is not safe for

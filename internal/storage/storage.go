@@ -60,8 +60,10 @@ type StorageService struct {
 }
 
 // WithLock runs fn while holding the named lock, taking the strongest lock the
-// backend offers. The lock is always released when fn returns, including on
-// panic. Three tiers, tried in order:
+// backend offers. Release always starts when fn returns, including on panic;
+// if it fails, a backend may finish it in the background (etcd keeps the name
+// held in this process until it does, see docs/development/locking.md).
+// Three tiers, tried in order:
 //
 //  1. Locker — coordinated across every replica sharing the backend
 //     (etcd, Redis, PostgreSQL, MySQL).

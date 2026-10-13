@@ -112,6 +112,38 @@ and the ordering invariant are documented in
 so they are not duplicated here (its own backend table is only a summary of the
 mechanism detail below).
 
+The session belongs to the backend, not to the request that happens to create
+it (locking.md has the rule and why). `ensureSession` grants the lease under the
+caller's context, bounded by the request timeout, then starts the session with
+`concurrency.WithLease` on a context the backend owns and only `Close` cancels.
+`Close` revokes the lease before cancelling that context, so locks the backend
+still holds free at once, and gives up after the request timeout if etcd cannot
+be reached. That wait comes after the HTTP drain, so during an outage it can
+outlast the launcher's shutdown headroom; the lease then lapses on its TTL.
+
+`AcquireLock` checks the session's `Done()` channel after `Mutex.Lock` returns,
+and refuses with `concurrency.ErrSessionExpired` if the keepalive has stopped.
+`Lock` only checks that its key exists, which it does until the lease expires on
+the server, so it would otherwise grant a lock that another replica can take
+within seconds. The refused key is deleted.
+
+A key the backend fails to delete stays on a lease it goes on renewing, so
+every other replica would wait for it until this one next took the same name.
+Two paths can leave one. A release can fail to delete (an etcd stall longer than
+the request timeout, say). And `Lock` can fail with its key on the server: a
+commit whose answer is lost to the caller's deadline leaves the key without a
+revision for `Mutex.Unlock` to act on, so `AcquireLock` deletes this session's
+key directly whenever `Lock` fails. That key is
+`<prefix>/locks/<name>/<lease ID in hex>`, the one the library writes. Both
+paths go through `etcdUnlocker`, which retries the delete in the background
+every 500ms until it succeeds or the session stops renewing, at which point the
+lease and the key lapse within the TTL. It holds the per-name process-local
+mutex until then, because a re-acquisition by the same backend reuses the very
+same key, and a retry landing after it would delete a live lock. It logs the
+outcome, naming the key. A put still in flight when the delete lands can strand
+the key regardless; that needs a lost commit and a stall together, and it ends
+when this replica next takes the name.
+
 If a replica holding a lock crashes without calling Unlock, the etcd lease
 expires after 30s and the lock is released automatically. For the filesystem
 backend (single-node), the same call path falls through to a same-host lock: an
