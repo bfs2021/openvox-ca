@@ -127,12 +127,13 @@ var _ = Describe("A revocation racing a renewal", func() {
 	}
 
 	// expectRefusedWithoutTrace asserts the other half of a refusal: that it was
-	// decided before the renewal wrote anything. The served certificate covers
-	// the issuance; the pending CSR covers the re-key path specifically, where
-	// the re-check sits ahead of SaveCSR. Move it below and a refused renewal
-	// leaves a CSR queued for a subject whose certificate has just been revoked,
-	// signable later through the admin path — with the served serial, and every
-	// other assertion here, unchanged.
+	// decided before the renewal wrote anything. The served certificate is what
+	// discriminates the race. The pending-CSR check guards something narrower:
+	// the re-key path stores no CSR at all, so it fails only if one is stored
+	// again, which would leave a refused renewal's request queued for a subject
+	// whose certificate has just been revoked, signable later through the admin
+	// path. renewparity_test.go's "stores no request when it refuses a re-key"
+	// pins that directly.
 	expectRefusedWithoutTrace := func() {
 		GinkgoHelper()
 		Expect(servedSerial()).To(Equal(ownCrt.SerialNumber))

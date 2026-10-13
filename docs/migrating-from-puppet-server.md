@@ -502,11 +502,9 @@ reachable.
 
 Renewal reissues under
 this CA's authority using the presented certificate's own subject, so it is
-only meaningful for names this CA assigned. (Extensions differ by path, and on both
-paths only Puppet OID extensions are carried at all: the empty-body form
-carries the presented certificate's SANs and Puppet OIDs forward unchanged,
-while the CSR form takes Puppet OIDs from the CSR and strips authorization-arc
-ones.)
+only meaningful for names this CA assigned. Both forms carry its extensions
+forward too, authorization-arc ones included, and the CSR form takes only the
+new public key from its CSR; see [certificate renewal](api.md#certificate-renewal).
 
 In the default topology every certificate an agent holds was issued by this CA,
 so nothing changes. A certificate issued by a *previous* CA whose material was
@@ -560,15 +558,13 @@ nodes will fail to sign until you set:
 allow_subject_alt_names: true
 ```
 
-Certificates you have already imported keep renewing whatever the setting says:
-the gate judges a renewal against the certificate being renewed, so a name it
-already holds is never refused and only a request for a *new* name is. What the
-setting does not fix is which names survive onto the replacement — the
-empty-body auto-renewal path carries all four SAN types forward, while a
-CSR-body renewal is issued with DNS names only, as every CSR-signed certificate
-is today (see [#241](https://github.com/voxpupuli/openvox-ca/issues/241)). An
+Certificates you have already imported keep renewing whatever the setting says.
+As in OpenVox Server, a renewal recreates the certificate being renewed: its
+subject, all four SAN types and every other extension are carried forward, and
+a CSR-body renewal (re-key) takes only the new public key from its CSR. So an
 imported certificate holding IP, email or URI SANs keeps them through
-auto-renewal and loses them through a re-key. The generate paths are not filtered either
+auto-renewal and re-key alike, and the setting is never consulted on renewal.
+See [certificate renewal](api.md#certificate-renewal). The generate paths are not filtered either
 — `openvox-ca generate --dns` on the CA host and the admin-only
 `POST /generate/{subject}?dns=` — because their names come from an administrator
 rather than from an agent's CSR.

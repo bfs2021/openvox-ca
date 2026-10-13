@@ -159,8 +159,10 @@ type CA struct {
 	// set to true a request for an IP, email or URI SAN is signed and the SAN
 	// dropped — see #241, which adds the carry-through this gate assumes.
 	//
-	// The boundary is the CSR, not the caller: this governs names carried on a
-	// submitted certificate request, wherever it arrives from. Minting reaches
+	// The boundary is where the names come from, not the caller: this governs
+	// names carried on a submitted certificate request, wherever it arrives
+	// from. A renewal, re-key included, takes its names from the certificate it
+	// renews and only the key from its CSR, so it is not gated. Minting reaches
 	// issueLeafLocked directly, never through signWithDuration, so it is not
 	// gated: one direct caller, GenerateWithOptions, which Generate delegates to
 	// -- issuanceseam_test.go pins that caller set. Both entry points into it

@@ -587,21 +587,22 @@ var _ = Describe("CA AutoRenew", func() {
 		Expect(err).To(MatchError(ca.ErrKeyPolicy))
 	})
 
-	It("carries Puppet OID extensions forward, including auth OIDs the CSR path would strip", func() {
-		// Unlike the CSR signing path (which strips authorization-arc OIDs such
-		// as pp_cli_auth as an anti-escalation control), AutoRenew preserves
-		// every Puppet-arc OID because they were already vetted when the
-		// presented cert was issued. A cert legitimately carrying pp_cli_auth
-		// (e.g. OpenVox Server's own cert) must keep it across auto-renewal, or
-		// the puppetserver CA CLI stops authenticating. This locks in that
-		// deliberate asymmetry with the CSR path.
+	It("carries Puppet OID extensions forward, including auth OIDs the signing path would strip", func() {
+		// Unlike the CSR signing path (signWithDuration, which strips
+		// authorization-arc OIDs such as pp_cli_auth as an anti-escalation
+		// control), renewal preserves every Puppet-arc OID because they were
+		// already vetted when the presented cert was issued; the re-key path
+		// does too (see renewparity_test.go). A cert legitimately carrying
+		// pp_cli_auth (e.g. OpenVox Server's own cert) must keep it across
+		// auto-renewal, or the puppetserver CA CLI stops authenticating. This
+		// locks in that deliberate asymmetry with the signing path.
 		authVal, err := asn1.Marshal("true")
 		Expect(err).NotTo(HaveOccurred())
 		roleVal, err := asn1.Marshal("web")
 		Expect(err).NotTo(HaveOccurred())
 		// pp_role lives in the node-attribute arc (…34380.1.1.*), not the auth
-		// arc, so both the CSR path and AutoRenew carry it; pp_cli_auth lives in
-		// the auth arc (…34380.1.3.*) that only AutoRenew preserves.
+		// arc, so both the signing path and renewal carry it; pp_cli_auth lives
+		// in the auth arc (…34380.1.3.*) that only renewal preserves.
 		ppRole := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 1, 13}
 
 		now := time.Now().UTC()
@@ -611,7 +612,7 @@ var _ = Describe("CA AutoRenew", func() {
 			NotAfter:  now.Add(365 * 24 * time.Hour),
 			DNSNames:  []string{"autorenew-oid-node"},
 			ExtraExtensions: []pkix.Extension{
-				{Id: ca.OIDPpCliAuth, Value: authVal}, // auth-arc: CSR path would strip this
+				{Id: ca.OIDPpCliAuth, Value: authVal}, // auth-arc: signing path would strip this
 				{Id: ppRole, Value: roleVal},          // node-attr arc: always carried
 			},
 		})
@@ -631,7 +632,7 @@ var _ = Describe("CA AutoRenew", func() {
 
 		authExt, ok := findExt(renewed, ca.OIDPpCliAuth)
 		Expect(ok).To(BeTrue(),
-			"auto-renewal must carry the pp_cli_auth auth OID forward, unlike the CSR path")
+			"auto-renewal must carry the pp_cli_auth auth OID forward, unlike the signing path")
 		Expect(authExt.Value).To(Equal(authVal))
 
 		roleExt, ok := findExt(renewed, ppRole)

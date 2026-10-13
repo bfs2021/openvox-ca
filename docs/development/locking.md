@@ -316,9 +316,10 @@ be atomic with the issuance.
 Those seven are entry points, and most reach the seam through another. What is
 *automated* is narrower: issuanceseam_test.go pins that `issueLeafLocked` has
 exactly four **direct** callers — `signWithDuration`, `GenerateWithOptions`,
-`AutoRenew` and `issueManagedUnderSubjectLock`. The list above would stay
-true-looking if, say, `Renew` stopped routing through `signWithDuration`, and
-nothing would fail — which is the same shape as `ImportCertificate`, which sat
+`reissueLeafLocked` and `issueManagedUnderSubjectLock` — and that
+`reissueLeafLocked`, through which both `Renew` and `AutoRenew` reach it, has
+exactly those two. The list above would stay true-looking if, say, `SignWithTTL`
+stopped routing through `signWithDuration`, and nothing would fail — which is the same shape as `ImportCertificate`, which sat
 in that list wrongly until a reviewer noticed by hand rather than a spec
 catching it.
 

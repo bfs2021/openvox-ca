@@ -727,7 +727,11 @@ that means the record is terminal-only unless you create the file first with the
 server's runtime ownership, or capture stderr.
 
 The line to alert on is `Issued certificate carrying a Puppet authorisation
-extension`, with attributes `subject` and `grant`. `--force` emits a second one
+extension`, with attributes `subject` and `grant`. The server writes the same
+line whenever it [renews](api.md#certificate-renewal) a certificate carrying a
+grant, with a third attribute, `renewal`: `same key` when the renewed
+certificate keeps the original's key (an auto-renewal, or a renewal CSR over
+that key), or `re-key` when a renewal CSR moved the grant onto a new key. `--force` emits a second one
 for the certificate it retired: `Revoked a certificate to make room for its
 replacement`, at `INFO`, with `subject` and `serial`.
 

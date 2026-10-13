@@ -1613,18 +1613,6 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 				http.Error(w, "CA not ready", http.StatusServiceUnavailable)
 				return
 			}
-			if errors.Is(err, ca.ErrDisallowedSubjectAltNames) {
-				// 400 as on PUT /certificate_request, and for the same reason:
-				// the client supplied this CSR, the refusal is a policy
-				// decision rather than a fault, and it can never succeed as
-				// submitted — so the agent must stop rather than retry a 500
-				// forever. Without this arm the catch-all below answers 500 and
-				// the agent reads a deliberate refusal as a server problem.
-				slog.Warn("Renewal refused: disallowed subject alternative names",
-					"subject", sanitiseForLog(cn))
-				http.Error(w, ca.ErrDisallowedSubjectAltNames.Error(), http.StatusBadRequest)
-				return
-			}
 			slog.Warn("Renewal failed", "subject", sanitiseForLog(cn), "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return

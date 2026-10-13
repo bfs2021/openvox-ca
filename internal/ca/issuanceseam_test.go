@@ -33,37 +33,40 @@ import (
 
 // SECURITY: the subject-alternative-name policy is enforced in one place --
 // checkSubjectAltNames, called from signWithDuration -- and its completeness
-// rests entirely on a call-graph property: every path that turns a *submitted
-// CSR* into a certificate goes through that function. Nothing in the type
-// system says so. A new path that called issueLeafLocked directly, exactly as
-// the generate paths legitimately do, would issue certificates carrying
-// whatever names a request asked for, and every existing spec would stay green,
-// because each one drives a caller that does pass through the gate.
+// rests entirely on a call-graph property: every path that takes names from a
+// *submitted CSR* goes through that function. Nothing in the type system says
+// so. A new path that called issueLeafLocked directly, exactly as the generate
+// paths legitimately do, would issue certificates carrying whatever names a
+// request asked for, and every existing spec would stay green, because each one
+// drives a caller that does pass through the gate.
 //
 // So the property is asserted here instead: issueLeafLocked has exactly the
 // callers listed below and no others. Adding one is not forbidden -- it means
 // answering, in review, which side of the boundary the new path sits on. The
-// boundary is the CSR, not the caller: names arriving on a submitted request
-// are gated, names an administrator supplies directly are not.
+// boundary is where the names come from, not whether a CSR is involved: names
+// arriving on a submitted request are gated, names an administrator supplies
+// directly are not, and a renewal takes its names from the certificate it
+// renews even when a re-key CSR supplies the key.
+//
+// reissueLeafLocked is pinned the same way, one level up. It copies every
+// extension of the certificate it is handed, the authorisation arc included,
+// which is safe only for a certificate its caller has established this CA
+// issued and has not revoked. A third caller would inherit that copy without
+// necessarily having made those checks, so its callers are an argued set too.
 //
 // This cannot use the compile-time bindings internal/api/authseam_test.go has,
-// because issueLeafLocked is unexported and this file is package ca_test. A
-// rename would leave the walk matching nothing -- which is why the assertion is
-// an exact set comparison rather than a check that no unexpected caller exists:
-// renaming the method empties the found set, and an empty set is not the
+// because both methods are unexported and this file is package ca_test. A
+// rename would leave the walk matching nothing -- which is why each assertion
+// is an exact set comparison rather than a check that no unexpected caller
+// exists: renaming a method empties its found set, and an empty set is not the
 // expected one, so the spec fails and names what it could no longer find.
 //
 // NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
 var _ = Describe("The issuance seam", func() {
-	// Why each caller is allowed to be here.
-	expected := map[string]string{
-		"signWithDuration":             "the gated path: calls checkSubjectAltNames before it issues anything",
-		"GenerateWithOptions":          "offline and admin-only minting; names come from an operator's flags or an admin-tier query parameter, never from an agent's CSR",
-		"AutoRenew":                    "carries the presented certificate's own SANs forward and reads none from a request, so there is nothing for the gate to judge",
-		"issueManagedUnderSubjectLock": "managed certificates take their names from server configuration, fixed before the process serves anything; no request reaches this path, so there is nothing for the gate to judge",
-	}
-
-	It("has exactly the callers whose exemption has been argued", func() {
+	// callersOf returns, for every function in this package's non-test source
+	// that calls method, the "file:line" of each call.
+	callersOf := func(method string) map[string][]string {
+		GinkgoHelper()
 		fset := token.NewFileSet()
 		entries, err := os.ReadDir(".")
 		Expect(err).NotTo(HaveOccurred())
@@ -90,11 +93,11 @@ var _ = Describe("The issuance seam", func() {
 						return true
 					}
 					// Matched on the selected name alone, whatever the receiver:
-					// it is a method on *CA, so a caller reaches it as
+					// these are methods on *CA, so a caller reaches one as
 					// c.issueLeafLocked(...) and a receiver-qualified rule would
 					// see nothing.
 					sel, ok := call.Fun.(*ast.SelectorExpr)
-					if !ok || sel.Sel.Name != "issueLeafLocked" {
+					if !ok || sel.Sel.Name != method {
 						return true
 					}
 					pos := fset.Position(call.Pos())
@@ -104,17 +107,50 @@ var _ = Describe("The issuance seam", func() {
 				})
 			}
 		}
+		return found
+	}
 
-		got := keysOf(found)
+	It("has exactly the callers whose exemption has been argued", func() {
+		// Why each caller is allowed to be here.
+		expected := map[string]string{
+			"signWithDuration":             "the gated path: calls checkSubjectAltNames before it issues anything",
+			"GenerateWithOptions":          "offline and admin-only minting; names come from an operator's flags or an admin-tier query parameter, never from an agent's CSR",
+			"reissueLeafLocked":            "both renewal paths; takes the subject and every SAN from the certificate being renewed and only the public key from a CSR, so there is nothing for the gate to judge",
+			"issueManagedUnderSubjectLock": "managed certificates take their names from server configuration, fixed before the process serves anything; no request reaches this path, so there is nothing for the gate to judge",
+		}
+
+		got := keysOf(callersOf("issueLeafLocked"))
 		want := keysOf(expected)
 		Expect(got).To(Equal(want),
 			"issueLeafLocked's callers have changed.\n"+
 				"  found:    %v\n"+
 				"  expected: %v\n"+
-				"A new caller bypasses checkSubjectAltNames. If it issues from a submitted CSR it "+
-				"belongs behind signWithDuration; if it issues from names an administrator supplied, "+
-				"add it above with the reason. An empty found set means the method was renamed and "+
-				"this gate stopped matching anything -- update the name here rather than deleting the spec.",
+				"A new caller bypasses checkSubjectAltNames. If it takes names from a submitted CSR it "+
+				"belongs behind signWithDuration; if its names come from an administrator, from "+
+				"configuration or from a certificate this CA already issued, add it above with the reason. "+
+				"An empty found set means the method was renamed and this gate stopped matching "+
+				"anything -- update the name here rather than deleting the spec.",
+			got, want)
+	})
+
+	It("reissues a certificate's extensions only for callers that vetted it", func() {
+		// Why each caller is allowed to be here.
+		expected := map[string]string{
+			"Renew":     "re-key; assertOwnCertificate, refuseIfRevoked (before and under the subject lock) and the subject match all run before it",
+			"AutoRenew": "same-key renewal; assertOwnCertificate and refuseIfRevoked (before and under the subject lock) run before it, and the subject is the certificate's own",
+		}
+
+		got := keysOf(callersOf("reissueLeafLocked"))
+		want := keysOf(expected)
+		Expect(got).To(Equal(want),
+			"reissueLeafLocked's callers have changed.\n"+
+				"  found:    %v\n"+
+				"  expected: %v\n"+
+				"It copies every extension of the certificate it is given, pp_cli_auth included. A new "+
+				"caller must first establish that this CA issued that certificate (assertOwnCertificate) "+
+				"and that it is not revoked (refuseIfRevoked); add it above with the reason once it does. "+
+				"An empty found set means the method was renamed -- update the name here rather than "+
+				"deleting the spec.",
 			got, want)
 	})
 })

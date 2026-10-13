@@ -1296,13 +1296,13 @@ var _ = Describe("API Workflow", func() {
 		})
 	})
 
-	Context("renewal CSR requesting disallowed subject alternative names", func() {
-		// The CA-layer refusal is covered in sangate_test.go; what is covered
-		// here is the mapping, which is where the property the gate was built
-		// for actually holds or fails. A refusal reaching an agent as 500 reads
-		// as a server fault it should retry, and this endpoint's whole point is
-		// that a renewal which can never succeed stops.
-		It("answers 400, not the catch-all 500", func() {
+	Context("renewal CSR requesting subject alternative names", func() {
+		// A renewal takes only the key from its CSR, as OpenVox Server's
+		// renewal takes nothing from a request at all, so names a renewal CSR
+		// asks for are ignored rather than refused: the agent gets its
+		// certificate's own names back, not a 400. The CA-layer behaviour is
+		// covered in renewparity_test.go; this pins the status and body.
+		It("answers 200 with the presented certificate's names", func() {
 			subject := "renew-san-node"
 
 			csrPEM, err := testutil.GenerateCSR(subject)
@@ -1320,18 +1320,22 @@ var _ = Describe("API Workflow", func() {
 			clientCert, err := x509.ParseCertificate(block.Bytes)
 			Expect(err).NotTo(HaveOccurred())
 
-			// A name the presented certificate does not carry, so the renewal
-			// baseline cannot excuse it.
+			// A name the presented certificate does not carry, which
+			// allow_subject_alt_names (off here) would refuse on a first
+			// issuance.
 			renewCSR := generateCSRWithSANs(subject, []string{"puppet.example.com"})
 			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(renewCSR))
 			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 
-			Expect(rr.Code).To(Equal(http.StatusBadRequest),
-				"a policy refusal must not surface as a server fault the agent will retry")
-			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrDisallowedSubjectAltNames.Error()))
-			Expect(rr.Body.String()).NotTo(ContainSubstring("puppet.example.com"))
+			Expect(rr.Code).To(Equal(http.StatusOK), rr.Body.String())
+			block, _ = pem.Decode(rr.Body.Bytes())
+			Expect(block).NotTo(BeNil())
+			renewed, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(renewed.DNSNames).To(Equal(clientCert.DNSNames))
+			Expect(renewed.DNSNames).NotTo(ContainElement("puppet.example.com"))
 		})
 	})
 
