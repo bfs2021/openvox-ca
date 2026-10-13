@@ -192,6 +192,20 @@ func newEtcdInventoryService(cli *clientv3.Client, prefix string) (*StorageServi
 	return svc, b
 }
 
+// The canonical-form specs from append_inventory_canonical_test.go (#444),
+// run against etcd, whose embedded server only this build tag provides.
+var _ = Describe("AppendInventory canonical form on etcd", func() {
+	describeCanonicalAppend(canonicalAppendBackend{"etcd", true, true, func() *StorageService {
+		cli, stop := startEmbeddedEtcd()
+		DeferCleanup(stop)
+		svc, _ := newEtcdInventoryService(cli, "/test-canonical")
+		for _, line := range sampleInventoryLines {
+			Expect(svc.AppendInventory(context.Background(), line)).To(Succeed(), "AppendInventory(%q)", line)
+		}
+		return svc
+	}})
+})
+
 // EtcdInventoryConcurrentAppends drives concurrent AppendInventory calls
 // through two StorageServices sharing one etcd prefix (simulating two
 // replicas) with integrity enabled. Afterwards ReadInventory — which verifies
