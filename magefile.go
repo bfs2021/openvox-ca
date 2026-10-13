@@ -2913,6 +2913,10 @@ config:
       store: {secret: {name: a-tls, namespace: openvox}}
 `,
 			wants: []string{
+				// Identifies this NOTE. The route parenthetical below cannot
+				// do that alone on this arm: "(existingConfigMap)" also
+				// appears in the kubernetes_export NOTE, so a case pinning
+				// only that would pass on the wrong NOTE.
 				"no Role was created for managed certificates",
 				// The remedy has to be a rule split, not one rule carrying
 				// create alongside resourceNames -- that combination never
@@ -2922,13 +2926,13 @@ config:
 				"(existingConfigMap)",
 				// The NOTE cannot be gated on the feature being in use --
 				// that is the same thing it is reporting it cannot see -- so
-				// it fires for every unreadable-config install, managed
-				// certificates or not. It therefore has to open
-				// conditionally and offer the way to silence it, or an
-				// operator who does not use the feature learns to skip a
-				// warning that matters to the operators who do.
-				"NOTE: if your config.yaml has a managed_certs entry",
-				"managedCerts.rbac.create: false to silence this",
+				// it fires for every unreadable-config install, and has to
+				// tell an operator who does not use the feature how to turn
+				// it off. Pinned by the values key alone, which is the part
+				// an operator acts on; the sentence around it is prose, and
+				// pinning that too failed together with every other pin here
+				// on any rewording, with no regression to show for it.
+				"managedCerts.rbac.create: false",
 			},
 			notWants: []string{"name: openvox-ca-managed-certs"},
 		},
@@ -2947,7 +2951,11 @@ config:
       store: {secret: {name: a-tls, namespace: openvox}}
 `,
 			wants: []string{
-				"no Role was created for managed certificates",
+				// Unique to this NOTE, unlike the existingConfigMap arm's
+				// parenthetical: the export NOTE's reads "(args, envFrom, or a
+				// --config in". So it identifies the NOTE and the route
+				// together, and repeating the header here only meant a
+				// rewording of it failed twice.
 				"(args, or a --config in",
 			},
 			notWants: []string{"name: openvox-ca-managed-certs", "(existingConfigMap)"},
