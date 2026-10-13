@@ -27,6 +27,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -84,6 +86,25 @@ func signCert(myCA *ca.CA, subject string) *x509.Certificate {
 	cert, err := x509.ParseCertificate(block.Bytes)
 	Expect(err).NotTo(HaveOccurred())
 	return cert
+}
+
+// lockedBuffer is a bytes.Buffer safe to share between slog's writer and the
+// spec reading it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // ocspReqDER builds a basic OCSP request DER for cert issued by issuer.
@@ -222,6 +243,59 @@ var _ = Describe("OCSP HTTP Handler", func() {
 		resp, err := xocsp.ParseResponse(rr.Body.Bytes(), myCA.CACert)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resp.Status).To(Equal(xocsp.Unknown))
+	})
+
+	// --- Another issuer ---
+
+	// foreignIssuerRequest builds a request for a certificate this CA issued,
+	// but naming a freshly generated CA as its issuer.
+	foreignIssuerRequest := func(cert *x509.Certificate) []byte {
+		GinkgoHelper()
+		_, foreignCrtPEM, _, err := testutil.GenerateTestCAECDSA()
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(foreignCrtPEM)
+		foreign, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		return ocspReqDER(cert, foreign)
+	}
+
+	It("answers another issuer's request with 403 unauthorized", func() {
+		cert := signCert(myCA, "foreign-issuer-ocsp-node")
+		req := httptest.NewRequest(http.MethodPost, "/ocsp", bytes.NewReader(foreignIssuerRequest(cert)))
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+
+		Expect(rr.Code).To(Equal(http.StatusForbidden))
+		Expect(rr.Header().Get("Content-Type")).To(Equal("application/ocsp-response"))
+		Expect(rr.Body.Bytes()).To(Equal(xocsp.UnauthorizedErrorResponse))
+	})
+
+	// The caller decides how often this fires, so it stays below Warn, as the
+	// shed does; but at Debug it names enough to find the misconfigured client.
+	It("logs another issuer's request at Debug, naming the client and the serial", func() {
+		cert := signCert(myCA, "foreign-issuer-log-node")
+		reqDER := foreignIssuerRequest(cert)
+
+		// slog's default is process-global, so a goroutine a previous spec
+		// left running can log into this buffer while the spec reads it.
+		buf := &lockedBuffer{}
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		DeferCleanup(func() { slog.SetDefault(orig) })
+
+		req := httptest.NewRequest(http.MethodPost, "/ocsp", bytes.NewReader(reqDER))
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		Expect(rr.Code).To(Equal(http.StatusForbidden))
+
+		out := buf.String()
+		Expect(out).To(ContainSubstring(`level=DEBUG msg="OCSP request names an issuer this CA does not answer for"`))
+		// httptest.NewRequest's RemoteAddr is 192.0.2.1:1234.
+		Expect(out).To(ContainSubstring("client_ip=192.0.2.1"))
+		Expect(out).To(ContainSubstring(strings.ToUpper(cert.SerialNumber.Text(16))))
+		// The specific line the default branch would write, rather than any
+		// WARN, which an unrelated straggler could also produce.
+		Expect(out).NotTo(ContainSubstring(`msg="OCSP request error"`))
 	})
 
 	// --- Bad request ---
