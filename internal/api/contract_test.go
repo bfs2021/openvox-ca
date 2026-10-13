@@ -717,6 +717,15 @@ var _ = Describe("Puppet CA API contract", func() {
 		pinned := seedContractCA(GinkgoT().TempDir())
 		rr := serveContract(pinned, sign)
 		Expect(checkContract(sign, rr.Code, rr.Header().Get("Content-Type"), rr.Body.Bytes())).To(BeEmpty())
+		// Today is still inside the CA's validity, so the answer alone cannot
+		// show the pin; the leaf's start date, backdated from the clock, does.
+		leafPEM, err := pinned.CA.Storage.GetCert(context.Background(), "sign-me")
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(leafPEM)
+		Expect(block).NotTo(BeNil())
+		_, notBefore, _, err := certSerialAndValidity(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(notBefore).To(BeTemporally("==", contractSnapshotTime().Add(-ca.DefaultLeafBackdate), time.Second))
 
 		late := seedContractCA(GinkgoT().TempDir())
 		expired := late.CA.CACert.NotAfter.Add(time.Hour)
