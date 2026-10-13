@@ -98,7 +98,10 @@ openvox-ca-ctl list
 # List all certificates (signed, revoked, requested)
 openvox-ca-ctl list --all
 
-# Sign a pending CSR
+# Sign a pending CSR. Every --certname is checked against the server's own
+# subject rules before anything is sent (lower-case letters, digits, ".", "_"
+# and "-", no "/" and no ".."), so an invalid name is refused locally with the
+# reason, rather than reaching the server as a different request.
 openvox-ca-ctl sign --certname agent.example.com
 
 # Sign all pending CSRs
@@ -142,6 +145,12 @@ openvox-ca-ctl clean --certname agent.example.com
 openvox-ca-ctl reissue-crl
 
 # Generate a server-side key+cert pair (key saved to ./agent.example.com_key.pem)
+#
+# The key file is written at mode 0600, and an existing <certname>_key.pem in
+# --out-dir is overwritten in place and narrowed to 0600. Anything else at that
+# path, a symbolic link included, is refused rather than written through, and so
+# is a --out-dir that is not an existing directory; both are checked before the
+# server is asked for a key.
 openvox-ca-ctl generate --certname agent.example.com
 openvox-ca-ctl generate --certname agent.example.com --dns alt.example.com --out-dir /etc/ssl
 
