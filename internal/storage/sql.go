@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
@@ -28,6 +29,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -237,8 +239,6 @@ func newSQLBackend(db *bun.DB, owned bool, timeout, migrationTimeout time.Durati
 }
 
 // openSQLDB opens the database/sql handle and matching bun dialect for cfg.
-// PostgreSQL and MySQL support is added in later changes; selecting them here
-// returns a clear error until then.
 func openSQLDB(cfg SQLConfig) (*sql.DB, schema.Dialect, error) {
 	switch cfg.Dialect {
 	case SQLitePure:
@@ -249,12 +249,13 @@ func openSQLDB(cfg SQLConfig) (*sql.DB, schema.Dialect, error) {
 		}
 		return sqldb, sqlitedialect.New(), nil
 	case SQLPostgres:
-		opts := []pgdriver.Option{pgdriver.WithDSN(cfg.DSN)}
+		connector := pgdriver.NewConnector(pgdriver.WithDSN(cfg.DSN))
 		if cfg.TLS != nil {
-			opts = append(opts, pgdriver.WithTLSConfig(cfg.TLS))
+			if err := applyPostgresTLS(connector.Config(), cfg.DSN, cfg.TLS); err != nil {
+				return nil, nil, err
+			}
 		}
-		sqldb := sql.OpenDB(pgdriver.NewConnector(opts...))
-		return sqldb, pgdialect.New(), nil
+		return sql.OpenDB(connector), pgdialect.New(), nil
 	case SQLMySQL:
 		mycfg, err := mysqldriver.ParseDSN(cfg.DSN)
 		if err != nil {
@@ -277,6 +278,103 @@ func openSQLDB(cfg SQLConfig) (*sql.DB, schema.Dialect, error) {
 		return sql.OpenDB(connector), mysqldialect.New(), nil
 	default:
 		return nil, nil, fmt.Errorf("unknown SQL dialect %q", cfg.Dialect)
+	}
+}
+
+// applyPostgresTLS installs the sql_tls_* files on a pgdriver config already
+// populated from dsn. The files play the part of the DSN's sslrootcert, sslcert
+// and sslkey, and the DSN's sslmode decides what is checked, as it does in
+// libpq and in pgdriver's own handling of those parameters, so one sslmode
+// means the same thing whichever way the CA arrives:
+//
+//   - verify-full checks the certificate chain and that it names the host;
+//   - verify-ca checks the chain only;
+//   - require checks the chain only when a CA file is given (libpq's rule for
+//     require with a root certificate), and otherwise encrypts without
+//     verifying, presenting any client certificate all the same.
+//
+// The files are refused where they would be ignored or would compete with the
+// DSN: with sslmode disable, allow, prefer or unset (libpq's default, prefer,
+// verifies nothing), and alongside the DSN's own sslrootcert, sslcert or
+// sslkey.
+//
+// The name to verify is the host pgdriver will actually dial, read back from
+// its parsed config rather than from the DSN's URL, so PGHOST and a TCP host=
+// count exactly as the driver counts them. An IP address is a valid
+// ServerName: crypto/tls checks it against the certificate's IP SANs.
+//
+// Two shapes have no single host to verify, and are refused rather than
+// guessed at. PostgreSQL does not offer TLS on a Unix socket at all, and
+// pgdriver cannot dial a multi-host DSN.
+func applyPostgresTLS(conf *pgdriver.Config, dsn string, base *tls.Config) error {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		// pgdriver has already parsed the same string, so this cannot fail;
+		// the DSN is withheld because it may carry a password.
+		return errors.New("cannot read sslmode from the PostgreSQL DSN")
+	}
+	q := u.Query()
+	for _, param := range []string{"sslrootcert", "sslcert", "sslkey"} {
+		if q.Get(param) != "" {
+			return fmt.Errorf("the PostgreSQL DSN sets %s and sql_tls_* files are set too; give the TLS files one way, either in the DSN or as sql_tls_*_file", param)
+		}
+	}
+	mode := q.Get("sslmode")
+	switch mode {
+	case "require", "verify-ca", "verify-full":
+	case "":
+		return errors.New("sql_tls_* files need sslmode=verify-full, verify-ca or require in the PostgreSQL DSN; without one PostgreSQL defaults to prefer, which does not verify the server")
+	default:
+		return fmt.Errorf("sql_tls_* files need sslmode=verify-full, verify-ca or require in the PostgreSQL DSN; sslmode=%s does not verify the server", mode)
+	}
+	if conf.Network != "tcp" {
+		return fmt.Errorf("sql_tls_* files need a TCP connection to PostgreSQL; the DSN selects a %s socket, which PostgreSQL does not serve over TLS", conf.Network)
+	}
+	if strings.Contains(conf.Addr, ",") {
+		return fmt.Errorf("sql_tls_* files need a single PostgreSQL host to verify; %q names several, which the PostgreSQL driver does not support", conf.Addr)
+	}
+	host, _, err := net.SplitHostPort(conf.Addr)
+	if err == nil && host == "" {
+		err = errors.New("no host")
+	}
+	if err != nil {
+		return fmt.Errorf("cannot find the PostgreSQL host to verify in address %q: %w", conf.Addr, err)
+	}
+
+	tlsCfg := base.Clone()
+	tlsCfg.ServerName = host
+	switch {
+	case mode == "verify-full":
+	case mode == "verify-ca" || tlsCfg.RootCAs != nil:
+		// crypto/tls cannot check a chain without also checking the name
+		// (golang/go#21971), so skip its verification and check the chain
+		// here instead, as pgdriver does for the same sslmode. VerifyConnection
+		// rather than VerifyPeerCertificate, because only the former also
+		// runs on a resumed session.
+		tlsCfg.InsecureSkipVerify = true
+		tlsCfg.VerifyConnection = verifyPostgresChain(tlsCfg.RootCAs)
+	default:
+		// require with no CA file: encrypt, verify nothing.
+		tlsCfg.InsecureSkipVerify = true
+	}
+	conf.TLSConfig = tlsCfg
+	return nil
+}
+
+// verifyPostgresChain returns a VerifyConnection hook that checks the
+// server's certificate chains to roots (the system's when roots is nil),
+// without checking the name it was issued for: libpq's verify-ca.
+func verifyPostgresChain(roots *x509.CertPool) func(tls.ConnectionState) error {
+	return func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
+			return errors.New("PostgreSQL server presented no certificate")
+		}
+		intermediates := x509.NewCertPool()
+		for _, cert := range cs.PeerCertificates[1:] {
+			intermediates.AddCert(cert)
+		}
+		_, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates})
+		return err
 	}
 }
 

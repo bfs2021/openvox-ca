@@ -472,11 +472,19 @@ go test -tags=etcd_integration ./internal/storage/...
 PUPPET_CA_TEST_REDIS_ADDR=127.0.0.1:6379 \
     go test -tags=redis_integration ./internal/storage/...
 
-# PostgreSQL
-PUPPET_CA_TEST_POSTGRES_DSN="postgres://user:pass@127.0.0.1:5432/db?sslmode=disable" \
+# PostgreSQL: a throwaway server and a superuser role (see below)
+PUPPET_CA_TEST_POSTGRES_DSN="postgres://puppetca:puppetca@127.0.0.1:55432/puppetca?sslmode=disable" \
     go test -tags=postgres_integration ./internal/storage/...
 
 # MySQL / MariaDB
 PUPPET_CA_TEST_MYSQL_DSN="user:pass@tcp(127.0.0.1:3306)/db" \
     go test -tags=mysql_integration ./internal/storage/...
 ```
+
+Point the PostgreSQL suite only at a server you can throw away, such as the one
+`mage test:backendsPostgres` starts from `test/compose-backends-postgres.yml`
+(the DSN above). Its TLS specs mint their own certificates, write them into the
+server's data directory, and switch the server's TLS on and off again with
+`ALTER SYSTEM`. That needs a superuser role and a DSN naming a TCP host, and on
+a shared server it would discard any `ssl`, `ssl_cert_file` or `ssl_key_file`
+setting made the same way.

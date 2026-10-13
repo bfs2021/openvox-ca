@@ -8,6 +8,10 @@
 #   go test -tags postgres_integration ./internal/storage/...
 #
 # The `mage test:backendsPostgres` target automates the up / test / down cycle.
+#
+# The server starts without TLS. The TLS specs mint their own certificates and
+# switch TLS on at runtime with ALTER SYSTEM, which is why the DSN's role must
+# stay the superuser POSTGRES_USER creates.
 
 name: openvox-ca-backends-postgres
 

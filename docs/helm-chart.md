@@ -119,11 +119,45 @@ extraEnv:
         name: openvox-ca-db
         key: password
   - name: PUPPET_CA_SQL_DSN
-    value: postgres://openvox-ca:$(POSTGRES_PASSWORD)@db-rw:5432/openvox-ca?sslmode=require
+    value: postgres://openvox-ca:$(POSTGRES_PASSWORD)@db-rw:5432/openvox-ca?sslmode=verify-full&sslrootcert=/run/secrets/openvox-ca-db-ca/ca.crt
+extraVolumes:
+  - name: db-ca
+    secret:
+      secretName: openvox-ca-db-ca
+      items:
+        - key: ca.crt
+          path: ca.crt
+extraVolumeMounts:
+  - name: db-ca
+    mountPath: /run/secrets/openvox-ca-db-ca
+    readOnly: true
 ```
 
 Environment variables take precedence over the config file, which is what makes
 this work.
+
+`sslmode=verify-full` checks that the database's certificate was issued by the
+CA in `sslrootcert` and names the host in the DSN, so mount that CA alongside.
+`sslmode=require` would encrypt the connection without verifying the server; see
+[the PostgreSQL backend](storage-backends.md#postgresql-backend).
+
+Mount only `ca.crt`, with an `items:` selector as above. CloudNativePG's
+`<cluster>-ca` Secret also holds `ca.key`, the private key of the CA that
+issues the database's certificates. Mounting the whole Secret would put that
+key in every openvox-ca pod.
+
+With CloudNativePG, a DSN pointing at the cluster's `<cluster>-rw` service
+already names a host its server certificate covers, so moving from `require` to
+`verify-full` needs only `sslrootcert` pointed at `ca.crt` from the operator's
+`<cluster>-ca` Secret.
+
+The CA is read once, when openvox-ca opens the database, and `SIGHUP` does not
+reopen it (see [reloading configuration](configuration.md#reloading-configuration)).
+CloudNativePG's cluster CA is short-lived and rotated automatically. After a
+rotation, connections a pod already holds keep working but new ones fail, so
+its pool slowly stops refilling. Restart the pods whenever the CA changes; the
+Reloader annotation described under [TLS](#tls-the-charts-most-important-setting)
+restarts them automatically when the mounted Secret changes.
 
 ## Choosing an image
 

@@ -648,25 +648,55 @@ can share it. `postgres`, `postgresql` and `pg` are accepted as aliases.
 # /etc/puppet-ca/config.yaml
 storage_backend: postgres
 cadir: /var/lib/puppet-ca                # still needed for per-subject keys
-sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=require"
+sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem"
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
 sql_migration_timeout_sec: 600           # whole schema-migration run (default 600)
 sql_max_open_conns: 0                    # 0 = database/sql default; min 4 when set
 sql_max_idle_conns: 0                    # 0 = database/sql default
 
-# Optional mTLS to PostgreSQL (alternative to sslmode/ssl params in the DSN).
-sql_tls_ca_file:   /etc/puppet-ca/pg-ca.pem
-sql_tls_cert_file: /etc/puppet-ca/pg-client.pem
-sql_tls_key_file:  /etc/puppet-ca/pg-client-key.pem
+# Alternatively, give the CA and a client certificate as files instead of
+# the DSN's sslrootcert, sslcert and sslkey (not as well as them). The DSN's
+# sslmode still decides what is checked; see below.
+# sql_tls_ca_file:   /etc/puppet-ca/pg-ca.pem
+# sql_tls_cert_file: /etc/puppet-ca/pg-client.pem
+# sql_tls_key_file:  /etc/puppet-ca/pg-client-key.pem
 ```
 
-TLS is driven either by the DSN (`sslmode=require`, etc.) or by the
-`sql_tls_*_file` options.
+TLS is driven either by the DSN's `sslmode` and `sslrootcert` parameters or by
+the `sql_tls_*_file` options. In the DSN, use `sslmode=verify-full`: it encrypts
+the connection, checks the server's certificate against `sslrootcert`, and
+checks that the certificate names the host in the DSN. `sslmode=require`
+encrypts the connection but does not verify the server's certificate at all,
+and `verify-ca` checks the certificate without checking the host name; with
+`sslrootcert` present, `require` behaves as `verify-ca`. PostgreSQL's
+[SSL mode table](https://www.postgresql.org/docs/current/libpq-ssl.html#LIBPQ-SSL-SSLMODE-STATEMENTS)
+sets out what each mode protects against.
+
+The `sql_tls_*_file` options stand in for the DSN's `sslrootcert`, `sslcert`
+and `sslkey`, and `sslmode` means the same with either:
+`sql_tls_ca_file` with `sslmode=require` checks the certificate chain but not
+the host name, exactly as `sslrootcert` with `sslmode=require` does. Without
+`sql_tls_ca_file`, the server is checked against the system's trusted CAs.
+`openvox-ca` refuses to open the database when the two ways conflict or the
+files would go unused:
+
+1. The DSN sets `sslrootcert`, `sslcert` or `sslkey` as well as an
+   `sql_tls_*_file` option. Give each file one way only.
+2. The DSN's `sslmode` is `disable`, `allow` or `prefer`, or is missing (which
+   PostgreSQL treats as `prefer`). None of them verifies the server.
+3. The DSN connects through a Unix socket, which PostgreSQL does not serve
+   over TLS, or names several hosts.
+
+Both `sslrootcert` and the `sql_tls_*_file` options are read once, when
+`openvox-ca` opens the database. Connections already open keep working after the
+database's CA is rotated, but new ones fail, so the connection pool runs down
+gradually rather than all at once. Restart `openvox-ca` whenever the CA
+changes; some operators issue database CAs that last only weeks or months.
 
 ```text
 --storage-backend postgres
---sql-dsn         postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=require
+--sql-dsn         'postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem'
 ```
 
 **Operational notes.** Back the database up with your normal PostgreSQL tooling.

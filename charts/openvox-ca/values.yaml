@@ -360,7 +360,8 @@ extraEnv: []
 #       name: openvox-ca-db
 #       key: password
 # - name: PUPPET_CA_SQL_DSN
-#   value: postgres://openvox-ca:$(POSTGRES_PASSWORD)@db-rw:5432/openvox-ca?sslmode=require
+#   value: postgres://openvox-ca:$(POSTGRES_PASSWORD)@db-rw:5432/openvox-ca?sslmode=verify-full&sslrootcert=/run/secrets/openvox-ca-db-ca/ca.crt
+# (mount the database's CA there with extraVolumes; see docs/helm-chart.md)
 
 envFrom: []
 # - configMapRef:

@@ -50,7 +50,21 @@ extraEnv:
         name: openvox-ca-cnpg-user
         key: password
   - name: PUPPET_CA_SQL_DSN
-    value: postgres://openvox-ca:$(POSTGRES_PASSWORD)@openvox-ca-cnpg-rw:5432/openvox-ca?sslmode=require
+    value: postgres://openvox-ca:$(POSTGRES_PASSWORD)@openvox-ca-cnpg-rw:5432/openvox-ca?sslmode=verify-full&sslrootcert=/run/secrets/openvox-ca-cnpg-ca/ca.crt
+
+# CloudNativePG's server CA. Its Secret holds the CA key too, so project only
+# the certificate.
+extraVolumes:
+  - name: cnpg-ca
+    secret:
+      secretName: openvox-ca-cnpg-ca
+      items:
+        - key: ca.crt
+          path: ca.crt
+extraVolumeMounts:
+  - name: cnpg-ca
+    mountPath: /run/secrets/openvox-ca-cnpg-ca
+    readOnly: true
 
 podAnnotations:
   reloader.stakater.com/auto: "true"
