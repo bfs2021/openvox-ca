@@ -43,7 +43,23 @@ mage build:all
 # Or with plain Go
 go build -o bin/openvox-ca     ./cmd/openvox-ca
 go build -o bin/openvox-ca-ctl ./cmd/openvox-ca-ctl
+
+# Render the systemd unit template for a prefix, into dist/
+mage build:unit /usr/local/bin
+
+# Build the deb and rpm. Both packaged variants, because build:packages
+# builds every one of them and refuses if a tarball is missing.
+mage build:distVariant linux_amd64
+mage build:distVariant linux_arm64
+mage build:packages
 ```
+
+`build:unit` takes the prefix because the unit is one template rendered per
+channel: tarballs get `/usr/local/bin`, packages get `/usr/bin`.
+`build:packages` builds no binaries — it reads the tarballs `build:dist` or
+`build:distVariant` left in `dist/` and writes the packages beside them. It
+checks every packaged variant's tarball before writing anything, so a missing
+one fails the run with nothing written and names all of them at once.
 
 ### FIPS build (Linux/amd64)
 
@@ -79,6 +95,21 @@ issues) before pushing doc changes:
 ```bash
 markdownlint-cli2 --fix
 ```
+
+The packages' maintainer scripts are linted with
+[ShellCheck](https://github.com/koalaman/shellcheck) **v0.11.0**, the version
+CI pins, and as POSIX `sh` rather than the shell on your machine: they run
+under whatever `/bin/sh` the target distribution has. Run it before pushing a
+change under `packaging/scripts/`:
+
+```bash
+shellcheck -s sh packaging/scripts/first-boot packaging/scripts/preinstall \
+  packaging/scripts/postinstall packaging/scripts/preremove packaging/scripts/postremove
+```
+
+A new maintainer script has to be added to the `shellcheck` job in
+`.github/workflows/ci.yml` as well as to `packaging/nfpm.yaml`; `mage dev:check`
+fails until both name it.
 
 ## Repository conventions
 
@@ -119,8 +150,9 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
 - Keep commits focused: imperative subject ≤ 72 characters, with a body that
   explains *why*. Stage files by name and review `git diff --staged` before
   committing.
-- Make sure `mage dev:check`, `mage test:unit`, `mage test:magefile`, and
-  `markdownlint-cli2` pass.
+- Make sure `mage dev:check`, `mage test:unit`, `mage test:magefile`,
+  `markdownlint-cli2` and, for a change to `packaging/scripts/`, `shellcheck`
+  pass.
 - `lefthook install` adds git hooks that cover *part* of the above: pre-commit
   runs gofmt and golangci-lint, and pre-push runs `go test -race ./...`, the
   build-tagged `go test -tags mage .`, and a refusal of any `v*` tag whose
