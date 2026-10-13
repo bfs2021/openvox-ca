@@ -4,9 +4,10 @@ honours, and rbac.create. Not on kubernetesExport.enabled alone: targets set
 straight into config.kubernetes_export configure the exporter just as well, and
 gating on the flag left that route with a mounted token, a NOTE naming export as
 the reason, and no Role at all — the exporter refused by RBAC while readiness
-stayed green. The default-ServiceAccount refusal and the NOTES disclosure of an
-unnarrowable grant read the same helper, so all three agree on when this file
-renders.
+stayed green. Every refusal and NOTES warning about the export grant — the
+default-ServiceAccount and cluster-wide-create refusals in openvox-ca.validate,
+and the cluster-wide and unnarrowable-grant warnings in openvox-ca.notes — reads
+the same helper, so they all agree on when this file renders.
 */}}
 {{- if eq (include "openvox-ca.exportRBACRendered" .) "true" }}
 {{- $fullName := include "openvox-ca.fullname" . }}

@@ -728,8 +728,40 @@ kubernetesExport:
 
 `rbac.namespaces` lists the *extra* namespaces to bind the Role into; the
 release namespace is always included. Every namespace you export into needs a
-binding. `rbac.scope: ClusterRole` grants it cluster-wide instead, which is
-worth it only if you export into many namespaces.
+binding.
+
+The grant is `create` and `patch` on Secrets and ConfigMaps. `patch` is narrowed
+to the target names when the chart can read them, but `create` cannot be
+narrowed by name at all, because the object has no name when the API server
+authorises the request. `create` on Secrets is a wider permission than it
+looks: it lets the holder create a `kubernetes.io/service-account-token` Secret
+for any ServiceAccount in the namespace, and the token controller fills that
+Secret with a token for the account. With the default `rbac.scope: Role` that
+reach is limited to the release namespace and the ones you list.
+
+`rbac.scope: ClusterRole` grants the same rules cluster-wide, so the openvox-ca
+ServiceAccount could mint a token for any ServiceAccount in the cluster,
+`kube-system` included. The chart therefore refuses to create that ClusterRole
+unless you accept it explicitly:
+
+```yaml
+kubernetesExport:
+  rbac:
+    scope: ClusterRole
+    allowClusterWideSecretCreate: true
+```
+
+Prefer `Role`. Nothing needs `ClusterRole`: a target either names its namespace
+or defaults to the release namespace, which the Role always covers, so listing
+the named ones under `rbac.namespaces` covers every export the server can make.
+
+The refusal applies only when the chart creates the export RBAC. With
+`rbac.create: false` it creates none, so neither the scope nor the opt-in has
+any effect, and the Role or ClusterRole you bind yourself is yours to scope.
+
+The refusal is a precondition rather than a NOTES warning because
+`helm template`, Argo CD and Flux never show NOTES; an install that allows the
+grant still prints one.
 
 The chart mounts the ServiceAccount token automatically when the pod needs the
 Kubernetes API, and leaves it unmounted otherwise. These are the

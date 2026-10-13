@@ -163,8 +163,9 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | `kubernetesExport.fieldManager` | `""` | Server-side apply field manager |
 | `kubernetesExport.targets` | `[]` | Passed through to `kubernetes_export.targets` |
 | `kubernetesExport.rbac.create` | `true` | Create the `create`/`patch` Role and binding |
-| `kubernetesExport.rbac.scope` | `Role` | `Role` or `ClusterRole` |
+| `kubernetesExport.rbac.scope` | `Role` | `Role` or `ClusterRole`. `ClusterRole` grants cluster-wide Secret `create`, and the chart refuses to create it unless allowed below |
 | `kubernetesExport.rbac.namespaces` | `[]` | Extra namespaces to bind the Role into |
+| `kubernetesExport.rbac.allowClusterWideSecretCreate` | `false` | Allow the cluster-wide Secret `create` that `scope: ClusterRole` grants; without it the install fails whenever the chart would create that ClusterRole (export configured and `rbac.create` on). No effect under `Role` or with `rbac.create: false` |
 
 ### Managed certificates
 

@@ -2527,6 +2527,9 @@ type chartRejectCase struct {
 	// swallows backslash escapes, so a value containing a real newline has to
 	// come from a file.
 	valuesYAML string
+	// skipSchema renders with --skip-schema-validation, for a refusal the
+	// template has to make on its own when the schema is not consulted.
+	skipSchema bool
 	wantErr    string
 	// notWants holds what helm's output must not repeat, such as the
 	// credential a refusal is about: that output ends up in CI logs.
@@ -2589,8 +2592,8 @@ data:
 `
 
 // helmRender renders the chart, optionally including the post-install notes,
-// and optionally with an extra values file.
-func helmRender(notes bool, sets []string, valuesYAML string) (string, error) {
+// and optionally with an extra values file and extra helm arguments.
+func helmRender(notes bool, sets []string, valuesYAML string, extra ...string) (string, error) {
 	dir := chartDir
 	if notes {
 		tmp, err := os.MkdirTemp("", "openvox-ca-notes")
@@ -2612,6 +2615,7 @@ func helmRender(notes bool, sets []string, valuesYAML string) (string, error) {
 	for _, s := range sets {
 		args = append(args, "--set", s)
 	}
+	args = append(args, extra...)
 	if valuesYAML != "" {
 		f, err := os.CreateTemp("", "openvox-ca-values-*.yaml")
 		if err != nil {
@@ -3468,10 +3472,36 @@ config:
 			notWants: []string{"(OpenBao Kubernetes auth)", "(Kubernetes export)"},
 		},
 		{
-			name:     "rbac.scope: ClusterRole selects the cluster-scoped kinds",
-			sets:     []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole", "kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=t", "kubernetesExport.targets[0].cert=true"},
+			name:     "rbac.scope: ClusterRole selects the cluster-scoped kinds once allowed",
+			sets:     []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole", "kubernetesExport.rbac.allowClusterWideSecretCreate=true", "kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=t", "kubernetesExport.targets[0].cert=true"},
 			wants:    []string{"kind: ClusterRole\n", "kind: ClusterRoleBinding\n"},
 			notWants: []string{"kind: Role\n", "kind: RoleBinding\n"},
+		},
+		{
+			// The cluster-wide-create refusal must stay out of the way when no
+			// export Role renders. Keyed on scope alone it would refuse an install
+			// that grants nothing, and on kubernetesExport.enabled alone it would
+			// refuse one that set rbac.create: false to manage RBAC by hand.
+			name:     "rbac.scope: ClusterRole without export renders and grants nothing",
+			sets:     []string{tls, "kubernetesExport.rbac.scope=ClusterRole"},
+			wants:    []string{"kind: Deployment"},
+			notWants: []string{"kind: ClusterRole"},
+		},
+		{
+			name: "rbac.scope: ClusterRole with rbac.create: false renders and grants nothing",
+			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole",
+				"kubernetesExport.rbac.create=false"},
+			wants:    []string{"kind: Deployment"},
+			notWants: []string{"kind: ClusterRole"},
+		},
+		{
+			// The opt-in allows a ClusterRole; it never asks for one.
+			name: "allowClusterWideSecretCreate leaves rbac.scope: Role namespaced",
+			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.allowClusterWideSecretCreate=true",
+				"kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=t",
+				"kubernetesExport.targets[0].cert=true"},
+			wants:    []string{"kind: Role\n", "kind: RoleBinding\n"},
+			notWants: []string{"kind: ClusterRole"},
 		},
 		{
 			name: "the ServiceAccount token stays unmounted when nothing needs the API",
@@ -3649,8 +3679,50 @@ config:
 			name:  "NOTES names the cluster-wide scope when that is what was created",
 			notes: true,
 			sets: []string{"existingConfigMap=mine", "kubernetesExport.enabled=true",
-				"kubernetesExport.rbac.scope=ClusterRole"},
+				"kubernetesExport.rbac.scope=ClusterRole", "kubernetesExport.rbac.allowClusterWideSecretCreate=true"},
 			wants: []string{"cluster-wide patch on every"},
+		},
+		{
+			// allowClusterWideSecretCreate lets the ClusterRole render; it does
+			// not make the grant any narrower, so the install still says what it
+			// holds. Named targets, so the unnarrowed-patch warning above is not
+			// what matches.
+			name:  "NOTES warns about cluster-wide Secret create once allowed",
+			notes: true,
+			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole",
+				"kubernetesExport.rbac.allowClusterWideSecretCreate=true", "kubernetesExport.targets[0].kind=Secret",
+				"kubernetesExport.targets[0].metadata.name=t", "kubernetesExport.targets[0].cert=true"},
+			wants: []string{"created as a ClusterRole", "mint a token for any ServiceAccount in the cluster"},
+		},
+		{
+			// allowClusterWideSecretCreate is set as well, because it has no effect
+			// under Role: keying the warning on the opt-in instead of the scope
+			// would announce a ClusterRole here that was never created.
+			name:  "NOTES says nothing about cluster-wide create under rbac.scope: Role",
+			notes: true,
+			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.allowClusterWideSecretCreate=true",
+				"kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=t",
+				"kubernetesExport.targets[0].cert=true"},
+			wants:    []string{"has been deployed"},
+			notWants: []string{"created as a ClusterRole"},
+		},
+		{
+			// The warning's other conjunct. Keyed on scope alone it would announce
+			// a ClusterRole that rbac.create: false never rendered — and nothing
+			// refuses this install, so the NOTES would be all the operator sees.
+			name:  "NOTES says nothing about cluster-wide create when no Role was created",
+			notes: true,
+			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole",
+				"kubernetesExport.rbac.create=false"},
+			wants:    []string{"has been deployed"},
+			notWants: []string{"created as a ClusterRole"},
+		},
+		{
+			name:     "NOTES says nothing about cluster-wide create when export is off",
+			notes:    true,
+			sets:     []string{tls, "kubernetesExport.rbac.scope=ClusterRole"},
+			wants:    []string{"has been deployed"},
+			notWants: []string{"created as a ClusterRole"},
 		},
 		{
 			// rbac.create off means no Role, so there is nothing to disclose. The
@@ -3674,6 +3746,18 @@ config:
 				"config.kubernetes_export.targets[0].kind=Secret",
 				"config.kubernetes_export.targets[0].metadata.name=ca-bundle"},
 			wants: []string{"patch on every"},
+		},
+		{
+			// And the cluster-wide warning by the same route, for the same
+			// reason: keyed on the chart's flag, it would stay silent about a
+			// ClusterRole the config route rendered.
+			name:  "NOTES warns about cluster-wide Secret create by the config route too",
+			notes: true,
+			sets: []string{tls, "kubernetesExport.rbac.scope=ClusterRole",
+				"kubernetesExport.rbac.allowClusterWideSecretCreate=true",
+				"config.kubernetes_export.targets[0].kind=Secret",
+				"config.kubernetes_export.targets[0].metadata.name=ca-bundle"},
+			wants: []string{"created as a ClusterRole"},
 		},
 		{
 			name:  "NOTES warns that an ephemeral cadir throws the CA away",
@@ -4235,6 +4319,30 @@ config:
 				"config.kubernetes_export.targets[0].kind=Secret",
 				"config.kubernetes_export.targets[0].metadata.name=ca-bundle"},
 			wantErr: "default ServiceAccount",
+		},
+		{
+			// The assertion is the remedy, not merely the refusal: an operator
+			// who hits this in Argo CD or Flux sees the message and nothing else.
+			name: "export RBAC granted cluster-wide without allowClusterWideSecretCreate",
+			sets: []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole",
+				"kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=t",
+				"kubernetesExport.targets[0].cert=true"},
+			wantErr: "Set kubernetesExport.rbac.scope: Role and list each namespace you export into",
+		},
+		{
+			name:    "export RBAC granted cluster-wide without allowClusterWideSecretCreate names the opt-in",
+			sets:    []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole"},
+			wantErr: "or set kubernetesExport.rbac.allowClusterWideSecretCreate: true",
+		},
+		{
+			// rbac.yaml renders the ClusterRole for config-supplied targets too,
+			// so a refusal keyed on the chart's flag alone would let this route
+			// through, as it once did for the default-ServiceAccount refusal.
+			name: "export RBAC granted cluster-wide by the config route without allowClusterWideSecretCreate",
+			sets: []string{tls, "kubernetesExport.rbac.scope=ClusterRole",
+				"config.kubernetes_export.targets[0].kind=Secret",
+				"config.kubernetes_export.targets[0].metadata.name=ca-bundle"},
+			wantErr: "kube-system included",
 		},
 		{
 			name:       "an extraConfigFiles key taking the place of the chart's config.yaml",
@@ -4938,6 +5046,27 @@ config:
 			sets:    []string{tls, "metric.enabled=true"},
 			wantErr: "additional properties",
 		},
+		{
+			// A quoted "false", or --set-string, is a non-empty string, which a
+			// template reads as true. The schema's boolean type is the first
+			// refusal; the case below pins the template's own, for when the
+			// schema is skipped. Helm 3 and 4 both word this error the same way.
+			name: "a quoted \"false\" for allowClusterWideSecretCreate",
+			valuesYAML: "tls:\n  existingSecret: s\nkubernetesExport:\n  enabled: true\n  rbac:\n" +
+				"    scope: ClusterRole\n    allowClusterWideSecretCreate: \"false\"\n",
+			wantErr: "allowClusterWideSecretCreate': got string, want boolean",
+		},
+		{
+			// The same value with the schema out of the way, as
+			// --skip-schema-validation or a GitOps controller's equivalent leaves
+			// it: the template must still refuse rather than read the string as
+			// true.
+			name: "a quoted \"false\" for allowClusterWideSecretCreate with schema validation skipped",
+			valuesYAML: "tls:\n  existingSecret: s\nkubernetesExport:\n  enabled: true\n  rbac:\n" +
+				"    scope: ClusterRole\n    allowClusterWideSecretCreate: \"false\"\n",
+			skipSchema: true,
+			wantErr:    "kube-system included",
+		},
 	}
 
 	failures := 0
@@ -4989,7 +5118,7 @@ config:
 			{"unknown targets", []string{"existingConfigMap=mine", "kubernetesExport.enabled=true"}},
 		} {
 			armName := fmt.Sprintf("%s (%s)", name, arm.label)
-			clusterOut, clusterErr := helmTemplate(append(slices.Clone(arm.sets), "kubernetesExport.rbac.scope=ClusterRole"))
+			clusterOut, clusterErr := helmTemplate(append(slices.Clone(arm.sets), "kubernetesExport.rbac.scope=ClusterRole", "kubernetesExport.rbac.allowClusterWideSecretCreate=true"))
 			roleOut, roleErr := helmTemplate(append(slices.Clone(arm.sets), "kubernetesExport.rbac.scope=Role"))
 			switch {
 			case clusterErr != nil || roleErr != nil:
@@ -5039,7 +5168,11 @@ config:
 	}
 
 	for _, tc := range rejects {
-		out, err := helmRender(false, tc.sets, tc.valuesYAML)
+		var extra []string
+		if tc.skipSchema {
+			extra = append(extra, "--skip-schema-validation")
+		}
+		out, err := helmRender(false, tc.sets, tc.valuesYAML, extra...)
 		switch {
 		case err == nil:
 			fmt.Printf("FAIL  rejects %s\n      rendered successfully instead of failing\n", tc.name)
