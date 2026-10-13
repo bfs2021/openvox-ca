@@ -1533,16 +1533,40 @@ var _ = Describe("API Workflow", func() {
 				"the same path must not reach the client")
 		})
 
-		// No pair-comparison spec here, deliberately. One existed and was
-		// removed: the three specs above each pin an EXACT status, so any
-		// collapse of the 404 and the 409 into one answer, in either direction,
-		// necessarily reddens one of them. A spec asserting only that the two
-		// differ can therefore never fail alone, and the argument it carried --
-		// that each case alone cannot catch a collapse -- was false, because
-		// that argument holds only where the individual assertions are relative
-		// rather than exact. Verified by collapsing the arm each way: the
-		// unsigned-CSR spec catches 404-for-both and the never-signed spec
-		// catches 409-for-both.
+		// The split itself, as one property. The specs above pin each arm's
+		// exact status, and a collapse of the 404 and the 409 into one answer
+		// reddens one of them -- unless the change that collapses them also
+		// edits that arm's pin to match, which is the ordinary way such a change
+		// arrives. Move the unsigned-CSR arm to 404 and update its spec in the
+		// same commit, and every pin passes; only a spec relating the two
+		// answers fails. So this one asserts nothing but the relation, and the
+		// exact values stay in the specs above.
+		//
+		// The split is what issue #358 asks to keep: upstream answers these
+		// differently, and puppetserver-ca-cli branches on the difference.
+		It("distinguishes an unknown subject from a subject with only a pending CSR", func() {
+			queued := "queued-node"
+			csrPEM, err := testutil.GenerateCSR(queued)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), queued, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+
+			revoke := func(subject string) *httptest.ResponseRecorder {
+				body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, httptest.NewRequest(
+					"PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+				return rr
+			}
+
+			unknown := revoke("no-such-node-at-all")
+			pending := revoke(queued)
+
+			Expect(unknown.Code).NotTo(Equal(pending.Code),
+				"upstream gives these different statuses and puppetserver-ca-cli "+
+					"branches on the difference, printing different messages and "+
+					"exiting 1 versus 24")
+		})
 
 		// The leak guard belongs here rather than beside the spec above, and the
 		// difference is the whole point: for a subject that was simply never
