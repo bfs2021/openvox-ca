@@ -118,10 +118,10 @@ var _ = Describe("inlineCredentialKeys", func() {
 	It("finds the server's inline credentials and no *_file path keys", func() {
 		keys, err := inlineCredentialKeys(".")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(keys).To(ContainElements("etcd_password", "redis_password", "redis_sentinel_password", "sql_dsn"))
-		for _, key := range keys {
-			Expect(key).NotTo(HaveSuffix("_file"))
-		}
+		// Exact, not a subset: a new key, or a tag pattern that starts matching
+		// something it should not, has to be seen here first, where the cause
+		// is plain, rather than as a chart:test demand for a reject case.
+		Expect(keys).To(Equal([]string{"etcd_password", "redis_password", "redis_sentinel_password", "sql_dsn"}))
 	})
 
 	Context("in a tree of its own", func() {
@@ -158,6 +158,15 @@ var _ = Describe("inlineCredentialKeys", func() {
 
 			_, err := inlineCredentialKeys(root)
 			Expect(err).To(MatchError(ContainSubstring("cmd/openvox-ca/config.go matches no file")))
+		})
+
+		It("refuses a source it cannot read rather than skipping it", func() {
+			write("internal/config/a.go", "type A struct {\n\tP string `yaml:\"zed_password\"`\n}\n")
+			Expect(os.MkdirAll(filepath.Join(root, "cmd/openvox-ca/config.go"), 0o755)).To(Succeed())
+
+			_, err := inlineCredentialKeys(root)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("config.go"))
 		})
 	})
 })

@@ -4763,6 +4763,41 @@ config:
 			notWants:   []string{"PG?SECRET"},
 		},
 		{
+			// The third character that ends net/url's authority early.
+			name:       "a postgres sql_dsn whose password contains an unescaped hash",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG#SECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PG#SECRET"},
+		},
+		{
+			// The other two schemes set aside before the check. Their
+			// password-less render cases pin that they are set aside; these
+			// pin that a password in them is still refused.
+			name:       "a postgresql sql_dsn carrying a password",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgresql://ca:PGSECRET@db/ca'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			name:       "a unix-socket sql_dsn carrying a password",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'unix://ca:PGSECRET@ca/var/run/postgresql/.s.PGSQL.5432'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			// The documented false refusal: this DSN has no password and works,
+			// but the port's colon comes before the @ in its query value. The
+			// chart refuses it on purpose; a rule narrowed to let it through
+			// would change the documented contract, and should fail here first.
+			name:       "a working sql_dsn with an @ in a query value after a port, refused by design",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db:5432/ca?application_name=a@b'\n",
+			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+		},
+		{
 			// With no database path the last / falls inside the password, so
 			// cutting there, as go-sql-driver would, finds no @.
 			name:       "a pathless postgres sql_dsn whose password contains an unescaped slash",
