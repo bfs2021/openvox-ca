@@ -603,6 +603,30 @@ var _ = Describe("API Workflow", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(second).NotTo(Equal(first), "the second CSR should have replaced the first")
 		})
+
+		DescribeTable("answers 200 and queues the CSR beside a held certificate when allow_duplicate_certs is set",
+			func(subject string, held []string) {
+				myCA.AllowDuplicateCerts = true
+				Expect(put(subject).Code).To(Equal(http.StatusOK), "first submission")
+				for _, state := range held {
+					setState(subject, state)
+				}
+				get := func() string {
+					GinkgoHelper()
+					rr := httptest.NewRecorder()
+					mux.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate/"+subject, nil))
+					Expect(rr.Code).To(Equal(http.StatusOK))
+					return rr.Body.String()
+				}
+				certBefore := get()
+
+				Expect(put(subject).Code).To(Equal(http.StatusOK))
+				Expect(myCA.Storage.HasCSR(context.Background(), subject)).To(BeTrue(), "the CSR should be queued")
+				Expect(get()).To(Equal(certBefore), "the held certificate is still the one served")
+			},
+			Entry("for a subject with a signed certificate", "dup-allowed-signed", []string{"signed"}),
+			Entry("for a subject with a revoked certificate", "dup-allowed-revoked", []string{"signed", "revoked"}),
+		)
 	})
 
 	Context("Prefixed paths (/puppet-ca/v1/)", func() {
