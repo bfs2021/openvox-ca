@@ -100,6 +100,8 @@ commonAnnotations: {}
 #       renew_before: 720h
 #       store:
 #         secret: {name: openvox-ca-serving-tls}
+#     # true: a CSR may replace a pending one or queue beside a certificate; see docs/configuration.md "Duplicate certificate requests"
+#     allow_duplicate_certs: false
 config: {}
 
 # Use a ConfigMap you manage yourself instead of one rendered from `config`.

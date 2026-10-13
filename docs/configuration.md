@@ -114,6 +114,7 @@ ca_validity_days: 0   # 0 = built-in default (~5 years); positive integer overri
 leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overrides
 promote_cn_to_san: true # add the CN as a DNS SAN when a CSR carries none (RFC 2818); first issuance only
 allow_subject_alt_names: false # let a CSR request SANs of its own; see "Subject alternative names requested by a CSR"
+allow_duplicate_certs: false # let a CSR replace a pending one or queue beside a certificate; see "Duplicate certificate requests"
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
 csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting
 # Caps concurrent CA-key signatures across issuance, CRL re-signing and the OCSP
@@ -262,6 +263,7 @@ Under the default process split the launcher passes it to the signer child only,
 | `leaf_validity_days` | `PUPPET_CA_LEAF_VALIDITY_DAYS` |
 | `promote_cn_to_san` | `PUPPET_CA_PROMOTE_CN_TO_SAN` |
 | `allow_subject_alt_names` | `PUPPET_CA_ALLOW_SUBJECT_ALT_NAMES` |
+| `allow_duplicate_certs` | `PUPPET_CA_ALLOW_DUPLICATE_CERTS` |
 | `crl_validity_days` | `PUPPET_CA_CRL_VALIDITY_DAYS` |
 | `disable_crl_refresh` | `PUPPET_CA_DISABLE_CRL_REFRESH` |
 | `crl_refresh_interval_sec` | `PUPPET_CA_CRL_REFRESH_INTERVAL_SEC` |
@@ -2135,9 +2137,14 @@ Server's `allow-subject-alt-names`.
 > `puppet.conf`, or a service enrolling under several hostnames — cannot enrol
 > while this is off. The CA logs a `WARN` naming `allow_subject_alt_names`, and
 > the client gets a `400` (autosigned) or a `409` (manual signing). Set
-> `allow_subject_alt_names: true` if that is what your fleet needs. Renewal is
-> unaffected either way: a renewal, re-key included, keeps the names of the
-> certificate it renews, so only new registrations are.
+> `allow_subject_alt_names: true` if that is what your fleet needs. Either way
+> the refused request stays queued, and with
+> [`allow_duplicate_certs`](#duplicate-certificate-requests) off it refuses the
+> node's resubmissions, so after changing the setting sign that request (`sign
+> --certname`, or `sign --all`) or reject it (`openvox-ca-ctl clean
+> --certname`, or `DELETE /certificate_request/{subject}`) so the node can
+> submit afresh. Renewal is unaffected: a renewal, re-key included, keeps the
+> names of the certificate it renews, so only new registrations are.
 
 It matters most with autosigning. TLS peers match the name they dialled against
 a certificate's SAN set, not its Common Name, so a CSR that may name anything is
@@ -2200,6 +2207,69 @@ differently, all deliberately:
   administrator who could already mint anything, not from an enrolling agent.
   That is the distinction the exemption rests on: who supplies the names, not
   whether the path is offline.
+
+### Duplicate certificate requests
+
+`allow_duplicate_certs` (env `PUPPET_CA_ALLOW_DUPLICATE_CERTS`, default `false`)
+is OpenVox Server's `allow-duplicate-certs`, with the same default and the same
+effect. It decides what happens to a CSR for a subject that already has a
+pending CSR, a signed certificate or a revoked one. The check runs before
+autosigning, so it applies whatever `--autosign-config` says.
+
+With it off, `PUT /certificate_request/{subject}` refuses such a CSR with `400`
+and OpenVox Server's message — see [duplicate certificate
+requests](api.md#duplicate-certificate-requests) for the response, and for why
+agents keep waiting rather than failing. The subject has to be cleaned
+(`openvox-ca-ctl clean`, as `puppetserver ca clean` upstream) before it can
+enrol again. That includes a node whose certificate was revoked, a node that
+lost its private key while its certificate was still valid, and a node whose
+certificate has expired: expiry is not checked, so an expired certificate is
+refused as `signed` until the subject is cleaned, or until
+`enable_expired_cert_cleanup`, if enabled, removes it once
+`expired_cert_retention_sec` has passed.
+
+Each refusal is logged as `SaveRequest refused: duplicate certificate request`
+with `subject` and `state`: at `INFO` for a pending CSR, since an agent waiting
+for manual signing resubmits on every poll, and at `WARN`, with a `remedy`, for
+a signed or revoked certificate, which leaves the node waiting until someone
+cleans it.
+
+With it on, the CSR is accepted and logged at `INFO` as `Accepting a duplicate
+certificate request (allow_duplicate_certs)`, with `subject`, `state` and the
+`serial` of any certificate it leaves in place:
+
+- **A pending CSR is overwritten** by the newest submission.
+  `PUT /certificate_request` needs no client certificate, so any client that
+  can reach it can replace a node's pending request with one of its own, and
+  signing by name signs whichever request arrived last. Compare the request's
+  fingerprint (`GET /certificate_status/{subject}`) with the node's before
+  signing.
+- **A signed or revoked certificate is left in place**, and is still what
+  `GET /certificate/{subject}` serves, until the new request is signed over it.
+  That signing — immediate, if the request is autosigned — does not revoke the
+  certificate it replaces, which stays valid until it expires or is revoked by
+  serial (see [revocation by serial](api.md#revocation-by-serial)). OpenVox
+  Server behaves the same way, and its documentation for the setting asks the
+  operator to clean the old certificate before signing the new request.
+
+  The queued request may come from anyone, as above. Under autosign, any
+  request the policy admits is signed as soon as it arrives, so whoever submits
+  it gets a valid certificate for a node that is already enrolled, with a key of
+  their choosing, while the node's own certificate stays valid too. The server
+  logs a `WARN` at startup when the setting is combined with any autosign mode.
+
+  While the certificate is there, the request queued beside it does not show:
+  `GET /certificate_status/{subject}`, `GET /certificate_statuses` and every
+  form of `openvox-ca-ctl list` report the certificate and its fingerprint, not
+  the request's, and `puppetca_leaf_certificate_info{state="requested"}` does
+  not count it, so the `PuppetCACertificateRequestPending` alert does not fire
+  for it. `openvox-ca-ctl sign --all` (`POST /sign/all`) signs it all the
+  same. Read the request itself with `GET /certificate_request/{subject}` and
+  check it before signing it by name.
+
+```yaml
+allow_duplicate_certs: true
+```
 
 ## Serial number format
 

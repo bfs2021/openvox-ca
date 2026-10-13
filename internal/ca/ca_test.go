@@ -989,45 +989,8 @@ var _ = Describe("CA SaveRequest edge cases", func() {
 		os.RemoveAll(tmpDir)
 	})
 
-	It("returns ErrCertExists when a valid cert already exists for the subject", func() {
-		csrPEM, err := testutil.GenerateCSR("dup-node")
-		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest(context.Background(), "dup-node", csrPEM)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.Sign(context.Background(), "dup-node")
-		Expect(err).NotTo(HaveOccurred())
-
-		// Second SaveRequest should fail with ErrCertExists.
-		csrPEM2, err := testutil.GenerateCSR("dup-node")
-		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest(context.Background(), "dup-node", csrPEM2)
-		Expect(err).To(HaveOccurred())
-		Expect(errors.Is(err, ca.ErrCertExists)).To(BeTrue())
-
-		// Malformed CSR must not be written to disk.
-		Expect(store.HasCSR(context.Background(), "dup-node")).To(BeFalse())
-	})
-
-	It("allows re-registration after a certificate is revoked", func() {
-		csrPEM, err := testutil.GenerateCSR("rereg-node")
-		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest(context.Background(), "rereg-node", csrPEM)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.Sign(context.Background(), "rereg-node")
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(myCA.Revoke(context.Background(), "rereg-node")).To(Succeed())
-
-		csrPEM2, err := testutil.GenerateCSR("rereg-node")
-		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest(context.Background(), "rereg-node", csrPEM2)
-		Expect(err).NotTo(HaveOccurred())
-
-		// Old cert must be gone.
-		Expect(store.HasCert(context.Background(), "rereg-node")).To(BeFalse())
-		// New CSR must be on disk.
-		Expect(store.HasCSR(context.Background(), "rereg-node")).To(BeTrue())
-	})
+	// A CSR for a subject that already holds something is refused: see
+	// duplicatecsr_test.go.
 
 	It("rejects a malformed CSR without writing anything to disk", func() {
 		_, err := myCA.SaveRequest(context.Background(), "bad-csr-node", []byte("NOT PEM"))

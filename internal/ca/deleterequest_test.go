@@ -209,9 +209,9 @@ var _ = Describe("DeleteRequest", func() {
 		Expect(store.HasCSR(ctx, "node1.test")).To(BeFalse())
 	})
 
-	It("cannot delete inside SaveRequest's evict/save/autosign section", func() {
+	It("cannot delete inside SaveRequest's check/save/autosign section", func() {
 		// The other half of #196, and the one an agent sees: SaveRequest holds
-		// the subject lock across evict/save/autosign, and an unlocked delete
+		// the subject lock across check/save/autosign, and an unlocked delete
 		// landing between SaveCSR and the sign made that sign fail with "CSR
 		// not found" — turning a submission into a 5xx rather than a clean save
 		// or a clean rejection.

@@ -23,7 +23,7 @@
 # containers up for `compose logs` instead; a readiness timeout still prints
 # the timed-out service's own log either way.
 #
-# NOTE: Group 6 revokes the client cert.  clean_client_cert() revokes any
+# NOTE: Group 6 revokes the client cert.  clean_client_cert() cleans any
 # stale cert and clears the client SSL dir before Groups 3 and 8.
 
 set -uo pipefail
@@ -136,7 +136,7 @@ refresh_master_crl() {
         sh -c 'cat > /etc/puppetlabs/puppet/ssl/ca/ca_crl.pem'
 }
 
-# -- Helper: revoke + clean the client cert, wipe local SSL dir ------------─
+# -- Helper: clean the client cert, wipe local SSL dir --------------------─
 clean_client_cert() {
     local _state
     _state=$(exec_master curl -s \
@@ -147,10 +147,24 @@ clean_client_cert() {
         2>/dev/null | \
         python3 -c "import sys,json; print(json.load(sys.stdin).get('state',''))" \
         2>/dev/null || true)
-    if [ "$_state" = "signed" ] || [ "$_state" = "requested" ]; then
-        printf '#   revoking stale client.puppet.localdomain (state=%s)\n' "$_state"
-        ca_admin_put "client.puppet.localdomain" '{"desired_state":"revoked"}' \
-            >/dev/null 2>&1 || true
+    # Clean rather than merely revoke: a subject holding a CSR or a certificate,
+    # revoked or not, refuses the agent's next CSR until it is cleaned, as
+    # OpenVox Server does with allow_duplicate_certs off.
+    if [ -n "$_state" ]; then
+        printf '#   cleaning stale client.puppet.localdomain (state=%s)\n' "$_state"
+        local _clean_st
+        _clean_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
+            --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+            --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
+            --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
+            -X DELETE \
+            "https://openvox-ca:8140/puppet-ca/v1/certificate_status/client.puppet.localdomain" \
+            2>/dev/null || true)
+        # The agent run that follows depends on this: a subject left holding
+        # anything refuses the agent's CSR, which would surface only as a
+        # --waitforcert timeout.
+        [ "$_clean_st" = "204" ] \
+            || printf '#   WARNING: cleaning client.puppet.localdomain returned HTTP %s, not 204; the agent run below will be refused\n' "${_clean_st:-none}"
     fi
     exec_client rm -rf /etc/puppetlabs/puppet/ssl 2>/dev/null || true
     refresh_master_crl || true
@@ -853,6 +867,94 @@ else
     fail "Agent run with revoked cert shows revocation/SSL error" \
          "exit=${AGENT3_EXIT}; last lines: $(tail -3 <<< "$AGENT3_OUT" | tr '\n' ' ')"
 fi
+
+# ═════════════════════════════════════════════════════════════════════════
+# Group 6b -- Agent keeps waiting through a duplicate-request refusal
+# ═════════════════════════════════════════════════════════════════════════
+# The duplicate-certificate policy answers a CSR for a subject that already
+# has a pending request with a 400, because the agent's SSL state machine
+# reads a 400 on submission as "keep waiting" and any other non-2xx as fatal.
+# The other suites pin the status; this is the one place a real agent
+# receives it.
+#
+# The stack autosigns, so a pending request is planted by submitting one the
+# autosign path refuses: a CSR asking for a subject alternative name, which
+# allow_subject_alt_names (off) refuses after the CSR is saved. The agent's
+# own CSR is then refused as a duplicate, its certificate GET finds nothing,
+# and it waits. Rejecting the planted request mid-run lets its next
+# submission through, to be autosigned.
+printf '\n# Group 6b -- Agent keeps waiting through a duplicate-request refusal\n'
+
+clean_client_cert
+
+_WAIT_CN="client.puppet.localdomain"
+openssl genrsa -out "$WORK_DIR/wait-plant.key" 2048 2>/dev/null || true
+[ -f "$WORK_DIR/wait-plant.key" ] && chmod 600 "$WORK_DIR/wait-plant.key"
+openssl req -new \
+    -key  "$WORK_DIR/wait-plant.key" \
+    -subj "/CN=${_WAIT_CN}" \
+    -addext "subjectAltName=DNS:not-permitted.example" \
+    -out  "$WORK_DIR/wait-plant.csr" 2>/dev/null || true
+_plant_st=$(curl -s -o /dev/null -w '%{http_code}' \
+    "${_CA[@]}" \
+    -X PUT -H "Content-Type: text/plain" \
+    --data-binary @"$WORK_DIR/wait-plant.csr" \
+    "${CA_HOST_URL}/puppet-ca/v1/certificate_request/${_WAIT_CN}") || true
+[ "$_plant_st" = "400" ] \
+    && pass "Planted CSR with a refused SAN answers 400 under autosign" \
+    || fail "Planted CSR with a refused SAN answers 400 under autosign" "got HTTP $_plant_st"
+
+_plant_pending=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
+    --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+    --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
+    --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
+    "https://openvox-ca:8140/puppet-ca/v1/certificate_request/${_WAIT_CN}" \
+    2>/dev/null || true)
+[ "$_plant_pending" = "200" ] \
+    && pass "Planted CSR stays pending after the autosign refusal" \
+    || fail "Planted CSR stays pending after the autosign refusal" "GET certificate_request returned HTTP $_plant_pending"
+
+# --maxwaitforcert bounds the run, so a regression ends in a failure rather
+# than a hang.
+run_agent --waitforcert 5 --maxwaitforcert 120 > "$WORK_DIR/agent-wait.out" 2>&1 &
+_wait_agent_pid=$!
+
+# Reject the planted request once the agent has been refused and is waiting,
+# which it reports when its certificate GET finds nothing. The poll is bounded
+# in case its output is buffered; the assertions below decide either way.
+for _ in $(seq 1 60); do
+    grep -qE "has not been signed yet|Couldn't fetch certificate" "$WORK_DIR/agent-wait.out" 2>/dev/null && break
+    sleep 1
+done
+_reject_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
+    --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+    --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
+    --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
+    -X DELETE \
+    "https://openvox-ca:8140/puppet-ca/v1/certificate_request/${_WAIT_CN}" \
+    2>/dev/null || true)
+[ "$_reject_st" = "204" ] \
+    && pass "Rejecting the planted CSR returns 204" \
+    || fail "Rejecting the planted CSR returns 204" "got HTTP $_reject_st"
+
+_WAIT_AGENT_EXIT=0
+wait "$_wait_agent_pid" || _WAIT_AGENT_EXIT=$?
+_WAIT_AGENT_OUT=$(cat "$WORK_DIR/agent-wait.out" 2>/dev/null || true)
+
+# The agent waited: its GET found no certificate, which only follows a
+# refused submission it survived.
+grep -qE "has not been signed yet|Couldn't fetch certificate" <<< "$_WAIT_AGENT_OUT" \
+    && pass "Agent kept waiting after its CSR was refused with 400" \
+    || fail "Agent kept waiting after its CSR was refused with 400" \
+            "last lines: $(tail -5 <<< "$_WAIT_AGENT_OUT" | tr '\n' '|')"
+[[ "$_WAIT_AGENT_EXIT" =~ ^(0|2)$ ]] \
+    && pass "Agent enrolled and ran once the pending request was rejected" \
+    || fail "Agent enrolled and ran once the pending request was rejected" \
+            "exit=${_WAIT_AGENT_EXIT}; last lines: $(tail -5 <<< "$_WAIT_AGENT_OUT" | tr '\n' '|')"
+grep -qi "Applied catalog" <<< "$_WAIT_AGENT_OUT" \
+    && pass "Agent applied its catalog after waiting" \
+    || fail "Agent applied its catalog after waiting" \
+            "last lines: $(tail -5 <<< "$_WAIT_AGENT_OUT" | tr '\n' '|')"
 
 # ═════════════════════════════════════════════════════════════════════════
 # Group 7 -- OpenVoxDB validation

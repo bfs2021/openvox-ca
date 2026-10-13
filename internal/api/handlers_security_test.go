@@ -20,10 +20,12 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -32,6 +34,30 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
+
+// csrFaultBackend fails Exists or Put on one key with a fixed error, standing
+// in for a backend that is reachable but refusing that operation.
+type csrFaultBackend struct {
+	storage.Backend
+	key        string
+	err        error
+	failExists bool
+	failPut    bool
+}
+
+func (b *csrFaultBackend) Exists(ctx context.Context, key string) (bool, error) {
+	if b.failExists && key == b.key {
+		return false, b.err
+	}
+	return b.Backend.Exists(ctx, key)
+}
+
+func (b *csrFaultBackend) Put(ctx context.Context, key string, data []byte, kind storage.BlobKind) error {
+	if b.failPut && key == b.key {
+		return b.err
+	}
+	return b.Backend.Put(ctx, key, data, kind)
+}
 
 var _ = Describe("API security hardening", func() {
 	Context("internal errors are not leaked to clients", func() {
@@ -63,34 +89,46 @@ var _ = Describe("API security hardening", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("internal server error"))
 		})
 
-		It("returns a generic body on PUT /certificate_request when saving the CSR fails, without leaking the on-disk path", func() {
-			// Unauthenticated endpoint. Force SaveCSR to fail with a path-bearing
-			// error: make the "requests" directory a regular file so the atomic
-			// write inside it returns a *PathError carrying the temp directory.
-			tmpDir, err := os.MkdirTemp("", "openvox-ca-csr-leak-test")
-			Expect(err).NotTo(HaveOccurred())
-			defer os.RemoveAll(tmpDir)
+		// Unauthenticated endpoint. Each entry faults one storage call on the
+		// CSR's key with a path-bearing error, so the spec fails if either the
+		// path or the error reaches the client. The duplicate check's lookup
+		// is a separate entry because it runs first: a fault there must be a
+		// 500 like any other, never the 400 that tells an agent to keep
+		// waiting for a certificate nobody decided about.
+		DescribeTable("returns a generic 500 on PUT /certificate_request when storage fails, without leaking the on-disk path",
+			func(failExists bool) {
+				tmpDir := GinkgoT().TempDir()
+				const subject = "leaknode.test"
+				fault := &fs.PathError{Op: "open", Path: filepath.Join(tmpDir, "requests", subject+".pem"), Err: syscall.EIO}
 
-			Expect(os.MkdirAll(filepath.Join(tmpDir, "signed"), 0o755)).To(Succeed())
-			Expect(os.WriteFile(filepath.Join(tmpDir, "requests"), []byte("not a directory"), 0o644)).To(Succeed())
+				backend := &csrFaultBackend{Backend: storage.NewFilesystemBackend(tmpDir), key: storage.CSRKey(subject), err: fault}
+				if failExists {
+					backend.failExists = true
+				} else {
+					backend.failPut = true
+				}
+				store := storage.NewWithBackend(backend, filepath.Join(tmpDir, "private"))
+				Expect(store.EnsureDirs(context.Background())).To(Succeed())
+				leakCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+				leakMux := api.New(leakCA).Routes()
 
-			store := storage.New(tmpDir)
-			leakCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-			leakMux := api.New(leakCA).Routes()
+				csrPEM, err := testutil.GenerateCSR(subject)
+				Expect(err).NotTo(HaveOccurred())
 
-			const subject = "leaknode.test"
-			csrPEM, err := testutil.GenerateCSR(subject)
-			Expect(err).NotTo(HaveOccurred())
+				req := httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM))
+				rr := httptest.NewRecorder()
+				leakMux.ServeHTTP(rr, req)
 
-			req := httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM))
-			rr := httptest.NewRecorder()
-			leakMux.ServeHTTP(rr, req)
-
-			// The storage path must never reach this unauthenticated client.
-			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir))
-			Expect(rr.Body.String()).NotTo(ContainSubstring("requests"))
-			Expect(rr.Body.String()).NotTo(ContainSubstring("not a directory"))
-		})
+				Expect(rr.Code).To(Equal(http.StatusInternalServerError))
+				Expect(rr.Body.String()).To(ContainSubstring("internal server error"))
+				// The storage path must never reach this unauthenticated client.
+				Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir))
+				Expect(rr.Body.String()).NotTo(ContainSubstring("requests"))
+				Expect(rr.Body.String()).NotTo(ContainSubstring("input/output error"))
+			},
+			Entry("when saving the CSR fails", false),
+			Entry("when the duplicate check cannot tell whether a CSR is pending", true),
+		)
 	})
 
 	Context("JSON request bodies are size-capped", func() {

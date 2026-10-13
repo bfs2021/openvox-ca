@@ -570,6 +570,11 @@ nodes will fail to sign until you set:
 allow_subject_alt_names: true
 ```
 
+A request refused for its alt names stays queued and, as upstream, refuses the
+node's resubmissions, so once the setting is changed, sign it
+(`openvox-ca-ctl sign --certname <name>`) or reject it
+(`openvox-ca-ctl clean --certname <name>`) so the node can submit afresh.
+
 Certificates you have already imported keep renewing whatever the setting says.
 As in OpenVox Server, a renewal recreates the certificate being renewed: its
 subject, all four SAN types and every other extension are carried forward, and
@@ -583,6 +588,20 @@ rather than from an agent's CSR.
 
 The refusal names no entries back to the requester; look in the CA's log at
 `WARN` for which ones were refused.
+
+### Duplicate certificate requests
+
+Parity: `allow_duplicate_certs` defaults to `false`, as OpenVox Server's
+`allow-duplicate-certs` does. A CSR for a subject that already has a pending
+CSR, a signed certificate or a revoked one is refused with `400` and the same
+message. Re-enrolling a node — after its certificate was revoked or expired, or
+after it lost its private key — therefore needs
+`openvox-ca-ctl clean --certname <name>` first, where you would have run
+`puppetserver ca clean`.
+
+If your Puppet Server had `allow-duplicate-certs` set to `true`, set the same
+here; see [duplicate certificate
+requests](configuration.md#duplicate-certificate-requests) for what it does.
 
 ### Auth-arc OID stripping
 

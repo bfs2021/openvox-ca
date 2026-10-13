@@ -156,8 +156,6 @@ var contractExceptions = map[string][]contractException{
 		"kept: a subject that is not a valid certname is the client's error"}},
 	"certificate-get-not-modified": {{"status: 200, upstream 304",
 		"#414: GET /certificate ignores If-Modified-Since"}},
-	"certificate-request-put-existing-cert": {{"status: 200, upstream 400",
-		"#410: a CSR for a subject with a live certificate is accepted"}},
 	"certificate-request-put-unparseable": {{"status: 400, upstream 500",
 		"kept: a body that is not a CSR is the client's error, where upstream fails with an exception"}},
 	"certificate-wrong-method": {{"status: 405, upstream 404",

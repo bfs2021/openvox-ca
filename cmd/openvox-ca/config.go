@@ -199,6 +199,11 @@ type serverConfig struct {
 	// admin-only `POST /generate/{subject}?dns=`), whose names come from an
 	// administrator rather than from an agent's CSR.
 	AllowSubjectAltNames bool `yaml:"allow_subject_alt_names"`
+	// AllowDuplicateCerts lets a submitted CSR replace a subject's pending CSR,
+	// or be queued alongside its signed or revoked certificate (default: false,
+	// matching OpenVox Server's allow-duplicate-certs). When false, such a
+	// submission is refused with a 400 until the subject is cleaned.
+	AllowDuplicateCerts bool `yaml:"allow_duplicate_certs"`
 	// PuppetDateTimeFormat formats JSON date/time fields using the original Puppet CA
 	// style ("2006-01-02T15:04:05MST") instead of RFC 3339 (default: false).
 	PuppetDateTimeFormat bool `yaml:"puppet_datetime_format"`
@@ -356,6 +361,7 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 		// AllowSubjectAltNames defaults to false — see the field comment. Left
 		// implicit here would make the safe default look like an oversight.
 		AllowSubjectAltNames: false,
+		AllowDuplicateCerts:  false,
 		RevokeOnAutoRenew:    true, // only the newest serial per subject should be valid
 		// unset sentinel; 0 revokes inside the renewal, -1 falls back to
 		// defaultSupersededCertRevokeAfter
@@ -927,6 +933,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_ALLOW_SUBJECT_ALT_NAMES"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.AllowSubjectAltNames = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_ALLOW_DUPLICATE_CERTS"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.AllowDuplicateCerts = b
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_PUPPET_DATETIME_FORMAT"); v != "" {

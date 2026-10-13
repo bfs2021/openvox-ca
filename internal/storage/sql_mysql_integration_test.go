@@ -339,3 +339,9 @@ var _ = Describe("MySQL AcquireLockAliasingSubjects", func() {
 		}
 	})
 })
+
+var _ = Describe("MySQL subject CSR and certificate lifecycle", func() {
+	It("tracks a subject's CSR and certificate through save, replace and delete", func() {
+		subjectBlobLifecycle(newMySQLBackend())
+	})
+})

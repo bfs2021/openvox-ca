@@ -58,7 +58,7 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 | --- | --- |
 | `go_*` | Go runtime metrics (goroutines, GC, memory) from the standard Go collector. |
 | `process_*` | Process metrics (CPU, resident memory, open FDs) where supported by the platform. |
-| `puppetca_http_requests_total{method,code}` | Total CA API requests, by HTTP method and response code. |
+| `puppetca_http_requests_total{method,code}` | Total CA API requests, by HTTP method and response code. `PUT` `400`s include [duplicate certificate requests](configuration.md#duplicate-certificate-requests), which an agent waiting to be signed or cleaned sends on every poll, so a `PUT` `400` rate is not on its own a sign of malformed CSRs; the `SaveRequest refused: duplicate certificate request` log line tells them apart. |
 | `puppetca_http_request_duration_seconds{method,code}` | CA API request latency histogram. |
 | `puppetca_http_requests_in_flight` | CA API requests currently being served. |
 
@@ -417,7 +417,10 @@ issuer's own `crl_file`, and this CA neither issues nor republishes them.
 One series per known (non-deleted) leaf certificate or pending request. Cleaned
 (`puppet cert clean`) certificates drop out of these series even though their
 inventory line persists. The `state` label is one of `requested` (a pending CSR
-with no issued certificate), `signed`, or `revoked`.
+with no issued certificate), `signed`, or `revoked`. A subject reports its
+certificate in preference to a CSR, so a request queued beside a certificate
+under [`allow_duplicate_certs`](configuration.md#duplicate-certificate-requests)
+has no `requested` series of its own.
 
 | Metric | Labels | Description |
 | --- | --- | --- |
