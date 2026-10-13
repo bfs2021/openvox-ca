@@ -630,8 +630,6 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 
 			Expect(stdout).To(ContainSubstring("scheme:        whole-blob-hmac"))
 			Expect(stdout).To(ContainSubstring("HMAC key:      usable"))
-			// The fixture's count is known, so assert it rather than "some
-			// digits": %d over a len() renders digits unconditionally.
 			// The capability branch every filesystem-backed spec prints, and the
 			// one nothing asserted: rewriting it to carry generate's green-light
 			// reassurance passed the whole suite.
@@ -645,6 +643,8 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 			Expect(stdout).To(ContainSubstring("the audit record for this rebuild is terminal-only"))
 			Expect(stdout).NotTo(ContainSubstring("safe to run alongside a live server"))
 
+			// The fixture's count is known, so assert it rather than "some
+			// digits": %d over a len() renders digits unconditionally.
 			Expect(stdout).To(ContainSubstring("entries:       1"))
 			Expect(stdout).To(MatchRegexp(`stored value:  [0-9a-f]{16}…`),
 				"the column must carry a fingerprint, not just a label")
@@ -1234,6 +1234,13 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac, before it can reach a store
 		caDir = GinkgoT().TempDir()
 		bootstrapCAInDir(caDir, "puppet.example.com")
 		clearServerEnv()
+
+		// The same guard as the Describe above, for the same reason, and missed
+		// the same way: RunE reaches applySubcommandLogging -> slog.SetDefault
+		// before the resolver is called, so the resolution-failure spec below
+		// rebinds the process-wide default to a logfile its closer then shuts.
+		origLogger := slog.Default()
+		DeferCleanup(func() { slog.SetDefault(origLogger) })
 	})
 
 	It("surfaces a runtime-resolution failure and reports no integrity findings", func() {

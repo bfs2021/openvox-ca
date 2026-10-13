@@ -399,14 +399,15 @@ unaffected.
 
 ## Optional capabilities
 
-Two properties vary by backend and are not visible from the `Backend`
-interface alone. `StorageService` answers both, because callers that need
-to know cannot determine them for themselves. `openvox-ca generate` uses them to decide whether
-it is safe to write to storage a live server is also using, and `openvox-ca
-rebuild-inventory-hmac` uses them to decide whether it can refuse at all — on a
-backend that coordinates across hosts the single-instance rule does not apply,
-so it requires an explicit `--replicas-stopped` assertion instead. See the
-`capability-probe` row in [tier 1: cluster-wide named locks](locking.md#tier-1-cluster-wide-named-locks-withlock).
+Two properties vary by backend and are not visible from the `Backend` interface
+alone. `StorageService` answers both, because callers that need to know cannot
+determine them for themselves. `openvox-ca generate` uses them to decide
+whether it is safe to write to storage a live server is also using, and
+`openvox-ca rebuild-inventory-hmac` uses them to decide whether it can refuse
+at all — on a backend that coordinates across hosts the single-instance rule
+does not apply, so it requires an explicit `--replicas-stopped` assertion
+instead. See the `capability-probe` row in
+[tier 1: cluster-wide named locks](locking.md#tier-1-cluster-wide-named-locks-withlock).
 
 A third question sits beside them without belonging in the table, because it is
 not a property of a backend: `storage.LockIsEnforced` is a package-level
