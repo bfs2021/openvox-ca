@@ -1365,8 +1365,7 @@ func resolveSQLitePath(path string) string {
 // dedicated connection. The lock name is mapped to the bigint key
 // pg_advisory_lock requires by advisoryLockKey, whose key space is partitioned
 // so a caller-supplied name cannot reach a singleton lock's key. Lock and
-// unlock must run on the same session, so the connection is held until
-// Unlock. A process-local mutex serialises
+// unlock must run on the same session, so the connection is held until Unlock. A process-local mutex serialises
 // in-process callers first so they do not each tie up a connection blocked in
 // pg_advisory_lock. pg_advisory_lock itself blocks until granted or the context
 // is cancelled.
@@ -1535,8 +1534,7 @@ func (u *pgUnlocker) Unlock() error {
 // acquireMySQLLock takes a named MySQL/MariaDB lock via GET_LOCK on a dedicated
 // connection (GET_LOCK is session-scoped, so lock and release must share one
 // connection). The lock name is mapped to a short, stable, partitioned
-// identifier by mysqlLockName, within MySQL's 64-character GET_LOCK name
-// limit. GET_LOCK is polled with a 1-second
+// identifier by mysqlLockName, within MySQL's 64-character GET_LOCK name limit. GET_LOCK is polled with a 1-second
 // server-side wait so caller-context cancellation is honoured between attempts;
 // a process-local mutex serialises in-process callers first.
 func (b *SQLBackend) acquireMySQLLock(ctx context.Context, name string) (Unlocker, error) {

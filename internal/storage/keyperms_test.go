@@ -270,13 +270,6 @@ var _ = Describe("CheckKeyPermissions, over backends and wrappers", func() {
 		Expect(warnings[0].Path).To(Equal(shared))
 	})
 
-	// Anything that is not a regular file is not key material, and its mode does
-	// not mean what a file's does: a directory under private/ needs its execute
-	// bit to be traversable, and a socket or FIFO holds nothing. Without this
-	// guard the 0750 directory every deployment has would be reported as a
-	// finding wider than 0600 on every start, and the refusal would fire on a
-	// correct store -- so the guard is what makes the whole check usable, not an
-	// optimisation.
 	// A wrapper that forwards nothing is the case the bare type assertion got
 	// wrong: it reported no key files rather than failing, so the whole of a
 	// backend's own key material went unjudged and the check passed silently.
@@ -314,6 +307,13 @@ var _ = Describe("CheckKeyPermissions, over backends and wrappers", func() {
 		})
 	})
 
+	// Anything that is not a regular file is not key material, and its mode does
+	// not mean what a file's does: a directory under private/ needs its execute
+	// bit to be traversable, and a socket or FIFO holds nothing. Without this
+	// guard the 0750 directory every deployment has would be reported as a
+	// finding wider than 0600 on every start, and the refusal would fire on a
+	// correct store -- so the guard is what makes the whole check usable, not an
+	// optimisation.
 	DescribeTable("says nothing about a thing that is not a regular file",
 		func(create func(path string)) {
 			dir := GinkgoT().TempDir()
