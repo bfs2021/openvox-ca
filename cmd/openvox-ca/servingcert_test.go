@@ -1648,27 +1648,21 @@ var _ = Describe("the serving certificate's fallback reporting", func() {
 			"nothing failed, so claiming a failure invents a cause")
 	})
 
-	It("stays silent about admin credentials when the allow list cannot be read", func() {
-		// What this guards, stated narrowly because the obvious stronger
-		// claim is not one it can make: buildServingCert neither errors nor
-		// warns when the allow list cannot be read, and tlsEnabled is true for
-		// a self-provisioned CA, which is the premise the silence rests on.
+	It("leaves an unreadable allow list for buildAuthConfig to report", func() {
+		// warnIfServingCertIsAdmin's early return, by the contract its comment
+		// states: "Not reported here" -- buildAuthConfig reads the same list a
+		// moment later and fails the startup with it, so a report here is a
+		// duplicate the operator reads first. That is what this pins: a warning
+		// from this path fails it.
 		//
-		// It does NOT guard the early-return arm itself. Deleting that arm
-		// leaves the warning silent anyway -- the allow list failed to load,
-		// so admins is nil and there is nothing to warn about -- which means
-		// no assertion on absence here can distinguish the two. An earlier
-		// version of this comment claimed "without this spec the whole admin
-		// warning could vanish with nothing failing", and that was a claim
-		// about coverage the spec does not have. The warning's live path is
-		// covered by the admin-credential warning specs above, which vary
-		// puppetServer and the entry's usages and assert the warning appears.
-		// (An earlier version of this sentence named a DescribeTable; the
-		// live-path coverage here is a set of Its, not a table.)
+		// Not the arm's existence. Deleting it falls through with a nil allow
+		// list, which lists nobody and so warns about nobody -- the same
+		// silence -- so the two are observably identical and no assertion can
+		// tell them apart. The warning's live path is the admin-credential
+		// specs above.
 		//
-		// PuppetServer is set so the fixture is a configuration where an admin
-		// warning would be meaningful at all; without it the silence is
-		// doubly overdetermined and the spec reads as stronger than it is.
+		// PuppetServer names the serving certname, so this is a configuration
+		// where an admin warning would otherwise be due.
 		cfg := &serverConfig{
 			PuppetServer:     "ca.test",
 			PuppetServerFile: filepath.Join(GinkgoT().TempDir(), "absent"),
@@ -1687,16 +1681,12 @@ var _ = Describe("the serving certificate's fallback reporting", func() {
 			Expect(err).NotTo(HaveOccurred(),
 				"an unreadable allow list is buildAuthConfig's to refuse, not this")
 		})
-		Expect(logs).NotTo(ContainSubstring("admin credential"))
-		// The whole capture, not just that one phrase. A substring check passes
-		// for any OTHER warning too, so it could not tell "returned early and
-		// said nothing" from "said something else instead" -- and the early
-		// return is the arm this spec is named after. Empty is the only
-		// assertion that distinguishes them.
+		// The whole capture rather than one phrase: a report of the unreadable
+		// list would not mention admin credentials at all.
 		Expect(logs).To(BeEmpty(),
-			"buildServingCert warned about something when the allow list could not be "+
-				"read, and this path's whole justification is that it stays silent and "+
-				"lets buildAuthConfig report the failure fatally a moment later")
+			"buildServingCert warned when the allow list could not be read; "+
+				"buildAuthConfig reports that fatally a moment later, so this path must "+
+				"leave it to that one")
 	})
 })
 
