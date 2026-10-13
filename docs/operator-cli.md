@@ -98,7 +98,10 @@ openvox-ca-ctl list
 # List all certificates (signed, revoked, requested)
 openvox-ca-ctl list --all
 
-# Sign a pending CSR
+# Sign a pending CSR. Every --certname is checked against the server's own
+# subject rules before anything is sent (lower-case letters, digits, ".", "_"
+# and "-", no "/" and no ".."), so an invalid name is refused locally with the
+# reason, rather than reaching the server as a different request.
 openvox-ca-ctl sign --certname agent.example.com
 
 # Sign all pending CSRs
