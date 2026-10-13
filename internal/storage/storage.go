@@ -1621,8 +1621,10 @@ func parseBlobInventoryEntry(line string) (InventoryEntry, bool) {
 //
 // parseBlobInventoryEntry reads the result back as e. A serial that is not
 // hexadecimal cannot be rendered, and raw, the line as the caller gave it, is
-// returned instead: nothing this CA issues has one, so that is only ever a line
-// written deliberately, and it is stored as written, as it always was.
+// returned instead. Nothing this CA issues has one, so that is only ever a line
+// written deliberately, and both callers pass it in canonicalInventoryLine's
+// form: AppendInventoryRecord refuses any other before it gets here, and a
+// structured backend, the only source migrate renders from, stores that form.
 func openVoxInventoryLine(e InventoryEntry, raw string) string {
 	n, ok := new(big.Int).SetString(inventorySerial(e.Serial), 16)
 	if !ok {
