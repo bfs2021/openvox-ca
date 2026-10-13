@@ -182,7 +182,7 @@ func resolveRuntime(ctx context.Context, cfg *serverConfig, withKeyProvider bool
 	rt.Store = store
 	rt.storeClosers = append(rt.storeClosers, store.Backend().Close)
 
-	if withKeyProvider && cfg.UsesOpenBao() {
+	if withKeyProvider && keyLivesAtProvider(cfg) {
 		closeSession, provider, err := newKeyProvider(ctx, cfg)
 		if err != nil {
 			_ = rt.Close()
@@ -351,6 +351,27 @@ func preflightKeyMaterial(ctx context.Context, cfg *serverConfig, role string) (
 // CA.Init reaches the same blob immediately afterwards and reports the real
 // error precisely, which is the better diagnostic for that case.
 func refuseOnMissingPassphrase(ctx context.Context, rt *caRuntime, cfg *serverConfig) error {
+	// A CA whose key lives at a provider never resolves a passphrase: CA.Init
+	// loads it through KeyProvider.Load, bootstraps it through
+	// KeyProvider.Generate, and skips the local save altogether, so there is no
+	// PEM to encrypt or decrypt and encrypt_ca_key has nothing to act on. A
+	// stored local PEM is ignored too, for the same reason.
+	//
+	// Without this the preflight refused a configuration that starts today --
+	// `ca_key_provider: openbao` with `encrypt_ca_key: true` left over and no
+	// passphrase source -- and told the operator to supply a passphrase that
+	// would never be used. Nothing rejects that pair at configuration time, and
+	// the chart cannot produce it, so it is a hand-configured store that has
+	// moved to a provider and kept the flag.
+	//
+	// keyLivesAtProvider is the predicate resolveRuntime uses to decide whether
+	// to construct a provider at all, so the two cannot disagree: this runs with
+	// resolveRuntime(ctx, cfg, false), where rt.KeyProvider is always nil and
+	// therefore cannot be the test.
+	if keyLivesAtProvider(cfg) {
+		return nil
+	}
+
 	var keyPEM []byte
 	if has, err := rt.Store.HasCAKey(ctx); err == nil && has {
 		if pem, err := rt.Store.GetCAKey(ctx); err == nil {
@@ -410,6 +431,19 @@ func holdInstanceLock(ctx context.Context, rt *caRuntime, opts ...storage.Instan
 // while handing the frontend an authenticated session to the key backend.
 func resolveRuntimeForRole(ctx context.Context, cfg *serverConfig, role string) (*caRuntime, error) {
 	return resolveRuntime(ctx, cfg, roleMayReachCAKey(role))
+}
+
+// keyLivesAtProvider reports whether this configuration keeps the CA key at a
+// key provider rather than as a local PEM blob reached through the store.
+//
+// One predicate with two callers, and the second is why it is named:
+// resolveRuntime uses it to decide whether to construct a provider, and the
+// pre-fork passphrase preflight uses it to decide whether a passphrase can be
+// needed at all. Written out separately in each, a provider added to one and
+// not the other would have the preflight demand a passphrase that CA.Init never
+// asks for -- the shape of defect it was extracted to prevent.
+func keyLivesAtProvider(cfg *serverConfig) bool {
+	return cfg.UsesOpenBao()
 }
 
 // roleMayReachCAKey reports whether a process running as role is permitted to

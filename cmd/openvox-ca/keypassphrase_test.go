@@ -225,6 +225,48 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 		Entry("the frontend, which never does", "frontend", false),
 	)
 
+	// A CA whose key lives at a provider never resolves a passphrase, so the
+	// preflight must not ask for one. This configuration starts today, and the
+	// first version of the preflight refused it, telling the operator to supply
+	// a passphrase CA.Init would never use. The no-provider entries are the
+	// must-fail twin: the same settings without a provider still refuse, so the
+	// pass above is the provider's doing and not a preflight that stopped
+	// checking.
+	DescribeTable("asks for no passphrase when the key lives at a provider",
+		func(provider string, storeEncrypted, wantRefusal bool) {
+			dir := GinkgoT().TempDir()
+			store := storage.New(dir)
+			if storeEncrypted {
+				// A local encrypted PEM left behind from before the move to a
+				// provider. CA.Init ignores it under a provider, so the
+				// preflight must too.
+				ppFile := filepath.Join(GinkgoT().TempDir(), "passphrase")
+				Expect(os.WriteFile(ppFile, []byte("spec-passphrase\n"), 0o600)).To(Succeed())
+				seed := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.example.com")
+				seed.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+				seed.EncryptCAKey = true
+				seed.KeyPassphrase = ca.KeyPassphraseConfig{PassphraseFile: ppFile}
+				Expect(seed.Init(context.Background())).To(Succeed())
+			}
+
+			cfg := &serverConfig{CADir: dir, EncryptCAKey: true}
+			cfg.CAKeyProvider = provider
+			err := refuseOnMissingPassphrase(context.Background(), &caRuntime{Store: store}, cfg)
+
+			if wantRefusal {
+				Expect(err).To(MatchError(ContainSubstring("no passphrase source is configured")),
+					"without a provider, encryption with no passphrase source cannot start")
+				return
+			}
+			Expect(err).NotTo(HaveOccurred(),
+				"a key at a provider has no local PEM to encrypt or decrypt")
+		},
+		Entry("openbao, nothing stored locally", "openbao", false, false),
+		Entry("openbao, a stale encrypted PEM left behind", "openbao", true, false),
+		Entry("no provider, nothing stored: still refused", "", false, true),
+		Entry("explicit file provider, nothing stored: still refused", "file", false, true),
+	)
+
 	// What the preflight does when the store opened but cannot then say whether
 	// it holds a CA key, or cannot hand it over. It falls back to the setting,
 	// deliberately and as documented on refuseOnMissingPassphrase: the store
