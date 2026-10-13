@@ -187,6 +187,13 @@ behaviour".
 By default, the CA private key is stored as unencrypted PEM at `<cadir>/private/ca_key.pem`.
 Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an Argon2id-derived key.
 
+That path is the filesystem backend's. On the other backends the key is a blob
+in the store instead — unless `ca_key_file` pins it to a local file. The
+encryption below is applied before the key reaches the store, so it protects it
+on every backend; failing that, what protects it at rest is whatever protects
+the store itself. For SQLite that is the mode of the database file and its
+sidecars; see [storage backends](storage-backends.md#sqlite-backend).
+
 ### How it works
 
 - The private key is marshalled to PKCS#8 DER, then encrypted with AES-256-GCM.
@@ -196,18 +203,43 @@ Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an A
 
 ### Passphrase resolution order
 
-1. **`--ca-key-passphrase-file`:** reads the first line of the specified file.
-2. **`PUPPET_CA_KEY_PASSPHRASE`** environment variable: avoids CLI `/proc/cmdline` exposure.
+There are two sources, and you must configure one:
+
+1. **`--ca-key-passphrase-file`** / `ca_key_passphrase_file`: reads the first
+   line of the specified file.
+2. **`PUPPET_CA_KEY_PASSPHRASE`** environment variable: avoids CLI
+   `/proc/cmdline` exposure.
    Under the default process split only the signer child receives it; see
    [process isolation](#process-isolation).
-3. **Auto-generated:** if no passphrase source is configured, a cryptographically random
-   passphrase is generated and saved to `<cadir>/private/.ca_key_passphrase` (mode `0600`).
-   The path is logged at startup so operators know where it is.
+
+With `encrypt_ca_key` set and neither configured, the server **refuses to
+start**. It does not generate a passphrase for you.
+
+It used to, writing a random one to `<cadir>/private/.ca_key_passphrase` — beside
+the key it protects. That made the guarantee at the top of this page false for
+the default configuration: encryption at rest is protection against a copied
+backup, disk image or snapshot, and a copy of the cadir carried the ciphertext
+and the passphrase together. Anyone holding the copy held both halves.
+
+A passphrase file readable by every local account makes the server **refuse to
+start** as well, whichever backend you run: it unlocks the encrypted key, so
+world access to it is world access to the key. Group access is reported and does
+not stop the CA. `insecure_allow_world_readable_keys` downgrades the world-access
+refusal to a loud warning — it does not cover a missing passphrase source, which
+is not a risk to be weighed but a configuration that cannot proceed. The
+permission check and its remedy are described in full under [the filesystem
+backend](storage-backends.md#filesystem-backend-default).
+
+Worth being precise about what this protects, because the two are easy to
+conflate: encryption at rest defends **copies** of the stored key — a backup, a
+snapshot, a restored tarball. It does not defend the key from the service user,
+which has to be able to decrypt it in order to sign. A passphrase the CA can
+read unattended is a passphrase an attacker who is already that user can read.
 
 ### Example usage
 
 ```bash
-# Bootstrap with encryption (auto-generated passphrase):
+# Bootstrap with encryption. A passphrase source is required: this refuses.
 openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
 
 # Bootstrap with an explicit passphrase file:
@@ -220,15 +252,24 @@ openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key \
 export PUPPET_CA_KEY_PASSPHRASE="my-secret-passphrase"
 openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
 
-# openvox-ca-ctl setup also supports encryption:
-openvox-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key
+# openvox-ca-ctl setup also supports encryption, and needs a source just the
+# same. It reads PUPPET_CA_KEY_PASSPHRASE from the environment, so the line
+# above would carry it; named here instead, because a command copied out of a
+# block should not depend on what came before it:
+openvox-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key \
+  --ca-key-passphrase-file /etc/puppet-ca/key-passphrase
 ```
 
 ### Backward compatibility
 
-Existing CAs with unencrypted keys continue to work without changes. The `--encrypt-ca-key`
-flag only affects new CA bootstraps. Loading transparently handles both encrypted and
-unencrypted PEM files.
+Existing CAs with unencrypted keys continue to work without changes, and
+`--encrypt-ca-key` affects new CA bootstraps only: it does not re-encrypt a key
+that already exists.
+
+Loading handles both encrypted and unencrypted PEM files, deciding from the PEM
+itself rather than from the setting. An encrypted key therefore needs its
+passphrase whether or not `encrypt_ca_key` is still set, and the server says so
+by name if it cannot find one.
 
 ### Security considerations
 

@@ -106,11 +106,64 @@ func validateKey(key string) error {
 	return nil
 }
 
-// KeyPermWarning describes a stored blob whose on-disk permissions are
-// looser than expected. Only the filesystem backend produces warnings.
+// KeyPermWarning describes a file holding key material whose on-disk
+// permissions are looser than expected.
 type KeyPermWarning struct {
 	Path string
 	Mode os.FileMode
+
+	// Unreadable marks a path whose permissions could not be established at all
+	// -- an unreadable parent directory, an I/O error, a symlink whose target
+	// cannot be resolved. Mode is meaningless when this is set.
+	//
+	// It is a distinct state rather than a pessimistic Mode because the two need
+	// different things said about them: "world-accessible, chmod o-rwx" is a
+	// remedy, and printing it for a path that is actually 0000 sends the
+	// operator to run a command that changes nothing and leaves the next start
+	// refusing identically.
+	Unreadable bool
+
+	// Err is why the path could not be judged, for the operator to act on. Set
+	// only when Unreadable is.
+	Err error
+}
+
+// WorldAccessible reports whether this finding should be refused: either the
+// mode grants access to users outside the owner and the group, or the path
+// could not be judged at all.
+//
+// The second half is as much the contract as the first, and is stated here
+// rather than only in the body because a caller reading the rendered godoc has
+// to know it: a permission this process cannot read is not one it may assume is
+// safe, so an unjudgeable path counts as world-accessible and callers refuse by
+// default. Mode is meaningless when Unreadable is set. Callers that can say
+// something better about that case -- naming the path as unreadable rather than
+// as world-readable -- test Unreadable first, and all of them do.
+//
+// World access means every local account can read the CA private key, and is
+// refused. Group access is tolerated: a Kubernetes fsGroup reapplies it at
+// every mount whatever a file was created as, so refusing on it would make the
+// most common containerised deployment unserveable through no act of the
+// operator's.
+func (w KeyPermWarning) WorldAccessible() bool {
+	return w.Unreadable || w.Mode&0o007 != 0
+}
+
+// KeyFileLister is an optional capability for backends that keep key material
+// in files of their own, outside the local private-key directory
+// StorageService already scans. The SQLite backend implements it: its database
+// holds the CA key as a blob, and the sidecars beside it hold page images of
+// the same rows.
+// A wrapper backend is reached through asKeyFileLister rather than a bare type
+// assertion, for the reason the other capability probes are: a bare assertion on
+// a wrapper that does not forward the method reports "no key files" rather than
+// failing, and a permission check that silently has nothing to judge is the one
+// failure mode this check cannot afford. OverlayBackend does forward it today,
+// so nothing is broken; this is about the next wrapper.
+type KeyFileLister interface {
+	// KeyFilePaths returns the files that may contain key material. Paths that
+	// do not exist are permitted and ignored by the caller.
+	KeyFilePaths() []string
 }
 
 // Backend is the pluggable storage abstraction that StorageService delegates
@@ -300,6 +353,21 @@ type CertIndex interface {
 	// bearing serial. Used to backfill rows created from projection-less
 	// sources (legacy inventory blobs, direct AppendLine writes).
 	SetProjection(ctx context.Context, serial string, proj CertProjection) error
+}
+
+// asKeyFileLister probes b for the KeyFileLister capability, unwrapping wrapper
+// backends the same way asCertIndex does.
+func asKeyFileLister(b Backend) (KeyFileLister, bool) {
+	for {
+		if l, ok := b.(KeyFileLister); ok {
+			return l, true
+		}
+		unwrapper, ok := b.(interface{ Unwrap() Backend })
+		if !ok {
+			return nil, false
+		}
+		b = unwrapper.Unwrap()
+	}
 }
 
 // asCertIndex probes b for the CertIndex capability, unwrapping wrapper

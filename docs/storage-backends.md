@@ -227,10 +227,39 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 > [storage internals](development/storage-internals.md).
 
 (The directory also holds small internal integrity files; leave them in place.)
-File permissions are fixed: `0600` for anything under `private/` and for the
-lock files under `locks/`, `0644` for everything else. `openvox-ca` warns at startup about any `*_key.pem` in
-`private/` whose permissions are looser than `0600` and leaves them for you to
-fix.
+File permissions are fixed: `0600` for anything under `private/`, for the CRL,
+for the pending-supersession list, for the inventory and for the lock files
+under `locks/`; `0644` for the public data — issued certificates and CSRs. The
+blob modes are set on each file as it is created and your umask cannot widen
+them; the lock files and the directories are created at these modes and a
+tighter umask narrows them further.
+
+`openvox-ca` never changes the mode of a file it did not create, so anything
+already on disk is left as you have it — but it does check its key material at
+startup. That is every file under `private/` — the CA key, the per-subject
+`*_key.pem` keys and the inventory-integrity key alike, because that directory
+holds secrets by construction — plus a `ca_key_passphrase_file` you point it
+at. A file readable by every local account
+makes it **refuse to start**, naming the file and the `chmod` that fixes it; one
+readable only by its group is reported at `Info` and does not stop the CA.
+
+Group access here is not something `openvox-ca` created. Everything it writes
+under `private/` on this backend is `0600`, so a group-readable key in a
+filesystem cadir came from the deployment — a Kubernetes `fsGroup` ORing group
+access into the mounted volume at every mount, or somebody's `chmod`. It is
+tolerated rather than expected, because those are legitimate deployments and the
+CA cannot tell from the inside whether that group has members other than itself.
+(On the SQLite backend the store genuinely is created group-accessible; that is
+described [below](#sqlite-backend).)
+`insecure_allow_world_readable_keys` downgrades the refusal to a loud warning if
+you need the CA running in order to fix the thing it is refusing over.
+
+There is a second refusal, and the opt-out does not cover it: a path holding key
+material whose permissions could not be read **at all**. The CA names the path
+and the underlying error and stops. The usual cause is a parent directory the CA
+user cannot search. It is separate because it is a different condition with a
+different remedy — `chmod o-rwx` clears nothing here — and the opt-out says "I
+have weighed this risk", which nobody can have done for a mode nobody knows.
 
 `locks/` holds lock files, not CA state — named after a hash of the lock rather
 than anything readable. They are how a second process on the same host is kept
@@ -619,6 +648,20 @@ sql_migration_timeout_sec: 600           # whole schema-migration run (default 6
 locking, a busy timeout) unless you set them yourself, so writers wait rather
 than failing under contention.
 
+A `file:` DSN is read as a URI, so its `%HH` escapes are decoded: `file:ca%20b.db`
+names a database called `ca b.db`, and a path containing a literal `%` has to be
+written `%25`. A DSN that cannot be read is refused at startup rather than left
+unprotected — openvox-ca has to know which file the driver will open in order to
+create it safely and to check its permissions later. There are two such
+refusals, so you can search for whichever you see: `reading sqlite dsn ...` when
+the DSN is not a URI at all, and `reading the database path out of sqlite dsn
+...` when it is but its escapes cannot be decoded.
+
+`mode=memory` is honoured only in the `file:` form, which is the only place
+SQLite honours it. On a bare path (`/var/lib/puppet-ca/ca.db?mode=memory`) the
+driver creates the file anyway, so openvox-ca protects and checks it like any
+other database.
+
 ```text
 --storage-backend sqlite
 --sql-dsn         file:/var/lib/puppet-ca/ca.db
@@ -627,7 +670,89 @@ than failing under contention.
 **Operational notes.** The database file *is* the CA — back it up (with its WAL
 sidecar) the way you would a cadir tree. The CA private key lives in the
 database by default; enable `encrypt_ca_key` or pin it to a local file with
-`ca_key_file`. `openvox-ca-ctl setup` / `import` work on the local filesystem
+`ca_key_file`.
+
+Because the key is in there, `openvox-ca` creates the database without any
+access for users outside its owner and group, and the sidecars SQLite maintains
+beside it (`-wal`, `-shm`, `-journal`) inherit that: SQLite takes their mode from
+the database when it creates them. The sidecars matter as much as the database —
+a committed page sits in the WAL until a checkpoint moves it, so which file holds
+the key at a given moment is a matter of checkpoint timing.
+
+Your umask still applies and can narrow it further: `0022` gives `0640`, `0077`
+gives `0600`. What it cannot do is widen it, so the database is never created
+world-readable however the process is launched.
+
+Group access is deliberately allowed, so that a store owned by a Unix group is
+reachable by that group without the CA widening anything afterwards — which it
+will not do, since it never changes the mode of a file it did not create. If you
+do not want it, set a umask: `0077` gives `0600` and nothing in the server
+objects.
+
+Two things that group bit does **not** do, since both have been claimed for it
+here before. It is not what makes a Kubernetes `fsGroup` volume work: the
+kubelet ORs group access in at every mount whatever the file was created as, so
+there the creation mode is irrelevant. And it is not enough to make an
+arbitrary-uid platform work — one assigning the pod a fresh uid per start, such
+as OpenShift. The database would be reachable, but the same restart has to
+reacquire the same-host lock files, and those are created `0600` in a `0750`
+directory, so a new uid fails at the lock before the database mode matters. If
+you run that topology, pin the uid;
+[#493](https://github.com/voxpupuli/openvox-ca/issues/493) tracks what it would
+take to support it.
+
+**`openvox-ca` never changes the mode of a file it did not create.** Not the
+database, not the sidecars, not the directory holding them. A store whose
+permissions are wrong is yours to fix, and the server tells you rather than
+quietly narrowing it.
+
+What it does instead is refuse to start when key material is readable by every
+local account:
+
+```text
+CA key material is world-accessible and readable by every local account
+(/var/lib/puppet-ca/ca.db (mode -rw-r--r--), /var/lib/puppet-ca/ca.db-wal (mode
+-rw-r--r--)); refusing to start -- fix with: chmod o-rwx -- /var/lib/puppet-ca/ca.db
+/var/lib/puppet-ca/ca.db-wal, or set insecure_allow_world_readable_keys to start
+anyway. A key that has been world-readable should be treated as exposed and
+rotated
+```
+
+Every world-accessible file is named, not just the first, so one `chmod` clears
+the condition instead of uncovering the next one on the following start. A key
+every local account could read is one to treat as exposed, so the fix is `chmod
+o-rwx` **and** deciding whether to rotate the CA key.
+
+Group access is reported at `Info`, listing the files, and does not stop the CA.
+On this backend it is the mode the store is created with, so a correct deployment
+has it whether or not Kubernetes is involved. Where that group has
+members other than the CA it is worth acting on, but that is not something the
+server can tell from the inside, which is why it does not shout.
+
+The check runs before the CA is initialised and before any child process is
+forked, so a refusal happens before a key is written into a store that would
+have been refused, and reaches you on the terminal even under `--daemon`.
+
+Setting `insecure_allow_world_readable_keys` downgrades the refusal to a loud
+warning. It exists so a world-readable store cannot lock you out of the CA you
+need running in order to fix it, and it is named for what it is.
+
+A DSN that is a symlink is resolved and works, including one planted before the
+database exists — in that case the database is created at the link's target, not
+at the link. Everything derived from the DSN — the sidecar names, and the
+`.<database>.locks/` directory — comes from the resolved path, so two processes
+reaching one database by different spellings still lock against each other.
+
+Because creation follows the link, the directory holding the DSN path must not
+be writable by untrusted users: whoever can plant a symlink there chooses where
+the database is created. That is the same precondition the sidecars need, for
+the same reason.
+
+The directory holding the database is yours, and `openvox-ca` never changes its
+mode. Anything that copies the database — a backup, a volume snapshot, a restored
+tarball — has to preserve the modes, sidecars included.
+
+`openvox-ca-ctl setup` / `import` work on the local filesystem
 only; bootstrap against a scratch directory, then point a SQLite-backed
 `openvox-ca` at a fresh database.
 
@@ -860,9 +985,16 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
 - `openvox-ca` writes the cert at mode `0644` and the key at mode `0600`
   atomically (temp-file + rename). If you supply pre-existing files, they are
   read as-is and never overwritten unless the server rotates the CA.
+- A supplied `ca_key_file` is checked at startup on **every** backend, like any
+  other file holding key material: world access refuses startup, group access is
+  reported at `Info`. Where the path is a read-only mount — a Kubernetes Secret
+  volume — `chmod` will not work and the fix belongs in the volume, as
+  `defaultMode: 0600`.
 - Existing protections still apply: `encrypt_ca_key` encrypts the key PEM
-  before writing, and `ca_key_passphrase_file` overrides the auto-generated
-  passphrase file.
+  before writing, and `ca_key_passphrase_file` is where its passphrase comes
+  from. There is no default source: with `encrypt_ca_key` set and neither
+  `ca_key_passphrase_file` nor `PUPPET_CA_KEY_PASSPHRASE` configured, the
+  server refuses to start.
 
 This override also works with the filesystem backend, e.g. to pull the CA
 key out of the cadir tree and onto a separately-mounted volume.

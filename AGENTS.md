@@ -291,6 +291,60 @@ the inventory, in-memory caches) must follow
   pairs by lock name rather than (store, name), so that path is out of its scope
   by design — locking.md carries it in prose and the table must not gain it.
 
+## File permissions: create narrow, never correct
+
+**A file that can contain key material is never created with world access, and
+openvox-ca never changes the mode of a file it did not create.**
+
+Two halves, and both matter:
+
+- **Creation.** Anything holding key material is created with no world bits and
+  otherwise follows the operator's umask, where the umask applies at all. The
+  private-key writes pass `FilePermPrivate` (0600) explicitly; the SQLite
+  database is created by `createSQLiteDatabase` with `O_EXCL` at
+  `sqliteFilePermCreate` (0660) before the driver opens it, because SQLite fixes
+  the `-wal`/`-shm`/`-journal` modes from the database at creation and never
+  revisits them. `AtomicWriteFile` and `AppendLine` set the mode on the
+  descriptor *after* creating it, so for those two the blob kind decides the
+  mode outright and the umask does not narrow it either — with one exception
+  the code names and this rule has to as well: `AppendLine`'s fallback for a
+  dangling symlink creates through the link with no chmod, at the umask. The
+  umask-narrows rule above is about the paths that pass a mode to `O_CREATE` —
+  the SQLite database and the private-key writes.
+- **Never correcting.** No `chmod` of an existing file, no `chown`, ever. Group
+  access is legitimate — a Kubernetes `fsGroup` ORs it back into the volume at
+  every mount, so a store that arrives group-accessible did so without the
+  operator doing anything — and `chmod(2)` needs ownership, so tightening would
+  fail EPERM wherever the uid has changed since the file was written. An earlier
+  revision of the change that became this policy held a chmod primitive, and
+  every defect five review rounds found existed because of it — the issue (#351)
+  asked for the exposure to be fixed and said nothing about how, so it is the
+  revision that is the lesson here.
+
+  Do not extend that reasoning into a claim that group access makes an
+  arbitrary-uid platform work. It does not: such a restart also has to
+  reacquire the same-host lock files, which are created 0600 in a 0750
+  directory, so it fails at the lock whatever the data files allow
+  ([#493](https://github.com/voxpupuli/openvox-ca/issues/493)). That claim was
+  in this section, in `internal/storage/sql.go`, in `backend.go`, in
+  `filesystem.go`, in `docs/storage-backends.md` and twice in
+  `internal/storage/sql_sqlite_perms_test.go`, and was wrong in all seven —
+  which is the more useful lesson: a rationale swept into every site that
+  mentions a mode is a rationale no single review will catch. The sweep that
+  withdrew it first reported five, because it excluded `_test.go` files and then
+  read its own result as complete. A comment in a spec states the contract the
+  spec defends, so it is documentation: sweep it with the rest.
+
+What replaces correction is a check: `StorageService.CheckKeyPermissions` judges
+every file under the local private-key directory, every path a backend declares
+through the optional `KeyFileLister` capability, and any path the caller names.
+World access refuses startup; group access is reported and tolerated; a path
+whose mode cannot be read refuses separately, and the
+`insecure_allow_world_readable_keys` opt-out deliberately does not cover it.
+
+A new writer of key material owes an explicit mode. A new check does not owe a
+chmod.
+
 ## Logging: `log/slog` only
 
 **Non-test code logs through `log/slog`.** This is a hard convention — do not

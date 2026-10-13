@@ -182,7 +182,7 @@ func resolveRuntime(ctx context.Context, cfg *serverConfig, withKeyProvider bool
 	rt.Store = store
 	rt.storeClosers = append(rt.storeClosers, store.Backend().Close)
 
-	if withKeyProvider && cfg.UsesOpenBao() {
+	if withKeyProvider && keyLivesAtProvider(cfg) {
 		closeSession, provider, err := newKeyProvider(ctx, cfg)
 		if err != nil {
 			_ = rt.Close()
@@ -237,6 +237,150 @@ func preflightInstanceLock(ctx context.Context, cfg *serverConfig) error {
 	return ul.Unlock()
 }
 
+// preflightKeyMaterial opens the store and raises, in the parent, every refusal
+// about the CA's key material that would otherwise be raised too late to be
+// seen. Two of them today: the permissions of everything holding key material,
+// and whether the passphrase this CA will need can be resolved at all.
+//
+// They are one function because they share one store open and, more to the
+// point, the same two reasons for being here rather than in CA.Init -- the
+// passphrase refusal was added to Init without them, and the result was an
+// operator being told the CA had started when it could never start.
+//
+// It runs in the parent, before the role dispatch, for two reasons that both
+// have to hold:
+//
+//   - **Before anything writes a key.** On the default topology the signer
+//     child is what bootstraps the CA, so a check placed after CA.Init would
+//     mint a fresh private key into an already world-accessible store and only
+//     then decline to serve it. The exposure would have happened on disk before
+//     the refusal was printed.
+//   - **Where there is still somewhere to print.** `--daemon` discards the
+//     child's stderr, so a refusal raised past the fork reaches nobody: the
+//     operator is told "started in background", gets exit 0, and watches the
+//     CA never come up. Same reasoning as preflightInstanceLock above, and the
+//     same remedy.
+//
+// The store is opened and closed again; the children open it for themselves.
+//
+// ca_key_passphrase_file is handed in because nothing in the store knows it
+// exists: it is a secret the operator names in the server's configuration, and
+// it unlocks the encrypted CA key, so world access to it is the same finding as
+// world access to the key.
+//
+// CodeQL reports this argument, and the reports are dismissed rather than fixed.
+// go/clear-text-logging traces cfg.CAKeyPassphraseFile to the slog calls in
+// logKeyPermissions and calls it a secret reaching a log. What it has is the
+// field *name*: the value is a path. CheckKeyPermissions reaches it with
+// Lstat/Stat and never opens it, and KeyPermWarning carries only Path, Mode,
+// Unreadable and Err -- so no file contents exist anywhere in the flow to leak.
+// Naming the file is the whole point of the message, since the operator has to
+// chmod it.
+//
+// Dismissed per alert (#62, #64-#67, all "false positive") rather than excluded
+// by rule in .github/codeql/codeql-config.yml. That file excludes
+// go/log-injection and states the standard an exclusion has to meet: it is only
+// as good as the invariant beneath it, and it is silent where a dismissal is at
+// least visible. go/log-injection has that invariant, enforced by a depguard
+// rule and a spec. This has none to offer -- the argument here is about four
+// call sites, not about a whole rule being mismodelled -- and excluding
+// go/clear-text-logging would silence a real passphrase-content leak for ever.
+//
+// If this function or logKeyPermissions is reshuffled enough for CodeQL to file
+// the alerts afresh, they come back: dismissals attach to alerts, not to code.
+// Re-dismiss with the reasoning above rather than reaching for the exclusion.
+//
+// The findings come back with the error so the caller can log them once a logger
+// exists. Nothing is logged here: at this point in startup the default handler is
+// still Go's own, so a record emitted now would miss a configured logfile.
+// The role is taken as an argument rather than read from the environment here,
+// and it decides only the passphrase half. The permission check runs for every
+// role: each process judges the store it is about to use, because a verdict
+// cannot be inherited across an execve.
+//
+// The passphrase half asks roleMayReachCAKey, which is the same predicate that
+// decides whether a process is handed a key provider at all. A process that may
+// not reach the CA key never decrypts it, so demanding a passphrase from it
+// refuses a configuration that is not only valid but better: the frontend
+// proxies every signature to the signer over IPC and has no use for the secret.
+// Requiring one there would be a credential demanded of a process specifically
+// forbidden from using it.
+//
+// That matters beyond tidiness. #477 removes the passphrase variable from the
+// frontend child's environment, which is the right thing for it to do, and with
+// an unconditional check here the frontend would refuse to start and take the
+// whole CA down with it on a passphrase supplied only through the environment.
+// Neither change is wrong alone and the two do not touch the same lines, so
+// nothing would have surfaced it at merge time; integration found it by running
+// the server. Asking the predicate rather than naming the frontend is what keeps
+// the two gates from drifting: a later role that does not hold the key inherits
+// the right behaviour without anybody remembering this.
+func preflightKeyMaterial(ctx context.Context, cfg *serverConfig, role string) ([]storage.KeyPermWarning, error) {
+	rt, err := resolveRuntime(ctx, cfg, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rt.Close() }()
+
+	warnings := rt.Store.CheckKeyPermissions(cfg.CAKeyPassphraseFile)
+	if err := refuseOnKeyPermissions(warnings, cfg.InsecureAllowWorldReadableKeys); err != nil {
+		return warnings, err
+	}
+	if !roleMayReachCAKey(role) {
+		return warnings, nil
+	}
+	return warnings, refuseOnMissingPassphrase(ctx, rt, cfg)
+}
+
+// refuseOnMissingPassphrase refuses when the CA will need a key passphrase and
+// no source for one is configured.
+//
+// Whether it will need one is a question about the stored key, not about
+// encrypt_ca_key: loadCAKeyFromDisk resolves a passphrase whenever the stored
+// PEM is an encrypted block, so an operator who turns encrypt_ca_key off while
+// the key on disk stays encrypted still needs one, and an operator whose stored
+// key is plaintext does not need one even with the setting on. Reading the key
+// is therefore the only way to ask the question the server will actually ask;
+// a check written as "if cfg.EncryptCAKey" would pass here and then die past
+// the fork for the one case it did not cover.
+//
+// A store that cannot say whether it has a key, or cannot hand it over, falls
+// back to the setting. That is deliberately not fail-closed: the store opened
+// cleanly a moment ago, so a read error here is a transient fault rather than a
+// missing passphrase, and refusing startup over it would invent an outage.
+// CA.Init reaches the same blob immediately afterwards and reports the real
+// error precisely, which is the better diagnostic for that case.
+func refuseOnMissingPassphrase(ctx context.Context, rt *caRuntime, cfg *serverConfig) error {
+	// A CA whose key lives at a provider never resolves a passphrase: CA.Init
+	// loads it through KeyProvider.Load, bootstraps it through
+	// KeyProvider.Generate, and skips the local save altogether, so there is no
+	// PEM to encrypt or decrypt and encrypt_ca_key has nothing to act on. A
+	// stored local PEM is ignored too, for the same reason.
+	//
+	// Without this the preflight refused a configuration that starts today --
+	// `ca_key_provider: openbao` with `encrypt_ca_key: true` left over and no
+	// passphrase source -- and told the operator to supply a passphrase that
+	// would never be used. Nothing rejects that pair at configuration time, and
+	// the chart cannot produce it, so it is a hand-configured store that has
+	// moved to a provider and kept the flag.
+	//
+	// keyLivesAtProvider is the predicate resolveRuntime uses to decide whether
+	// to construct a provider at all, so the two cannot disagree: this runs with
+	// resolveRuntime(ctx, cfg, false), where rt.KeyProvider is always nil and
+	// therefore cannot be the test.
+	if keyLivesAtProvider(cfg) {
+		return nil
+	}
+
+	var keyPEM []byte
+	if has, err := rt.Store.HasCAKey(ctx); err == nil && has {
+		if pem, err := rt.Store.GetCAKey(ctx); err == nil {
+			keyPEM = pem
+		}
+	}
+	return ca.CheckKeyPassphrase(keyPassphraseConfig(cfg), rt.Store.CADir(), cfg.EncryptCAKey, keyPEM)
+}
+
 // holdInstanceLock takes the store's instance lock and ties its release to rt,
 // for callers that already hold a runtime.
 //
@@ -287,6 +431,19 @@ func holdInstanceLock(ctx context.Context, rt *caRuntime, opts ...storage.Instan
 // while handing the frontend an authenticated session to the key backend.
 func resolveRuntimeForRole(ctx context.Context, cfg *serverConfig, role string) (*caRuntime, error) {
 	return resolveRuntime(ctx, cfg, roleMayReachCAKey(role))
+}
+
+// keyLivesAtProvider reports whether this configuration keeps the CA key at a
+// key provider rather than as a local PEM blob reached through the store.
+//
+// One predicate with two callers, and the second is why it is named:
+// resolveRuntime uses it to decide whether to construct a provider, and the
+// pre-fork passphrase preflight uses it to decide whether a passphrase can be
+// needed at all. Written out separately in each, a provider added to one and
+// not the other would have the preflight demand a passphrase that CA.Init never
+// asks for -- the shape of defect it was extracted to prevent.
+func keyLivesAtProvider(cfg *serverConfig) bool {
+	return cfg.UsesOpenBao()
 }
 
 // roleMayReachCAKey reports whether a process running as role is permitted to
