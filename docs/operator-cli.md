@@ -367,11 +367,11 @@ knowing before you ask the parent to sign rather than after:
   the bundle has been written and served.
 - **The leading certificate must bind an RSA or ECDSA key.** `csr --create-key`
   only creates those, but a key placed in storage by hand can be anything, an
-  Ed25519 key included, and `csr` refuses to build a request for one. The isolated signer makes only SHA-256, SHA-384 and
-  SHA-512 signatures, and an Ed25519 key signs with no hash, so such a CA could
-  not sign at all in the default topology; see
-  [CA key security](ca-key-security.md#process-isolation). `--out` applies this
-  rule too.
+  Ed25519 key included, and `csr` refuses to build a request for one. The
+  isolated signer makes only SHA-256, SHA-384 and SHA-512 signatures, and an
+  Ed25519 key signs with no hash, so such a CA could not sign at all in the
+  default topology; see [CA key security](ca-key-security.md#process-isolation).
+  `--out` applies this rule too.
 
 The command never needs the private key *material*: it proves the certificate
 binds the key the configured `ca_key_provider` holds, which is what makes
