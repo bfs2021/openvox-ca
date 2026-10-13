@@ -681,12 +681,20 @@ type pullRequestTrigger struct {
 	BranchesIgnore []string `yaml:"branches-ignore"`
 }
 
-// nolintlintCarveOutPin is the golangci-lint version the nolintlint carve-out
-// in .golangci.yml was reasoned against. The carve-out exists because gosec
-// v2.28.0, which that release pins, walks a randomly ordered caller-edge list
-// and truncates it at 32 (securego/gosec#1712); securego/gosec#1733 fixes that
-// upstream but is in no gosec release yet. See openvox-ca#313.
-const nolintlintCarveOutPin = "v2.13.2"
+// nolintlintCarveOutPins are the golangci-lint versions the nolintlint
+// carve-out in .golangci.yml has been reasoned against. The carve-out exists
+// because gosec walks a randomly ordered caller-edge list and truncates it at
+// 32 (securego/gosec#1712); securego/gosec#1733 fixes that upstream but is in
+// no gosec release yet. Each entry was checked to pin a gosec without that
+// fix:
+//
+//   - v2.13.2 pins gosec v2.28.0;
+//   - v2.14.0 pins gosec v2.29.0, still maxCallerEdges = 32 with no sort.
+//
+// An entry stays after the pin has moved past it: the list records every
+// version that was vetted, not only the one CI installs today. See
+// openvox-ca#313.
+var nolintlintCarveOutPins = []string{"v2.13.2", "v2.14.0"}
 
 // nolintlintCarveOutFile is the file the carve-out covers. Exclusion `path`
 // values are regexps, so this is the literal path they are matched against
@@ -885,8 +893,9 @@ func nolintlintCarveOut(golangciSrc []byte) (bool, error) {
 	return true, nil
 }
 
-// verifyNolintlintCarveOut fails once the golangci-lint pin moves while the
-// nolintlint carve-out for filelock.go is still in .golangci.yml.
+// verifyNolintlintCarveOut fails once the golangci-lint pin moves to a version
+// outside nolintlintCarveOutPins while the nolintlint carve-out for filelock.go
+// is still in .golangci.yml.
 //
 // The carve-out is temporary and its removal condition is a golangci-lint
 // release carrying a fixed gosec. Nothing else would notice that moment: the
@@ -915,7 +924,8 @@ func verifyNolintlintCarveOut() error {
 // any suppression it cannot recognise instead of reading it as removed. On the
 // ci.yml side, a present carve-out MUST yield a parseable pin -- without that,
 // deleting the install line would read as "nothing to check" instead of as
-// drift.
+// drift. And nolintlintCarveOutPinAccepted refuses an empty list of vetted
+// versions rather than treating it as having nothing to compare.
 func verifyNolintlintCarveOutIn(golangciSrc, ciSrc []byte) error {
 	present, err := nolintlintCarveOut(golangciSrc)
 	if err != nil {
@@ -933,16 +943,31 @@ func verifyNolintlintCarveOutIn(golangciSrc, ciSrc []byte) error {
 			"golangci-lint pin could be read from ci.yml; the carve-out is only safe while the pinned "+
 			"version is known (see openvox-ca#313)", nolintlintCarveOutFile)
 	}
-	if pin := string(m[1]); pin != nolintlintCarveOutPin {
-		return fmt.Errorf("golangci-lint is pinned at %s but the nolintlint carve-out in .golangci.yml "+
-			"was reasoned against %s; check whether %s carries securego/gosec#1733 (taint caller "+
-			"traversal made deterministic). If it does, delete the carve-out from .golangci.yml and "+
-			"verifyNolintlintCarveOut with its specs. If it does not -- the likelier case, since gosec "+
-			"must cut a release and golangci-lint must then pin it -- update nolintlintCarveOutPin to %s "+
-			"and leave the carve-out in place. See openvox-ca#313",
-			pin, nolintlintCarveOutPin, pin, pin)
+	return nolintlintCarveOutPinAccepted(string(m[1]), nolintlintCarveOutPins)
+}
+
+// nolintlintCarveOutPinAccepted reports whether pin is one of the versions the
+// carve-out has been reasoned against. An empty list is refused in its own
+// right rather than left to fall through the membership test: a list nobody
+// vouches for is not a vetted set, whatever the comparison below happens to do
+// with it.
+func nolintlintCarveOutPinAccepted(pin string, pins []string) error {
+	if len(pins) == 0 {
+		return fmt.Errorf("the nolintlint carve-out for %s is still in .golangci.yml, but "+
+			"nolintlintCarveOutPins lists no golangci-lint versions it was reasoned against; the "+
+			"carve-out is only safe while the pinned version is one that has been checked (see "+
+			"openvox-ca#313)", nolintlintCarveOutFile)
 	}
-	return nil
+	if slices.Contains(pins, pin) {
+		return nil
+	}
+	return fmt.Errorf("golangci-lint is pinned at %s but the nolintlint carve-out in .golangci.yml "+
+		"was reasoned only against %s; check whether %s carries securego/gosec#1733 (taint caller "+
+		"traversal made deterministic). If it does, delete the carve-out from .golangci.yml and "+
+		"verifyNolintlintCarveOut with its specs. If it does not -- the likelier case, since gosec "+
+		"must cut a release and golangci-lint must then pin it -- add %s to nolintlintCarveOutPins "+
+		"and leave the carve-out in place. See openvox-ca#313",
+		pin, strings.Join(pins, ", "), pin, pin)
 }
 
 // verifyWorkflowBaseScoping runs both base-scoping guards over the real

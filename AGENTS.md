@@ -38,10 +38,12 @@ a prebuilt binary compiled against an older Go can panic when analysing newer
 language constructs.
 
 That pin currently has a second reader. While the temporary `nolintlint`
-carve-out for `internal/storage/filelock.go` is in `.golangci.yml`,
-`nolintlintCarveOutPin` in `magefile.go` must hold the same version, and
-`mage dev:check` fails when the two disagree — so a Renovate bump of the pin is
-a deliberate decision, not a rubber stamp. The failure names both remedies.
+carve-out for `internal/storage/filelock.go` is in `.golangci.yml`, the pin
+must be one of the versions listed in `nolintlintCarveOutPins` in
+`magefile.go`, and `mage dev:check` fails when it is not — so a Renovate bump
+of the pin is a deliberate decision, not a rubber stamp. The failure names both
+remedies. Add a version to the list only after checking that the gosec it pins
+still lacks securego/gosec#1733.
 Delete this paragraph when the carve-out goes, along with the rule itself, the
 guard and its specs, and the note above the first `//nolint:gosec` directive in
 `internal/storage/filelock.go`;

@@ -361,40 +361,65 @@ linters:
           - staticcheck
         text: "QF1008"
 `)
-		ci := []byte("      - name: Install golangci-lint\n" +
-			"        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@" +
-			nolintlintCarveOutPin + "\n")
+		pinnedAt := func(pin string) []byte {
+			return []byte("      - name: Install golangci-lint\n" +
+				"        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@" +
+				pin + "\n")
+		}
+		ci := pinnedAt(nolintlintCarveOutPins[0])
 		// Deliberately unreachable rather than the next plausible release.
 		// The event this guard exists for is a renovate bump, and the
-		// documented remedy is to set nolintlintCarveOutPin to the new pin --
-		// so a fixture spelling "the next version" would one day equal the
-		// constant, bytes.Replace would find nothing, and the specs built on
-		// it would silently change meaning.
+		// documented remedy is to add the new pin to nolintlintCarveOutPins --
+		// so a fixture spelling "the next version" would one day be in the
+		// list, and the specs built on it would silently change meaning.
 		const movedPin = "v99.0.0"
-		moved := bytes.Replace(ci, []byte(nolintlintCarveOutPin), []byte(movedPin), 1)
+		moved := pinnedAt(movedPin)
 
-		It("accepts the carve-out while the pin is the one it was reasoned against", func() {
-			Expect(verifyNolintlintCarveOutIn(carveOut, ci)).To(Succeed())
-		})
+		// One entry per vetted version, generated from the list itself, so
+		// that every version added is exercised and a guard comparing against
+		// only one of them fails here.
+		pinEntries := make([]TableEntry, 0, len(nolintlintCarveOutPins))
+		for _, pin := range nolintlintCarveOutPins {
+			pinEntries = append(pinEntries, Entry(pin, pin))
+		}
+		DescribeTable("accepts the carve-out while the pin is one it was reasoned against",
+			func(pin string) {
+				Expect(verifyNolintlintCarveOutIn(carveOut, pinnedAt(pin))).To(Succeed())
+			},
+			pinEntries,
+		)
 
 		// The whole point: the pin moves in an auto-merged renovate PR, and
 		// nothing else in the repository would notice the carve-out had
-		// outlived its justification.
+		// outlived its justification. Every vetted version is named, so the
+		// reader can see what the new pin is being compared with.
 		It("rejects a moved pin while the carve-out is still present", func() {
-			Expect(verifyNolintlintCarveOutIn(carveOut, moved)).To(MatchError(
+			err := verifyNolintlintCarveOutIn(carveOut, moved)
+			Expect(err).To(MatchError(
 				And(ContainSubstring(movedPin),
-					ContainSubstring(nolintlintCarveOutPin),
 					ContainSubstring("securego/gosec#1733"),
 					ContainSubstring("openvox-ca#313"))))
+			for _, pin := range nolintlintCarveOutPins {
+				Expect(err.Error()).To(ContainSubstring(pin))
+			}
 		})
 
 		// Both remedies must be on offer. Deleting the carve-out is the wrong
 		// one on the likelier branch, and it is the one the reader reaches for
 		// when the message names no other.
-		It("names updating the constant as well as deleting the carve-out", func() {
+		It("names adding the pin to the list as well as deleting the carve-out", func() {
 			Expect(verifyNolintlintCarveOutIn(carveOut, moved)).To(MatchError(
 				And(ContainSubstring("delete the carve-out"),
-					ContainSubstring("update nolintlintCarveOutPin"))))
+					ContainSubstring("add "+movedPin+" to nolintlintCarveOutPins"))))
+		})
+
+		// The floor on the list itself. An empty list is not a vetted set, so
+		// it is refused as such rather than reported as an unvetted pin --
+		// whose remedy, "add the pin", would hide that the list was emptied.
+		It("refuses an empty list of vetted versions", func() {
+			Expect(nolintlintCarveOutPinAccepted(nolintlintCarveOutPins[0], nil)).To(MatchError(
+				And(ContainSubstring("lists no golangci-lint versions"),
+					ContainSubstring("openvox-ca#313"))))
 		})
 
 		// The removal outcome this guard exists to make reachable: once the
