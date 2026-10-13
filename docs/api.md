@@ -81,16 +81,20 @@ Nor is either status code a statement about [`puppetca_crl_update_failures_total
   "state": "signed",
   "fingerprint": "AA:BB:...",
   "fingerprints": { "SHA256": "AA:BB:...", "default": "AA:BB:..." },
-  "dns_alt_names": ["agent.example.com"],
-  "subject_alt_names": ["agent.example.com"],
+  "dns_alt_names": ["DNS:agent.example.com"],
+  "subject_alt_names": ["DNS:agent.example.com"],
   "authorization_extensions": {},
-  "serial_number": 7329847239485029341,
+  "serial_number": 211659643165621965746051058369188784120,
   "not_before": "2025-01-01T00:00:00Z",
   "not_after": "2030-01-01T00:00:00Z"
 }
 ```
 
-> **Note:** `serial_number` is the low 64 bits of the certificate's cryptographically random 128-bit serial, returned as a signed int64 for API compatibility. It is omitted for certificates in the `requested` state.
+Fingerprints are uppercase hex pairs and each SAN carries its `DNS:` prefix, as OpenVox Server renders them. The response is checked against OpenVox Server's own: see [Differences from OpenVox Server](#differences-from-openvox-server).
+
+> **Note:** `serial_number` is the certificate's full serial, a random 128-bit value, as a bare JSON number. That is how OpenVox Server sends it. It is omitted for certificates in the `requested` state. The number is exact in the response, but a parser that reads every JSON number as a double — JavaScript's `JSON.parse`, or `jq` before 1.7 — rounds a value this large. Where you need the exact serial, use a parser that keeps the digits (`jq` 1.7 or later does), or read it from the certificate itself.
+>
+> With [`serial_number_format: hex`](configuration.md#serial-number-format) the server sends it instead as a string of uppercase hex bytes separated by colons, `"9F:3C:2A:1B:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:F8"` for the serial above. These are the digits `openssl x509 -noout -serial` prints, with a colon between bytes: padded to whole bytes, with no `00` sign byte when the top bit is set. For a serial longer than 8 bytes, which includes every serial openvox-ca issues, `openssl x509 -noout -text` prints the same bytes in lower case; for a shorter one, such as a certificate imported from a CA with sequential serials, it prints the serial in decimal instead (`10 (0xa)` where this field says `"0A"`). That setting changes the field's JSON type from number to string, so it deliberately departs from OpenVox Server's API, and a client that reads `serial_number` as a number breaks against it. [Revocation by serial](#revocation-by-serial) takes the same digits without the colons.
 
 ### Revocation by serial
 
@@ -326,7 +330,7 @@ was actually revoked — see [Authorization tiers](#authorization-tiers).
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/expirations` | CA cert and CRL expiry dates. The CRL date is **this CA's own CRL (block 0) only** — imported ancestor CRLs are not reflected, so an ancestor can be past its `nextUpdate` while this reports a comfortable date. See [metrics](metrics.md#crl) |
+| `GET` | `/expirations` | CA certificate and CRL expiry dates. `ca-certs` maps the subject CN of every certificate in the CA bundle to its `notAfter`, and `crls` maps the issuer CN of every CRL in the published chain to its `nextUpdate`, as OpenVox Server does; a CN that appears twice keeps the last. `ca_certificate.expiration` and `ca_crl.next_update` are openvox-ca's own: the latter is **this CA's own CRL (block 0) only**, so an ancestor can be past its `nextUpdate` while it reports a comfortable date. Read `crls` for the whole chain, or see [metrics](metrics.md#crl). The route still answers `200` when it cannot read them: if the CA bundle cannot be read or parsed, `ca-certs` lists this CA alone, and if the CRL chain cannot be read, holds no CRL, or any CRL in it fails to parse, `crls` is `{}` and `ca_crl.next_update` is empty. Each failure is logged; alert on the metrics rather than on an empty map |
 
 ## Server-side key generation
 
@@ -374,7 +378,7 @@ Response:
 { "subject": "legacy-node.example.com", "serial": "1A2B3C4D5E6F", "not_before": "2020-01-01T00:00:00Z", "not_after": "2025-01-01T00:00:00Z", "imported": true }
 ```
 
-`serial` is uppercase hex (matching the inventory/CRL/OCSP convention), unlike the decimal `serial_number` field in certificate status responses (which is decimal only to preserve the full 128-bit value without int64 truncation — a constraint that doesn't apply to this string field).
+`serial` is uppercase hex without separators, matching the inventory/CRL/OCSP convention. It is not the `serial_number` field of certificate status responses, which is a JSON number by default, as OpenVox Server sends it.
 
 ## OCSP
 
@@ -573,3 +577,42 @@ No *new* `pp_cli_auth` grant can be requested through this API: authorization-ar
 An existing holder can still obtain a *fresh certificate* carrying the grant, because renewal preserves authorization-arc OIDs deliberately, with or without a CSR (see [Certificate renewal](#certificate-renewal) above). That is not an escalation — it requires already holding one — but it does mean a compromised admin credential can renew itself into a new serial and a new validity window, and through the CSR path onto a new key, which is why withdrawing one is not simply a matter of waiting for it to expire. Each such renewal logs the same `WARN` that minting one does, `Issued certificate carrying a Puppet authorisation extension`, with a `renewal` attribute saying whether the key changed — see [administrator credentials](operator-cli.md#administrator-credentials).
 
 > **OID source:** [`lib/puppet/ssl/oids.rb`](https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb)
+
+## Differences from OpenVox Server
+
+The routes OpenVox Server also serves are checked against responses recorded from a real OpenVox Server: the `Puppet CA API contract` specs in `internal/api/contract_test.go` (see [the contract](development/testing.md#the-puppet-ca-api-contract)). The rule is that openvox-ca may add, but not take away:
+
+- The status code must match, and where OpenVox Server sent a body, so must its media type (parameters such as `charset` aside).
+- Every JSON field OpenVox Server sent must be present, with the same JSON type. openvox-ca may add fields, and routes.
+- Values derived from the certificate, such as fingerprints, SANs, serial numbers and dates, must match exactly, which pins their formatting too.
+- `authorization_extensions` must list exactly the same extensions: its keys are data, so an extra one is a difference rather than an added field.
+
+Not part of the contract: error-body wording, response headers other than `Content-Type`, the order of `certificate_statuses`, and the body and media type of a request no route serves. Nor is who may reach a route: the fixtures are recorded with OpenVox Server's `auth.conf` opened up, so that each request reaches the CA, and openvox-ca's own authorisation is checked separately (see [Authorization tiers](#authorization-tiers)).
+
+Where openvox-ca still differs, the spec carries an exception for each difference.
+
+Tracked as defects, each with an issue:
+
+- `fingerprints` lacks `SHA1` and `SHA512` ([#406](https://github.com/voxpupuli/openvox-ca/issues/406)).
+- `subject_alt_names` omits IP SANs, which OpenVox Server lists first as `IP:…` ([#407](https://github.com/voxpupuli/openvox-ca/issues/407)).
+- The authorisation extension `1.3.6.1.4.1.34380.1.3.2` is keyed `pp_auth_auto_renew` rather than by OID ([#408](https://github.com/voxpupuli/openvox-ca/issues/408)), and an extension whose OID is exactly the authorisation arc is listed ([#409](https://github.com/voxpupuli/openvox-ca/issues/409)).
+- `PUT /certificate_request/{subject}` for a subject that holds a certificate answers `200` rather than `400` ([#410](https://github.com/voxpupuli/openvox-ca/issues/410)).
+- `PUT /certificate_status/{subject}` signing a subject with no CSR answers `404` rather than `409` ([#411](https://github.com/voxpupuli/openvox-ca/issues/411)).
+- `POST /sign` answers `400` for an empty or missing `certnames` (OpenVox Server: `200`) and for a non-list one (OpenVox Server: `422` with a JSON body) ([#412](https://github.com/voxpupuli/openvox-ca/issues/412)).
+- `PUT /certificate_revocation_list` (CRL upload) is not implemented ([#413](https://github.com/voxpupuli/openvox-ca/issues/413)).
+- `GET /certificate/{subject}` ignores `If-Modified-Since` ([#414](https://github.com/voxpupuli/openvox-ca/issues/414)).
+
+Deliberate, and kept. Each has a fixture that records it, except where marked *not recorded*: those are known only from OpenVox Server's source, mostly because they need a server state or setting the recording does not set up.
+
+- `PUT /clean` answers JSON (`cleaned`, `not-found`, `clean-errors`) rather than a sentence. It also removes CSRs, and ignores `async` (*not recorded*).
+- `GET /certificate_statuses` returns `[]` for an unknown `state`, and lists a subject holding both a certificate and a pending CSR once (the certificate).
+- `GET /certificate_status/{subject}` for an unknown subject answers `404` with a plain-text body labelled `text/plain`; OpenVox Server sends the same kind of body labelled `application/json`.
+- An authorisation-extension value that is not a DER string renders as hex.
+- A stored certificate openvox-ca cannot parse is reported in part: its status omits the SANs, serial number and validity dates rather than failing. Go refuses, for one, a certificate whose SAN holds an IPv4-mapped IPv6 address, which OpenVox Server signs and reports in full. Such a certificate can still be revoked, but its holder cannot complete TLS to openvox-ca, so it cannot use auto-renewal.
+- An unparseable CSR answers `400` rather than `500`.
+- A CSR asking for authorisation extensions is signed with them stripped (`204`), where OpenVox Server refuses it (`409`).
+- Responses are JSON only: a request asking for pson gets JSON.
+- `POST /certificate_renewal` without a client certificate answers `403` rather than `400`.
+- The CRL is served at `/certificate_revocation_list/ca` only. An empty `certificate_statuses` segment answers `404` and an invalid subject `400`, where OpenVox Server answers `400` and `404`. A method a route does not serve answers `405`. An `If-Modified-Since` that is not an HTTP date, which names the day of the week, is ignored.
+- Dates are RFC 3339 by default; `puppet_datetime_format: true` gives OpenVox Server's layout, and the contract is checked under that setting.
+- *Not recorded:* a missing CRL answers `404` and a storage failure `503`, where OpenVox Server answers `500`; `POST /certificate_renewal` is always served (OpenVox Server's default is off) and a CSR body re-keys; `DELETE /certificate_status/{subject}` revokes before it deletes; `cert_ttl` of zero or less means the default validity.

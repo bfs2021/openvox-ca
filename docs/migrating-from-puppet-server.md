@@ -547,6 +547,14 @@ sequential integers. This is a security improvement (CA/Browser Forum
 guidance) but means serial numbers will look different from what you're
 used to. The `serial` file from old Puppet CAs is ignored.
 
+The status endpoints still send `serial_number` as a JSON number, as OpenVox
+Server does, but a 128-bit value is too large for a parser that reads JSON
+numbers as doubles: JavaScript's `JSON.parse`, or `jq` before 1.7, rounds it
+without complaint. Tooling that read sequential serials exactly will need a
+parser that keeps the digits. See [the status response](api.md#certificate-status),
+and [`serial_number_format`](configuration.md#serial-number-format) if all the
+clients are yours and a hex string would serve them better.
+
 ### Subject alternative names requested by a CSR
 
 Parity, and worth checking before you cut over: `allow_subject_alt_names`
@@ -665,7 +673,9 @@ importing is a prerequisite for revoking here, not an alternative to it.
 
 openvox-ca does not accept `puppet cert` command syntax directly. Use
 `openvox-ca-ctl` instead (see the CLI command mapping table above). The HTTP
-API is fully compatible; only the CLI tool name and flag syntax differ.
+API is the one agents already use, with the differences listed in
+[Differences from OpenVox Server](api.md#differences-from-openvox-server); what
+changes is the CLI tool name and its flag syntax.
 
 ### Agent configuration
 

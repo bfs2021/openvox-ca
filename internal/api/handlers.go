@@ -160,6 +160,10 @@ type Server struct {
 	// Puppet CA style ("2006-01-02T15:04:05MST") instead of RFC 3339. Useful
 	// when integrating with tooling that expects exact Puppet Server output.
 	PuppetDateTimeFormat bool
+	// SerialNumberFormat selects how status responses encode serial_number.
+	// The zero value is OpenVox Server's JSON number; SerialNumberAsHex trades
+	// that compatibility for a colon-separated hex string.
+	SerialNumberFormat SerialNumberFormat
 
 	csrLimiter     *ipRateLimiter
 	destructiveOps *destructiveOpTracker
@@ -238,11 +242,11 @@ type CertStatusResponse struct {
 	// Always present, empty map when none exist.
 	AuthorizationExtensions map[string]string `json:"authorization_extensions"`
 	// Populated when signed or revoked.
-	// SerialNumber is a decimal string to preserve the full 128-bit value
-	// without loss; int64 would silently truncate random CA/B-Forum serials.
-	SerialNumber *string `json:"serial_number,omitempty"`
-	NotBefore    *string `json:"not_before,omitempty"`
-	NotAfter     *string `json:"not_after,omitempty"`
+	// SerialNumber is the full serial, a JSON number as OpenVox Server sends
+	// it unless the server opts into SerialNumberAsHex.
+	SerialNumber *CertSerial `json:"serial_number,omitempty"`
+	NotBefore    *string     `json:"not_before,omitempty"`
+	NotAfter     *string     `json:"not_after,omitempty"`
 }
 
 func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
@@ -261,7 +265,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 			state = "revoked"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(certStatusFromCert(subject, certPEM, state, s.timeFormat())); err != nil {
+		if err := json.NewEncoder(w).Encode(certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat)); err != nil {
 			slog.Warn("encode response failed", "error", err)
 		}
 		return
@@ -1024,22 +1028,31 @@ func authExtensions(exts []pkix.Extension) map[string]string {
 // fingerprint renders the SHA-256 fingerprint of a PEM-encoded certificate or
 // CSR as Puppet's colon-separated hex pairs, or "" when data is not PEM. The
 // digest formatting is shared with the certificate index projection (see
-// ca.SHA256ColonFingerprint).
+// ca.SHA256ColonFingerprint); the case is the response's, see
+// responseFingerprint.
 func fingerprint(data []byte) string {
 	block, _ := pem.Decode(data)
 	if block == nil {
 		return ""
 	}
-	return ca.SHA256ColonFingerprint(block.Bytes)
+	return responseFingerprint(ca.SHA256ColonFingerprint(block.Bytes))
 }
 
-// noNilSlice returns s unchanged when non-nil, or an empty non-nil slice.
-// This ensures dns_alt_names serialises as [] rather than null in JSON.
-func noNilSlice(s []string) []string {
-	if s == nil {
-		return []string{}
+// responseFingerprint renders a colon-separated fingerprint in upper case, as
+// OpenVox Server sends it. It is applied when a response is built, so index
+// rows that store the lower-case form need no rewrite.
+func responseFingerprint(fp string) string {
+	return strings.ToUpper(fp)
+}
+
+// dnsAltNames renders DNS SANs as OpenVox Server does: each prefixed "DNS:",
+// in certificate order, and [] rather than null when there are none.
+func dnsAltNames(names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = "DNS:" + n
 	}
-	return s
+	return out
 }
 
 // timeFormat returns the time layout string to use for JSON date/time fields.
@@ -1051,7 +1064,7 @@ func (s *Server) timeFormat() string {
 }
 
 // certStatusFromCert builds a CertStatusResponse from a signed or revoked certificate.
-func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt string) CertStatusResponse {
+func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt string, serialFmt SerialNumberFormat) CertStatusResponse {
 	cert, err := parseCert(certPEM)
 	if err != nil {
 		slog.Warn("Failed to parse cert for status response", "subject", subject, "error", err)
@@ -1067,10 +1080,9 @@ func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt st
 		}
 	}
 	fp := fingerprint(certPEM)
-	serial := cert.SerialNumber.Text(10) // decimal string; preserves full 128-bit value
 	nb := cert.NotBefore.UTC().Format(timeFmt)
 	na := cert.NotAfter.UTC().Format(timeFmt)
-	dnsNames := noNilSlice(cert.DNSNames)
+	dnsNames := dnsAltNames(cert.DNSNames)
 	return CertStatusResponse{
 		Name:                    subject,
 		State:                   state,
@@ -1079,7 +1091,7 @@ func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt st
 		DNSAltNames:             dnsNames,
 		SubjectAltNames:         dnsNames,
 		AuthorizationExtensions: authExtensions(cert.Extensions),
-		SerialNumber:            &serial,
+		SerialNumber:            newCertSerial(cert.SerialNumber, serialFmt),
 		NotBefore:               &nb,
 		NotAfter:                &na,
 	}
@@ -1112,7 +1124,7 @@ func certSerialIs(cert *x509.Certificate, serial string) bool {
 // stand alone — its display projection was never populated (legacy inventory
 // import) or a canonical field does not parse — and the caller should fall
 // back to the PEM path for that subject.
-func certStatusFromRecord(rec storage.CertRecord, timeFmt string) (CertStatusResponse, bool) {
+func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt SerialNumberFormat) (CertStatusResponse, bool) {
 	if rec.Fingerprint == "" {
 		return CertStatusResponse{}, false
 	}
@@ -1129,23 +1141,23 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string) (CertStatusRes
 		return CertStatusResponse{}, false
 	}
 
-	serial := serialInt.Text(10) // decimal string; preserves full 128-bit value
 	nbs := nb.UTC().Format(timeFmt)
 	nas := na.UTC().Format(timeFmt)
-	dnsNames := noNilSlice(rec.DNSAltNames)
+	dnsNames := dnsAltNames(rec.DNSAltNames)
 	authExts := rec.AuthExtensions
 	if authExts == nil {
 		authExts = map[string]string{}
 	}
+	fp := responseFingerprint(rec.Fingerprint)
 	return CertStatusResponse{
 		Name:                    rec.Subject,
 		State:                   rec.State,
-		Fingerprint:             rec.Fingerprint,
-		Fingerprints:            map[string]string{"SHA256": rec.Fingerprint, "default": rec.Fingerprint},
+		Fingerprint:             fp,
+		Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
 		DNSAltNames:             dnsNames,
 		SubjectAltNames:         dnsNames,
 		AuthorizationExtensions: authExts,
-		SerialNumber:            &serial,
+		SerialNumber:            newCertSerial(serialInt, serialFmt),
 		NotBefore:               &nbs,
 		NotAfter:                &nas,
 	}, true
@@ -1167,7 +1179,7 @@ func certStatusFromCSR(subject string, csrPEM []byte) CertStatusResponse {
 			AuthorizationExtensions: map[string]string{},
 		}
 	}
-	dnsNames := noNilSlice(csr.DNSNames)
+	dnsNames := dnsAltNames(csr.DNSNames)
 	return CertStatusResponse{
 		Name:                    subject,
 		State:                   "requested",
@@ -1249,7 +1261,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 					state = storage.CertStateRevoked
 				}
 			}
-			resp, ok := certStatusFromRecord(rec, s.timeFormat())
+			resp, ok := certStatusFromRecord(rec, s.timeFormat(), s.SerialNumberFormat)
 			if ok {
 				resp.State = state
 			} else {
@@ -1282,7 +1294,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 						"answering from the stored certificate",
 						"subject", rec.Subject, "index_serial", rec.Serial)
 				}
-				resp = certStatusFromCert(rec.Subject, certPEM, state, s.timeFormat())
+				resp = certStatusFromCert(rec.Subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat)
 			}
 			// The filter runs against the state the response actually carries,
 			// which the fallback above may have re-derived — filtering on the
@@ -1331,7 +1343,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 			if stateFilter != "" && state != stateFilter {
 				continue
 			}
-			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat()))
+			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat))
 		}
 	} else {
 		certs, err := s.CA.Storage.ListCerts(r.Context())
@@ -1355,7 +1367,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 			if stateFilter != "" && state != stateFilter {
 				continue
 			}
-			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat()))
+			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat))
 		}
 	}
 
@@ -1388,6 +1400,12 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 // --- Expirations ---
 
 type ExpirationsResponse struct {
+	// CACerts and CRLs are OpenVox Server's shape: every certificate in the
+	// CA bundle keyed by its subject CN, and every CRL in the published
+	// chain keyed by its issuer CN. A CN that appears twice keeps the last.
+	CACerts map[string]string `json:"ca-certs"`
+	CRLs    map[string]string `json:"crls"`
+	// CACrl and CACertificate are openvox-ca's own, kept as additions.
 	CACrl         CRLExpiration  `json:"ca_crl"`
 	CACertificate CertExpiration `json:"ca_certificate"`
 }
@@ -1411,16 +1429,45 @@ func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
 	}
 	certExp := s.CA.CACert.NotAfter.UTC().Format(s.timeFormat())
 
+	// Both documents are read with the parsers the CA uses for them, so this
+	// route cannot disagree with the CA about what they hold. A read that
+	// fails leaves the maps short, and says so in the log.
+	caCerts := map[string]string{s.CA.CACert.Subject.CommonName: certExp}
+	if bundlePEM, err := s.CA.Storage.GetCACert(r.Context()); err != nil {
+		slog.Warn("expirations: reading the CA bundle failed; ca-certs lists this CA alone", "error", err)
+	} else if bundle, err := ca.ParseCABundle(bundlePEM); err != nil {
+		slog.Warn("expirations: parsing the CA bundle failed; ca-certs lists this CA alone", "error", err)
+	} else {
+		for _, cert := range bundle {
+			caCerts[cert.Subject.CommonName] = cert.NotAfter.UTC().Format(s.timeFormat())
+		}
+	}
+
+	// The first CRL in the published chain is the CA's own, and the only one
+	// ca_crl reports; the rest are ancestors' (see CA.CRLChainFile).
 	crlNextUpdate := ""
-	if crlPEM, err := s.CA.Storage.GetCRL(r.Context()); err == nil {
-		if block, _ := pem.Decode(crlPEM); block != nil {
-			if crl, err := x509.ParseRevocationList(block.Bytes); err == nil {
-				crlNextUpdate = crl.NextUpdate.UTC().Format(s.timeFormat())
+	crls := map[string]string{}
+	if crlPEM, err := s.CA.Storage.GetCRL(r.Context()); err != nil {
+		slog.Warn("expirations: reading the CRL failed; ca_crl and crls are empty", "error", err)
+	} else if chain, err := ca.DecodeCRLChain(crlPEM); err != nil {
+		slog.Warn("expirations: parsing the CRL chain failed; ca_crl and crls are empty", "error", err)
+	} else if len(chain) == 0 {
+		// DecodeCRLChain skips blocks of other types, so a file holding no
+		// CRL decodes cleanly to nothing.
+		slog.Warn("expirations: the CRL file holds no CRL; ca_crl and crls are empty")
+	} else {
+		for i, crl := range chain {
+			nextUpdate := crl.NextUpdate.UTC().Format(s.timeFormat())
+			if i == 0 {
+				crlNextUpdate = nextUpdate
 			}
+			crls[crl.Issuer.CommonName] = nextUpdate
 		}
 	}
 
 	resp := ExpirationsResponse{
+		CACerts:       caCerts,
+		CRLs:          crls,
 		CACrl:         CRLExpiration{NextUpdate: crlNextUpdate},
 		CACertificate: CertExpiration{Expiration: certExp},
 	}

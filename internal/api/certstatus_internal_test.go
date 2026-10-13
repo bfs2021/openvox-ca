@@ -18,6 +18,7 @@
 package api
 
 import (
+	"encoding/json"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -49,11 +50,11 @@ var _ = DescribeTable("certStatusFromRecord rejects a record it cannot describe"
 		}
 		// The fixture itself must be acceptable, or every entry below passes for
 		// the wrong reason.
-		_, ok := certStatusFromRecord(rec, time.RFC3339)
+		_, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
 		Expect(ok).To(BeTrue(), "the unmutated fixture must be answerable")
 
 		mutate(&rec)
-		_, ok = certStatusFromRecord(rec, time.RFC3339)
+		_, ok = certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
 		Expect(ok).To(BeFalse())
 	},
 	Entry("no projection at all", func(r *storage.CertRecord) { r.Fingerprint = "" }),
@@ -72,20 +73,47 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 				NotAfter:  "2036-01-01T00:00:00UTC",
 			},
 			CertProjection: storage.CertProjection{
-				Fingerprint:    "SHA256:AA:BB",
+				// Stored lower case, as SHA256ColonFingerprint writes it.
+				Fingerprint:    "aa:bb",
 				DNSAltNames:    []string{"node1.example.com"},
 				AuthExtensions: map[string]string{"pp_auth_role": "webserver"},
 			},
 			State: storage.CertStateRevoked,
 		}
-		got, ok := certStatusFromRecord(rec, time.RFC3339)
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
 		Expect(ok).To(BeTrue())
 		Expect(got.Name).To(Equal("node1.example.com"))
 		Expect(got.State).To(Equal(storage.CertStateRevoked))
-		Expect(got.SerialNumber).To(HaveValue(Equal("255")), "hex ff, rendered decimal")
-		Expect(got.DNSAltNames).To(Equal([]string{"node1.example.com"}))
+		Expect(got.SerialNumber).NotTo(BeNil())
+		Expect(got.SerialNumber.Int64()).To(Equal(int64(255)), "hex ff, parsed as the number it names")
+		Expect(got.DNSAltNames).To(Equal([]string{"DNS:node1.example.com"}))
 		Expect(got.AuthorizationExtensions).To(Equal(map[string]string{"pp_auth_role": "webserver"}))
+		Expect(got.Fingerprint).To(Equal("AA:BB"), "upper-cased on the way out")
+		Expect(got.Fingerprints).To(Equal(map[string]string{"SHA256": "AA:BB", "default": "AA:BB"}))
 	})
+
+	// Driven here rather than through the handler, which falls back to the
+	// stored PEM whenever this function rejects a row: an HTTP spec cannot
+	// tell which of the two encoded the serial.
+	DescribeTable("encodes the serial in the format it is given",
+		func(format SerialNumberFormat, want string) {
+			rec := storage.CertRecord{
+				InventoryEntry: storage.InventoryEntry{
+					Subject: "node1", Serial: "ff",
+					NotBefore: "2026-01-01T00:00:00UTC", NotAfter: "2036-01-01T00:00:00UTC",
+				},
+				CertProjection: storage.CertProjection{Fingerprint: "SHA256:AA"},
+				State:          storage.CertStateSigned,
+			}
+			got, ok := certStatusFromRecord(rec, time.RFC3339, format)
+			Expect(ok).To(BeTrue())
+			out, err := json.Marshal(got.SerialNumber)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(out)).To(Equal(want))
+		},
+		Entry("as a number by default", SerialNumberAsNumber, `255`),
+		Entry("as colon-separated hex when opted in", SerialNumberAsHex, `"FF"`),
+	)
 
 	It("substitutes empty collections rather than nulls", func() {
 		// The response is JSON-encoded straight to an agent, and a null where a
@@ -98,7 +126,7 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 			CertProjection: storage.CertProjection{Fingerprint: "SHA256:AA"},
 			State:          storage.CertStateSigned,
 		}
-		got, ok := certStatusFromRecord(rec, time.RFC3339)
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
 		Expect(ok).To(BeTrue())
 		Expect(got.DNSAltNames).NotTo(BeNil())
 		Expect(got.AuthorizationExtensions).NotTo(BeNil())
