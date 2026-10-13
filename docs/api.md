@@ -599,7 +599,6 @@ Tracked as defects, each with an issue:
 - `POST /sign` answers `400` for an empty or missing `certnames` (OpenVox Server: `200`) and for a non-list one (OpenVox Server: `422` with a JSON body) ([#412](https://github.com/voxpupuli/openvox-ca/issues/412)).
 - `PUT /certificate_revocation_list` (CRL upload) is not implemented ([#413](https://github.com/voxpupuli/openvox-ca/issues/413)).
 - `GET /certificate/{subject}` ignores `If-Modified-Since` ([#414](https://github.com/voxpupuli/openvox-ca/issues/414)).
-- Revoking a subject the CA has never seen answers `409` rather than `404` ([#358](https://github.com/voxpupuli/openvox-ca/issues/358)).
 
 Deliberate, and kept. Each has a fixture that records it, except where marked *not recorded*: those are known only from OpenVox Server's source, mostly because they need a server state or setting the recording does not set up.
 
