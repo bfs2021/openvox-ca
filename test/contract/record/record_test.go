@@ -26,6 +26,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -562,6 +563,16 @@ var _ = Describe("do", func() {
 		client = &http.Client{Transport: t}
 	})
 
+	It("returns a transport failure rather than a response", func() {
+		refusing := &http.Client{Transport: &http.Transport{
+			DialContext: func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("connection refused by the spec")
+			},
+		}}
+		_, err := do(context.Background(), refusing, request{Method: "GET", Path: "/json"})
+		Expect(err).To(MatchError(ContainSubstring("connection refused by the spec")))
+	})
+
 	It("records a JSON body as JSON, and every header but Date", func() {
 		resp, err := do(context.Background(), client, request{Method: "GET", Path: "/json"})
 		Expect(err).NotTo(HaveOccurred())
@@ -601,6 +612,27 @@ var _ = Describe("do", func() {
 		resp, err := do(context.Background(), client, request{Method: "GET", Path: "/echo"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resp.Headers).To(HaveKeyWithValue("X-Seen-Accept", "application/json, text/plain"))
+	})
+})
+
+var _ = Describe("writeFixture", func() {
+	It("writes fixtures/<name>.json, indented, newline-terminated, and readable back as the same fixture", func() {
+		dir := GinkgoT().TempDir()
+		out, err := os.OpenRoot(dir)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(out.Close)
+		text := "plain\n"
+		f := fixture{Name: "a-case", Description: "d", Sources: []string{"s:1"}, Compare: "exact",
+			Request:  request{Method: "GET", Path: "/x", Client: "admin"},
+			Response: response{Status: 200, ContentType: "text/plain", Text: &text}}
+		Expect(writeFixture(out, f)).To(Succeed())
+
+		b := mustRead(filepath.Join(dir, "fixtures", "a-case.json"))
+		Expect(b).To(HaveSuffix("}\n"))
+		Expect(string(b)).To(HavePrefix("{\n  \"name\": \"a-case\""))
+		var got fixture
+		Expect(json.Unmarshal(b, &got)).To(Succeed())
+		Expect(got).To(Equal(f))
 	})
 })
 

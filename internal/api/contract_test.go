@@ -842,6 +842,18 @@ var _ = Describe("the contract checker", func() {
 		Expect(checkContract(f, 204, "", nil)).To(BeEmpty())
 	})
 
+	It("binds the status alone under compare status", func() {
+		f := contractFixture{Compare: "status", Response: contractResponse{Status: 404, ContentType: "application/json", JSON: json.RawMessage(`{"a":1}`)}}
+		Expect(checkContract(f, 404, "text/plain", []byte("other"))).To(BeEmpty())
+		Expect(checkContract(f, 400, "application/json", []byte(`{"a":1}`))).To(Equal([]string{"status: 400, upstream 404"}))
+	})
+
+	It("binds the media type but not the body under compare none", func() {
+		f := contractFixture{Compare: "none", Response: contractResponse{Status: 200, ContentType: "application/json", JSON: json.RawMessage(`{"a":1}`)}}
+		Expect(checkContract(f, 200, "application/json", []byte(`{"b":"x"}`))).To(BeEmpty())
+		Expect(checkContract(f, 200, "text/plain", []byte(`{"a":1}`))).To(Equal([]string{`media type: "text/plain", upstream "application/json"`}))
+	})
+
 	It("reports a difference no exception covers", func() {
 		unexplained, stale := judge([]string{"status: 404, upstream 200", "$.name: missing"},
 			[]contractException{{"status: 404, upstream 200", "r"}})
