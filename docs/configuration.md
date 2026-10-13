@@ -38,6 +38,8 @@ re-asserting inventory integrity on a CA that will not start.
 | `--storage-backend` | `filesystem` | Storage backend for CA state: `filesystem`, `sqlite`, `postgres`, `mysql`, `etcd`, or `redis`. See [storage backends](storage-backends.md) |
 | `--etcd-endpoints` | `""` | Comma-separated etcd endpoints (used when `--storage-backend etcd`) |
 | `--etcd-key-prefix` | `/puppet-ca` | etcd key namespace for this CA |
+| `--sql-dsn` | `""` | SQL data source name (used when `--storage-backend` is `sqlite`, `postgres` or `mysql`). Do not put a password here: use `--sql-dsn-file` instead. See [keeping the database password private](storage-backends.md#keeping-the-database-password-private) |
+| `--sql-dsn-file` | `""` | Path to a file containing the SQL data source name (first line used). Mutually exclusive with `--sql-dsn` |
 | `--ca-cert-file` | `""` | Keep the CA certificate at this local path regardless of backend |
 | `--ca-key-file` | `""` | Keep the CA private key at this local path regardless of backend |
 | `--ca-key-provider` | `file` | CA private key custody: `file` (default) or `openbao` (OpenBao Transit key). See [OpenBao Transit-engine CA key](openbao-transit.md) for the full `--openbao-*` flag reference |
@@ -50,6 +52,11 @@ re-asserting inventory integrity on a CA that will not start.
 
 All flags can be set via a YAML config file or environment variables. Precedence
 (highest → lowest): **CLI flag** → **environment variable** → **config file** → **built-in default**.
+
+That ordering applies to each setting on its own. `sql_dsn` and `sql_dsn_file`
+are two settings, so neither overrides the other: setting both, from any mix of
+sources, is refused at startup. See
+[keeping the database password private](storage-backends.md#keeping-the-database-password-private).
 
 Key generation and CA subject options are intentionally **not** exposed as CLI flags. They are one-time bootstrap decisions that belong in a config file or environment variable. Use the config file or `PUPPET_CA_CA_KEY_ALGO` / `PUPPET_CA_CA_SUBJECT_*` env vars to set them.
 
@@ -228,6 +235,8 @@ Environment variables mirror the CLI flags:
 | `--storage-backend` | `PUPPET_CA_STORAGE_BACKEND` |
 | `--etcd-endpoints` | `PUPPET_CA_ETCD_ENDPOINTS` |
 | `--etcd-key-prefix` | `PUPPET_CA_ETCD_KEY_PREFIX` |
+| `--sql-dsn` | `PUPPET_CA_SQL_DSN` |
+| `--sql-dsn-file` | `PUPPET_CA_SQL_DSN_FILE` |
 | `--ca-cert-file` | `PUPPET_CA_CA_CERT_FILE` |
 | `--ca-key-file` | `PUPPET_CA_CA_KEY_FILE` |
 | `--ca-key-provider` | `PUPPET_CA_CA_KEY_PROVIDER` |
@@ -246,6 +255,9 @@ Storage-backend environment variables are documented per backend in
 
 The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env var only, no CLI flag to avoid `/proc/cmdline` exposure).
 Under the default process split the launcher passes it to the signer child only, not to the frontend; see [process isolation](ca-key-security.md#process-isolation).
+A database password needs the same care. Give it in `--sql-dsn-file`,
+`PUPPET_CA_SQL_DSN` or `sql_dsn` in the config file, never in `--sql-dsn`; see
+[keeping the database password private](storage-backends.md#keeping-the-database-password-private).
 
 **Config file / env var only, no CLI flag:**
 

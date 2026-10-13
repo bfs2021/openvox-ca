@@ -251,6 +251,18 @@ var _ = Describe("StorageConfig.ToBackendSpec", func() {
 			Entry("mysql", "mysql", storage.BackendMySQL),
 		)
 
+		It("carries sql_dsn_file into the spec as an absolute path", func() {
+			// Resolved here, as the CA cert and key overrides are, so that
+			// errors and logs name the canonical path.
+			spec, err := config.StorageConfig{
+				StorageBackend: "postgres",
+				SQLDSNFile:     "secrets/dsn",
+			}.ToBackendSpec(localDir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(spec.SQL.DSNFile).To(Equal(absViaRoot("secrets/dsn")))
+			Expect(spec.SQL.DSN).To(BeEmpty())
+		})
+
 		It("preserves a DSN-embedded password verbatim", func() {
 			spec, err := config.StorageConfig{
 				StorageBackend: "postgres",

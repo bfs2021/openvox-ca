@@ -629,7 +629,21 @@ automountServiceAccountToken: null
 initContainers: []
 extraContainers: []
 extraVolumes: []
+# - name: db-dsn
+#   secret:
+#     secretName: openvox-ca-db
+#     defaultMode: 0600
+#     items:
+#       - key: uri
+#         path: dsn
 extraVolumeMounts: []
+# - name: db-dsn
+#   mountPath: /run/secrets/openvox-ca-db
+#   readOnly: true
+# With config.sql_dsn_file: /run/secrets/openvox-ca-db/dsn, the server reads the
+# whole SQL DSN from that Secret key, keeping the password out of the
+# environment as well as the arguments — an alternative to the
+# PUPPET_CA_SQL_DSN example under extraEnv.
 
 serviceAccount:
   create: true

@@ -50,9 +50,12 @@ mirror it key by key. Instead:
   sides to agree.
 - **`env`, `extraEnv` and `envFrom`** are the escape hatch for settings that
   must come from a Secret at runtime, such as a database DSN. Backend
-  credentials have to come this way: `config` is rendered into a ConfigMap, so
-  the install refuses `etcd_password`, `redis_password`,
-  `redis_sentinel_password`, or a `sql_dsn` carrying a password, set there.
+  credentials have to come from a Secret, this way or, for a DSN, as a mounted
+  file: `config` is rendered into a ConfigMap, so the install refuses
+  `etcd_password`, `redis_password`, `redis_sentinel_password`, or a `sql_dsn`
+  carrying a password, set there. To keep a DSN out of the environment as well,
+  mount its Secret through `extraVolumes` and `extraVolumeMounts` and point
+  `config.sql_dsn_file` at the file (see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md)).
 
 A single `helm template` will show you exactly what the merge produced.
 

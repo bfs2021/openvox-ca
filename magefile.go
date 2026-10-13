@@ -4170,6 +4170,14 @@ config:
 			wants:      []string{"sql_dsn: ca@tcp(db:3306)/ca?allowNativePasswords=true"},
 		},
 		{
+			// sql_dsn_file is a path, not a credential: the refusal must leave it
+			// in config, where the server reads it.
+			name:       "a sql_dsn_file stays in config",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn_file: /run/secrets/openvox-ca-db/dsn\n",
+			wants:      []string{"sql_dsn_file: /run/secrets/openvox-ca-db/dsn"},
+		},
+		{
 			// A SQLite path may hold an @, and its "file:" colon precedes it, so
 			// under a sqlite backend only a password= parameter counts.
 			name:       "a SQLite sql_dsn whose path holds an @ stays in config under a sqlite backend",
@@ -4798,6 +4806,13 @@ config:
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PGSECRET@db:5432/ca?sslmode=verify-full'\n",
 			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			notWants:   []string{"PGSECRET"},
+		},
+		{
+			name:       "the sql_dsn refusal names sql_dsn_file as another route",
+			sets:       []string{tls},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PGSECRET@db:5432/ca?sslmode=verify-full'\n",
+			wantErr:    "or sql_dsn_file pointing at the Secret mounted as a file",
 			notWants:   []string{"PGSECRET"},
 		},
 		{

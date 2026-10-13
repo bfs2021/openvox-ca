@@ -112,8 +112,8 @@ and the matching `tls_key`. If you would rather point them somewhere else, set
 Run `helm template` to see exactly what the merge produced — the rendered
 `config.yaml` is right there in the ConfigMap.
 
-Settings that must come from a Secret at runtime, such as a database DSN, go
-through the environment instead:
+Settings that must come from a Secret at runtime, such as a database DSN, can
+go through the environment instead:
 
 ```yaml
 extraEnv:
@@ -168,14 +168,37 @@ The simplest route for a DSN is to keep all of it in the Secret and set
 password in as above, Kubernetes substitutes `$(POSTGRES_PASSWORD)` verbatim,
 so for a URL DSN like this one the Secret must hold the password
 percent-encoded: every character other than a letter, a digit or `-._~`. A
-character URL parsing refuses outright stops the server at startup, and the
-parse error it reports carries the DSN, password included, into the pod log.
+character URL parsing refuses outright stops the server at startup, with an
+error that says the DSN is malformed without repeating it.
 go-sql-driver's `user:password@tcp(…)` form takes the password raw, so leave
 it unencoded there.
 
-Backend credentials must come through the environment from a Secret, as in the
-`extraEnv` example above. `config` is rendered into a ConfigMap,
-which anyone allowed to read ConfigMaps in the namespace can read, and which
+If the Secret already holds the whole DSN, mount it as a file and point
+`sql_dsn_file` at it instead. That keeps the password out of the environment as
+well; see [keeping the database password private](storage-backends.md#keeping-the-database-password-private).
+If the DSN names an `sslrootcert`, keep the `db-ca` volume from the first
+example too.
+
+```yaml
+config:
+  sql_dsn_file: /run/secrets/openvox-ca-db/dsn
+extraVolumes:
+  - name: db-dsn
+    secret:
+      secretName: openvox-ca-db
+      defaultMode: 0600
+      items:
+        - key: uri
+          path: dsn
+extraVolumeMounts:
+  - name: db-dsn
+    mountPath: /run/secrets/openvox-ca-db
+    readOnly: true
+```
+
+Backend credentials must come from a Secret, through the environment or, for a
+DSN, a mounted file, as in the examples above. `config` is rendered into a
+ConfigMap, which anyone allowed to read ConfigMaps in the namespace can read, and which
 Secret RBAC and Secret encryption at rest do not cover. So the install is
 refused, naming each key and the variable that replaces it, when `config`
 carries any of these:
@@ -185,7 +208,7 @@ carries any of these:
 | `etcd_password` | `PUPPET_CA_ETCD_PASSWORD` |
 | `redis_password` | `PUPPET_CA_REDIS_PASSWORD` |
 | `redis_sentinel_password` | `PUPPET_CA_REDIS_SENTINEL_PASSWORD` |
-| `sql_dsn`, when it carries a password | `PUPPET_CA_SQL_DSN`, as above |
+| `sql_dsn`, when it carries a password | `PUPPET_CA_SQL_DSN` or `sql_dsn_file`, as above |
 
 A `sql_dsn` carries a password when its user part has one
 (`postgres://user:password@…`, `user:password@tcp(…)/…`) or when it has a

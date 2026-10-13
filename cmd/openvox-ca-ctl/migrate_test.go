@@ -130,6 +130,35 @@ var _ = Describe("migrate command", func() {
 		assertTreesEqual(srcDir, dstDir)
 	})
 
+	// The migrate configs share the server's storage keys, so sql_dsn_file
+	// has to work here too: an operator moving a CA into PostgreSQL should not
+	// have to put the password back into a config file to do it.
+	It("reads the DSN from sql_dsn_file on either side", func() {
+		srcDir := GinkgoT().TempDir()
+		sqliteCADir := GinkgoT().TempDir()
+		dstDir := GinkgoT().TempDir()
+		cfgDir := GinkgoT().TempDir()
+		dbPath := filepath.Join(GinkgoT().TempDir(), "ca.db")
+		seedFilesystemCA(srcDir)
+
+		srcCfg := filepath.Join(cfgDir, "fs-src.yaml")
+		sqlCfg := filepath.Join(cfgDir, "sqlite.yaml")
+		dstCfg := filepath.Join(cfgDir, "fs-dst.yaml")
+		dsnFile := filepath.Join(cfgDir, "dsn")
+		fsConfig(srcCfg, srcDir)
+		fsConfig(dstCfg, dstDir)
+		writeFile(dsnFile, "file:"+dbPath+"\n")
+		writeFile(sqlCfg, "storage_backend: sqlite\ncadir: "+sqliteCADir+"\nsql_dsn_file: "+dsnFile+"\n")
+
+		// files => sqlite, with sql_dsn_file on the destination
+		runMigrate("--source-config", srcCfg, "--dest-config", sqlCfg)
+		Expect(dbPath).To(BeAnExistingFile(), "the CA must land in the database the file names")
+		// sqlite => files, with sql_dsn_file on the source
+		runMigrate("--source-config", sqlCfg, "--dest-config", dstCfg)
+
+		assertTreesEqual(srcDir, dstDir)
+	})
+
 	It("rejects an unknown source backend", func() {
 		cfgDir := GinkgoT().TempDir()
 		srcCfg := filepath.Join(cfgDir, "src.yaml")
