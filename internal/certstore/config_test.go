@@ -1212,6 +1212,50 @@ managed_certs:
 			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
 		})
 
+		// The Secret collision, the one cross-reference message that names the
+		// other entry and had no spec under a non-default block at all. Two
+		// branches: the omitted-namespace sentence is appended only when a
+		// namespace really was omitted, so each case asserts it the other way.
+		It("names the block when two entries share a Secret", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: shared, namespace: openvox}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {secret: {name: shared, namespace: openvox}}
+`).ValidateIn(certstore.Block{Name: "component_certs"})
+
+			Expect(err).To(MatchError(ContainSubstring("component_certs[1] (b.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("is already the store for component_certs[0]")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+			Expect(err).NotTo(MatchError(ContainSubstring("An omitted namespace")),
+				"both namespaces are spelled out, so the omitted-namespace remedy describes "+
+					"a mistake this operator did not make")
+		})
+
+		It("names the block when one entry's Secret omits its namespace", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: shared, namespace: openvox}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {secret: {name: shared}}
+`).ValidateIn(certstore.Block{Name: "component_certs"})
+
+			Expect(err).To(MatchError(ContainSubstring("is already the store for component_certs[0]")))
+			Expect(err).To(MatchError(ContainSubstring("<the CA pod's namespace>/shared")))
+			Expect(err).To(MatchError(ContainSubstring("An omitted namespace resolves to the CA pod's own")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
 		// The zero Block is managed_certs, so a caller that passes nothing gets
 		// exactly what Validate has always produced. Without this, the default
 		// could drift to an empty prefix and every existing message would lose
