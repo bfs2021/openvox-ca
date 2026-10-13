@@ -1048,8 +1048,18 @@ jobs:
 			ContainSubstring("checks the repository out")))
 	})
 
-	It("accepts third-party actions pinned by SHA, which is what the job is built from", func() {
-		Expect(verifyReleaseJobConfinementIn(good)).To(Succeed())
+	// The guard names only what it refuses -- `./` actions and checkout -- and
+	// accepts everything else, because third-party actions pinned by SHA are
+	// what this job is built from. `good` already carries two, both from the
+	// actions/ organisation, so it cannot tell that design from an allowlist
+	// of the actions the job happens to use today. One from another
+	// organisation can: an allowlist would refuse it.
+	It("accepts a third-party action it has not seen before, pinned by SHA", func() {
+		ok := bytes.Replace(good, []byte("      - uses: actions/attest@"),
+			[]byte("      - uses: sigstore/cosign-installer@0000000000000000000000000000000000000000\n"+
+				"      - uses: actions/attest@"), 1)
+		Expect(ok).NotTo(Equal(good), "the fixture must actually have changed")
+		Expect(verifyReleaseJobConfinementIn(ok)).To(Succeed())
 	})
 })
 
@@ -1122,8 +1132,13 @@ func (Dev) Check() error {
 			ContainSubstring("no Dev.Check method was found")))
 	})
 
+	// Pinned to the parser's position prefix rather than HaveOccurred: this
+	// guard's own refusals are errors too, so if the parse failure were ever
+	// swallowed, the "no Dev.Check method" refusal that followed would satisfy
+	// HaveOccurred just as well.
 	It("reports a source it cannot parse rather than passing it", func() {
-		Expect(verifyDevCheckWiringIn([]byte("package main\nfunc ("))).To(HaveOccurred())
+		Expect(verifyDevCheckWiringIn([]byte("package main\nfunc ("))).To(MatchError(
+			ContainSubstring("magefile.go:2:")))
 	})
 })
 
@@ -1151,9 +1166,12 @@ jobs:
 		Expect(err).To(MatchError(ContainSubstring(`job "nope" not found`)))
 	})
 
+	// Pinned to the YAML library's error rather than HaveOccurred: input that
+	// parsed but lacked the job is an error too -- `job "release" not found` --
+	// so HaveOccurred cannot tell a parse failure from a failed lookup.
 	It("reports malformed YAML rather than returning an empty list", func() {
 		_, err := workflowStepUses([]byte("jobs: [this is not a map\n"), "release")
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring("yaml: line 1")))
 	})
 })
 
@@ -1409,25 +1427,21 @@ jobs:
 		// real release.yml rather than the fixture: the argument for the
 		// subtraction is that all three kinds are named at overlapping sites,
 		// and only the real file actually has all of them.
-		//
-		// ConsistOf, not Equal: parity depends on duplicates being preserved,
-		// so the multiset matters and the order does not. Nothing downstream
-		// reads the order -- verifyExtensionParity builds a map and the set
-		// check sorts -- so pinning it would fail on a reviewer reordering two
-		// operands that the guard itself is happy to accept either way.
 		It("does not confuse package extensions for SBOM documents", func() {
 			relSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(sbomExtensionsIn(relSrc)).NotTo(ContainElement(".deb"))
-			Expect(sbomExtensionsIn(relSrc)).NotTo(ContainElement(".rpm"))
-			Expect(sbomExtensionsIn(relSrc)).NotTo(ContainElement(".tar.gz"))
-			Expect(sbomExtensionsIn(relSrc)).NotTo(BeEmpty())
+			sbom := sbomExtensionsIn(relSrc)
+			Expect(sbom).NotTo(BeEmpty())
+			Expect(sbom).NotTo(ContainElement(".deb"))
+			Expect(sbom).NotTo(ContainElement(".rpm"))
+			Expect(sbom).NotTo(ContainElement(".tar.gz"))
 			// Counted, not compared as an ordered slice. Parity depends on
 			// duplicates being preserved, so the multiset matters; the order
-			// does not, because nothing downstream reads it -- and pinning it
-			// would fail on a reviewer reordering two operands the guard
-			// itself accepts either way. Four sites name each package: the
+			// does not, because nothing downstream reads it --
+			// verifyExtensionParity builds a map and the set check sorts -- and
+			// pinning it would fail on a reviewer reordering two operands the
+			// guard itself accepts either way. Four sites name each package: the
 			// packaging job's upload list, the gate's count glob, the
 			// sha256sum operands, and the release asset list.
 			mentions := map[string]int{}
