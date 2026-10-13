@@ -208,6 +208,7 @@ Storage-backend environment variables are documented per backend in
 [storage backends](storage-backends.md).
 
 The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env var only, no CLI flag to avoid `/proc/cmdline` exposure).
+Under the default process split the launcher passes it to the signer child only, not to the frontend; see [process isolation](ca-key-security.md#process-isolation).
 
 **Config file / env var only, no CLI flag:**
 

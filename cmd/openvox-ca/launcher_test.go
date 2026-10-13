@@ -32,6 +32,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -60,6 +61,17 @@ const pskChildEnv = "OPENVOX_CA_TEST_PSK_CHILD"
 // helper under test -- wires the child's stdout to the launcher's own, so the
 // spec cannot capture it without changing the code it is meant to exercise.
 const memLimitOutEnv = "OPENVOX_CA_TEST_MEMLIMIT_OUT"
+
+// envDumpDirEnv names the directory the launcher-env children write the
+// environment they were handed to, one file per role. A file for the same
+// reason as memLimitOutEnv: the children's stdout is the launcher's own.
+const envDumpDirEnv = "OPENVOX_CA_TEST_ENV_DUMP_DIR"
+
+// launcherStartedEnv is set by the launcher-env child before it calls
+// runLauncher, and refused by it if already set. The children inherit it, so a
+// child that somehow lost PUPPET_CA_ROLE refuses instead of starting a launcher
+// of its own -- each of which would re-exec this test binary in turn.
+const launcherStartedEnv = "OPENVOX_CA_TEST_LAUNCHER_STARTED"
 
 func TestMain(m *testing.M) {
 	if role := os.Getenv(pskChildEnv); role != "" {
@@ -132,10 +144,63 @@ func runPSKChild(role string) int {
 		}
 		fmt.Println("ALIVE")
 		return 0
+	case "launcher-env":
+		// The launcher and both of its children all land here: spawnChild
+		// re-execs this test binary, and the children inherit pskChildEnv.
+		// PUPPET_CA_ROLE, which spawnChild sets on each child, tells them apart.
+		if role := os.Getenv("PUPPET_CA_ROLE"); role != "" {
+			return dumpChildEnv(role)
+		}
+		if os.Getenv(launcherStartedEnv) != "" {
+			fmt.Fprintln(os.Stderr, "launcher-env child: a launcher is already running above this process")
+			return 2
+		}
+		if err := os.Setenv(launcherStartedEnv, "1"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if err := runLauncher(&serverConfig{}, nil, make(chan os.Signal)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "unknown %s role %q\n", pskChildEnv, role)
 		return 2
 	}
+}
+
+// dumpChildEnv writes the environment this process was started with to
+// <envDumpDirEnv>/<role>.env, then waits for the launcher to stop it. Waiting
+// rather than exiting matters: the launcher treats either child exiting as a
+// crash and tears the other down, possibly before it has written its own file.
+// The deadline only stops an orphan outliving a launcher that was killed hard.
+func dumpChildEnv(role string) int {
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+
+	dir := os.Getenv(envDumpDirEnv)
+	if dir == "" {
+		fmt.Fprintln(os.Stderr, "launcher-env child: "+envDumpDirEnv+" is unset")
+		return 2
+	}
+	// Written under another name and renamed, so the spec never reads a file
+	// part-way through being written.
+	path := filepath.Join(dir, role+".env")
+	if err := os.WriteFile(path+".tmp", []byte(strings.Join(os.Environ(), "\n")), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := os.Rename(path+".tmp", path); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	select {
+	case <-stop:
+	case <-time.After(time.Minute):
+	}
+	return 0
 }
 
 // pskChildCmd builds a re-exec of the test binary in the given child role
@@ -787,6 +852,158 @@ var _ = Describe("the environments the launcher builds", func() {
 		daemonEnv(base)
 
 		Expect(internalEnvKeys).To(Equal(before))
+	})
+
+	// The frontend is the network-facing child. It never reads the CA key
+	// passphrase and never talks to OpenBao, so it is handed neither.
+	Context("the frontend", func() {
+		const customVar = "SITE_CA_KEY_PASSPHRASE"
+
+		var secrets []string
+
+		BeforeEach(func() {
+			secrets = []string{
+				ca.DefaultPassphraseEnvVar + "=default-secret",
+				customVar + "=custom-secret",
+				"BAO_TOKEN=bao-token",
+				"VAULT_ADDR=https://openbao.example.com:8200",
+			}
+		})
+
+		withSecrets := func() []string {
+			return append(append([]string(nil), base...), secrets...)
+		}
+
+		It("is not handed the default passphrase variable", func() {
+			Expect(frontendEnv(withSecrets(), ca.DefaultPassphraseEnvVar)).
+				NotTo(ContainElement(HavePrefix(ca.DefaultPassphraseEnvVar + "=")))
+		})
+
+		It("is not handed a passphrase variable configured under another name", func() {
+			Expect(frontendEnv(withSecrets(), customVar)).
+				NotTo(ContainElement(HavePrefix(customVar + "=")))
+		})
+
+		It("is not handed the default passphrase variable when another name is configured", func() {
+			// The launcher cannot tell which of the two the operator set.
+			Expect(frontendEnv(withSecrets(), customVar)).
+				NotTo(ContainElement(HavePrefix(ca.DefaultPassphraseEnvVar + "=")))
+		})
+
+		It("is not handed any BAO_* or VAULT_* variable", func() {
+			env := frontendEnv(withSecrets(), ca.DefaultPassphraseEnvVar)
+
+			Expect(env).NotTo(ContainElement(HavePrefix("BAO_")))
+			Expect(env).NotTo(ContainElement(HavePrefix("VAULT_")))
+		})
+
+		It("keeps everything else, its PUPPET_CA_* configuration included", func() {
+			// The guard against the list widening: the frontend reads its own
+			// configuration from PUPPET_CA_*, and keeps the notification socket
+			// because it is the one that reports READY=1. The neighbours are the
+			// near misses -- names that extend a withheld one, or carry BAO_ in
+			// the middle -- which a prefix or substring match would also take.
+			kept := append(append([]string(nil), base...),
+				ca.DefaultPassphraseEnvVar+"_FILE=/etc/puppet-ca/passphrase",
+				customVar+"_FILE=/etc/puppet-ca/site-passphrase",
+				"PUPPET_CA_OPENBAO_ADDR=https://openbao.example.com:8200",
+				"PUPPET_CA_OPENBAO_TOKEN_FILE=/run/secrets/openbao-token",
+			)
+
+			Expect(frontendEnv(append(append([]string(nil), kept...), secrets...), customVar)).
+				To(Equal(kept))
+		})
+
+		It("does not write through the environment the signer's is built from", func() {
+			// runLauncher builds both children's environments from one baseEnv.
+			// The withheld variables come first: behind every kept one, an
+			// in-place filter would copy each kept entry onto itself and leave
+			// the slice looking untouched.
+			parent := append(append([]string(nil), secrets...), base...)
+			before := append([]string(nil), parent...)
+			frontendEnv(parent, customVar)
+
+			Expect(parent).To(Equal(before))
+		})
+
+		It("leaves the passphrase and the OpenBao settings to the signer", func() {
+			Expect(signerEnv(withSecrets())).To(ContainElements(secrets))
+		})
+
+		It("leaves the passphrase and the OpenBao settings to the daemon child", func() {
+			// The re-executed launcher spawns the signer, which needs them.
+			Expect(daemonEnv(withSecrets())).To(ContainElements(secrets))
+		})
+
+		It("is told the passphrase variable the server's configuration reads", func() {
+			// runLauncher names the variable through keyPassphraseConfig, so this
+			// is what ties the launcher's call to the variable the CA resolves.
+			cfg := &serverConfig{CAKeyPassphraseFile: "/etc/puppet-ca/passphrase"}
+			Expect(keyPassphraseConfig(cfg).EnvVar()).To(Equal(ca.DefaultPassphraseEnvVar))
+		})
+	})
+})
+
+// SECURITY: the specs above drive frontendEnv directly, which says nothing about
+// whether runLauncher actually hands its result to the frontend. This runs the
+// real launcher, whose children are this test binary re-executed, and reads back
+// the environment each child was started with.
+var _ = Describe("the environment runLauncher hands each child", func() {
+	It("withholds the passphrase and the OpenBao settings from the frontend, and only the frontend", func() {
+		dir := GinkgoT().TempDir()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		DeferCleanup(cancel)
+
+		var out bytes.Buffer
+		cmd := exec.CommandContext(ctx, os.Args[0])
+		// The parent's environment, less anything that would make the launcher
+		// child think it was already a role or already under a launcher.
+		cmd.Env = append(filterEnv(os.Environ(), append(append([]string{}, internalEnvKeys...),
+			launcherStartedEnv, ca.DefaultPassphraseEnvVar)...),
+			pskChildEnv+"=launcher-env",
+			envDumpDirEnv+"="+dir,
+			ca.DefaultPassphraseEnvVar+"=default-secret",
+			"BAO_TOKEN=bao-token",
+			"VAULT_ADDR=https://openbao.example.com:8200",
+			"PUPPET_CA_CADIR=/var/lib/puppet-ca",
+		)
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		Expect(cmd.Start()).To(Succeed())
+
+		exited := make(chan error, 1)
+		go func() { exited <- cmd.Wait() }()
+		DeferCleanup(func() {
+			// SIGTERM so the launcher stops its children; the context's kill is
+			// the backstop for a launcher that does not.
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			Eventually(exited, 30*time.Second).Should(Receive())
+		})
+
+		readEnv := func(role string) []string {
+			raw, err := os.ReadFile(filepath.Join(dir, role+".env"))
+			if err != nil {
+				return nil
+			}
+			return strings.Split(string(raw), "\n")
+		}
+		Eventually(func() []string { return readEnv("frontend") }, 30*time.Second).ShouldNot(BeEmpty(),
+			"the frontend child never reported its environment; launcher output:\n%s", &out)
+		Eventually(func() []string { return readEnv("signer") }, 30*time.Second).ShouldNot(BeEmpty(),
+			"the signer child never reported its environment; launcher output:\n%s", &out)
+
+		frontend := readEnv("frontend")
+		Expect(frontend).To(ContainElements("PUPPET_CA_ROLE=frontend", "PUPPET_CA_CADIR=/var/lib/puppet-ca"))
+		Expect(frontend).NotTo(ContainElement(HavePrefix(ca.DefaultPassphraseEnvVar + "=")))
+		Expect(frontend).NotTo(ContainElement(HavePrefix("BAO_")))
+		Expect(frontend).NotTo(ContainElement(HavePrefix("VAULT_")))
+
+		Expect(readEnv("signer")).To(ContainElements(
+			"PUPPET_CA_ROLE=signer",
+			ca.DefaultPassphraseEnvVar+"=default-secret",
+			"BAO_TOKEN=bao-token",
+			"VAULT_ADDR=https://openbao.example.com:8200",
+		))
 	})
 })
 

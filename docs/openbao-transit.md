@@ -699,7 +699,12 @@ today. An OpenBao token scoped to `sign`+`read` on one Transit key is still a
 credential capable of signing arbitrary certificates on the CA's behalf, so
 it gets the same process isolation a local key would. The frontend process
 is unaffected either way — it talks to the signer the same way whether the
-signer holds a local key or an OpenBao client.
+signer holds a local key or an OpenBao client. The launcher withholds every
+`BAO_*` and `VAULT_*` variable, which the OpenBao client library reads for
+itself, from the frontend. The `PUPPET_CA_OPENBAO_*` settings
+[above](#configuration) still reach it, because the frontend reads its
+configuration from `PUPPET_CA_*`; the token, secret ID and Kubernetes JWT among
+them are file paths, not the credentials themselves.
 
 `--single-process` disables that isolation (as it does for local keys):
 the one process authenticates to OpenBao and holds the resulting token

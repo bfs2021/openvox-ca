@@ -235,10 +235,20 @@ func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
 	myCA.RevokeOnAutoRenew = cfg.RevokeOnAutoRenew
 	myCA.SupersedeAfter = cfg.supersededCertRevokeAfter()
 	myCA.SigningConcurrency = resolveSigningConcurrency(cfg.CASigningConcurrency)
-	myCA.KeyPassphrase = ca.KeyPassphraseConfig{
+	myCA.KeyPassphrase = keyPassphraseConfig(cfg)
+	return nil
+}
+
+// keyPassphraseConfig is where the CA key passphrase is read from under cfg.
+//
+// One function for both readers: applyCAConfig, which hands it to the CA, and
+// the launcher, which withholds its variable from the frontend child. Two
+// copies could disagree on the variable name, and the frontend would then be
+// handed the passphrase the signer reads.
+func keyPassphraseConfig(cfg *serverConfig) ca.KeyPassphraseConfig {
+	return ca.KeyPassphraseConfig{
 		PassphraseFile: cfg.CAKeyPassphraseFile,
 	}
-	return nil
 }
 
 // isLoopback reports whether host is a loopback address (127.x.x.x, ::1, or

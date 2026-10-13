@@ -52,9 +52,44 @@ the launcher's pipe refuses to start rather than proceeding unauthenticated.
 > seconds to produce a valid pre-shared key before the process gives up and says
 > so — and fails at once if it is already at end-of-file or carries anything else.
 
+Because the environment stays readable for the life of the process, the launcher
+also withholds `PUPPET_CA_KEY_PASSPHRASE` from the frontend, along with every
+`BAO_*` and `VAULT_*` variable, which the OpenBao client library reads for itself.
+The signer receives them as before. The rest of the `PUPPET_CA_*` configuration,
+`PUPPET_CA_OPENBAO_*` included, still reaches the frontend, which reads its own
+settings from it; the OpenBao credentials among those settings are file paths,
+not the credentials themselves. `--single-process` has no frontend to withhold
+anything from.
+
 The same isolation is why the shipped systemd unit sets `LimitCORE=0` and
 withholds `$NOTIFY_SOCKET` from the signer — see
 [running under systemd](systemd.md).
+
+### What the split does not cover
+
+The split keeps the key out of the frontend's address space, so a bug that
+discloses the frontend's memory cannot leak it. It does not stand between the
+key and code running in the frontend. Both children run as the same user, and
+the frontend opens the same store as the signer, with the same credentials, to
+serve requests. The stored key (`private/ca_key.pem` on the filesystem backend,
+the `ca_key` blob on the others) is readable to it, and so is anything else that
+user can read: a passphrase file, the auto-generated passphrase, and the
+signer's environment.
+
+Two things change that:
+
+1. **OpenBao Transit custody (recommended).** The key is created inside OpenBao
+   and never leaves it, so there is nothing in the store or on the host to copy.
+   Code running as the service user can still reach the signer's OpenBao
+   credentials and sign with the key until they are revoked, but it cannot take
+   the key away. See [OpenBao Transit-engine key
+   custody](#openbao-transit-engine-key-custody).
+2. **[Encryption at rest](#ca-key-encryption-at-rest).** The stored key is
+   unusable without the passphrase wherever it travels on its own: backups,
+   database dumps, replicas, another user of a shared database. It does not
+   protect the key from the service user, which can read the passphrase
+   wherever the signer reads it from; see
+   [security considerations](#security-considerations).
 
 ### The signer is a shared resource, and how it is bounded
 
@@ -138,6 +173,8 @@ Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an A
 
 1. **`--ca-key-passphrase-file`:** reads the first line of the specified file.
 2. **`PUPPET_CA_KEY_PASSPHRASE`** environment variable: avoids CLI `/proc/cmdline` exposure.
+   Under the default process split only the signer child receives it; see
+   [process isolation](#process-isolation).
 3. **Auto-generated:** if no passphrase source is configured, a cryptographically random
    passphrase is generated and saved to `<cadir>/private/.ca_key_passphrase` (mode `0600`).
    The path is logged at startup so operators know where it is.

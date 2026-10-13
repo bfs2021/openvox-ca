@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/sdnotify"
 	"github.com/voxpupuli/openvox-ca/internal/signer"
 )
@@ -138,14 +139,13 @@ func runLauncher(cfg *serverConfig, notify *sdnotify.Notifier, hupCh <-chan os.S
 	// gets when no budget could be resolved.
 	budget := applyMemoryBudget(cfg, os.Getenv, debug.SetMemoryLimit)
 
-	// The frontend gets baseEnv untouched: it is the process that knows when
-	// the listener is accepting, so it is the one that reports READY=1.
 	signerCmd, err := spawnChild(exe, signerEnv(baseEnv), "signer", signerSock, pskHex, budget)
 	if err != nil {
 		return err
 	}
 
-	frontendCmd, err := spawnChild(exe, baseEnv, "frontend", frontendSock, pskHex, budget)
+	frontendCmd, err := spawnChild(exe, frontendEnv(baseEnv, keyPassphraseConfig(cfg).EnvVar()),
+		"frontend", frontendSock, pskHex, budget)
 	if err != nil {
 		// The signer is already running and nothing will ever connect to it, so
 		// it has to go -- and be reaped, not merely signalled: Kill on its own
@@ -365,6 +365,51 @@ func daemonEnv(parent []string) []string {
 // NIST 800-53: SC-3 (Security Function Isolation)
 func signerEnv(baseEnv []string) []string {
 	return filterEnv(baseEnv, "NOTIFY_SOCKET")
+}
+
+// frontendEnv is the environment the frontend child is given: the launcher's
+// own, less the CA key passphrase and the OpenBao client library's own
+// BAO_*/VAULT_* environment.
+//
+// SECURITY: the frontend is the network-facing process, and the signer split
+// exists to keep the CA key out of it. It never reads the passphrase -- it
+// proxies every signature to the signer and never loads the key -- and never
+// talks to OpenBao. But an exec-time environment stays readable in
+// /proc/<pid>/environ for the life of the process, so whatever the frontend
+// inherits, it holds; unsetting it in the child would not help.
+//
+// passphraseVar is the variable the CA reads the passphrase from. Nothing makes
+// that name configurable today, so it is always the default; the default is
+// withheld unconditionally as well, so that if the name ever does become
+// configurable, a value left in the old variable still does not reach the
+// frontend.
+//
+// A targeted list rather than a PUPPET_CA_* prefix filter: the frontend is this
+// binary re-executed, and reads its own configuration from PUPPET_CA_*, so a
+// prefix filter would unconfigure an environment-configured deployment. Every
+// BAO_* and VAULT_* variable goes, because the OpenBao client reads its
+// settings from both families and the frontend needs none of them.
+//
+// It keeps $NOTIFY_SOCKET: the frontend is the process that knows when the
+// listener is accepting, so it is the one that reports READY=1.
+//
+// Named for the same reason as signerEnv: so a spec can drive it.
+//
+// NIST 800-53: SC-3 (Security Function Isolation)
+func frontendEnv(baseEnv []string, passphraseVar string) []string {
+	// A fresh slice rather than baseEnv[:0]: the signer's environment is built
+	// from the same baseEnv, and filtering in place would rewrite it.
+	env := make([]string, 0, len(baseEnv))
+	for _, e := range baseEnv {
+		k, _, _ := strings.Cut(e, "=")
+		switch {
+		case k == ca.DefaultPassphraseEnvVar, k == passphraseVar:
+		case strings.HasPrefix(k, "BAO_"), strings.HasPrefix(k, "VAULT_"):
+		default:
+			env = append(env, e)
+		}
+	}
+	return env
 }
 
 // internalEnvKeys are the variables the launcher and the --daemon re-exec strip

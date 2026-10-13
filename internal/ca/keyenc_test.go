@@ -173,6 +173,17 @@ var _ = Describe("Key encryption", func() {
 			Expect(string(pp)).To(Equal("env-secret"))
 		})
 
+		It("reads the variable EnvVar names when another name is configured", func() {
+			// The launcher withholds cfg.EnvVar() from the frontend, so the
+			// variable resolved here and the one withheld there must be one.
+			cfg := KeyPassphraseConfig{PassphraseEnvVar: "SITE_CA_KEY_PASSPHRASE"}
+			GinkgoT().Setenv(cfg.EnvVar(), "custom-secret")
+
+			pp, _, err := resolvePassphrase(cfg, tmpDir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(pp)).To(Equal("custom-secret"))
+		})
+
 		It("auto-generates and persists passphrase when none provided", func() {
 			pp, auto, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
 			Expect(err).NotTo(HaveOccurred())
@@ -215,6 +226,14 @@ var _ = Describe("Key encryption", func() {
 			Expect(err.Error()).To(ContainSubstring("empty"))
 		})
 	})
+
+	DescribeTable("KeyPassphraseConfig.EnvVar",
+		func(cfg KeyPassphraseConfig, want string) {
+			Expect(cfg.EnvVar()).To(Equal(want))
+		},
+		Entry("defaults to PUPPET_CA_KEY_PASSPHRASE", KeyPassphraseConfig{}, "PUPPET_CA_KEY_PASSPHRASE"),
+		Entry("names a configured variable", KeyPassphraseConfig{PassphraseEnvVar: "SITE_CA_KEY_PASSPHRASE"}, "SITE_CA_KEY_PASSPHRASE"),
+	)
 
 	Describe("isEncryptedPEM", func() {
 		It("returns true for encrypted PEM type", func() {
