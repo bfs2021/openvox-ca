@@ -40,6 +40,9 @@ var certIndexColumns = []string{
 	"fingerprint_sha256", "dns_alt_names", "auth_extensions", "state", "revoked_at",
 }
 
+// ipAltNamesColumnName is the column the ip_alt_names migration adds.
+const ipAltNamesColumnName = "ip_alt_names"
+
 var certIndexIndices = []string{
 	"idx_puppet_ca_inventory_state", "idx_puppet_ca_inventory_not_after",
 }

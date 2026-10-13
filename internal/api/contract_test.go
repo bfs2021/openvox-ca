@@ -133,18 +133,18 @@ var contractExceptions = map[string][]contractException{
 	"status-revoked":      missingFingerprints("$"),
 	"status-requested":    missingFingerprints("$"),
 	"status-cert-and-csr": missingFingerprints("$"),
-	"status-signed-ip":    append(missingFingerprints("$"), unlistedIPSANs("$")),
+	"status-signed-ip":    append(missingFingerprints("$"), compressedIPv6("$")),
 	"status-signed-ext":   append(missingFingerprints("$"), cornerExtExtensions("$")...),
 	"status-unknown": {{`media type: "text/plain", upstream "application/json"`,
 		"kept: the 404 body is plain text, as upstream's is, and says so where upstream's header claims JSON"}},
 	"status-signed-mapped": append(missingFingerprints("$"), degradedMapped("$")...),
 	"statuses-all": append(append(append(missingFingerprints("$[*]"),
-		unlistedIPSANs("$[name=corner-ip,state=signed]"), hiddenCSR),
+		compressedIPv6("$[name=corner-ip,state=signed]"), hiddenCSR),
 		cornerExtExtensions("$[name=corner-ext,state=signed]")...),
 		degradedMapped("$[name=corner-mapped,state=signed]")...),
 	"statuses-requested": append(missingFingerprints("$[*]"), hiddenCSR),
 	"statuses-signed": append(append(append(missingFingerprints("$[*]"),
-		unlistedIPSANs("$[name=corner-ip,state=signed]")),
+		compressedIPv6("$[name=corner-ip,state=signed]")),
 		cornerExtExtensions("$[name=corner-ext,state=signed]")...),
 		degradedMapped("$[name=corner-mapped,state=signed]")...),
 	"statuses-revoked": missingFingerprints("$[*]"),
@@ -210,11 +210,11 @@ func missingFingerprints(at string) []contractException {
 	}
 }
 
-// unlistedIPSANs is corner-ip's two DNS names listed without its two IP
-// addresses.
-func unlistedIPSANs(at string) contractException {
-	return contractException{at + ".subject_alt_names: 2 entries, upstream 4",
-		"#407: subject_alt_names leaves out IP addresses"}
+// compressedIPv6 is corner-ip's IPv6 SAN, which openvox-ca writes in Go's
+// compressed form and OpenVox Server in Java's uncompressed one.
+func compressedIPv6(at string) contractException {
+	return contractException{at + ".subject_alt_names[1]: value IP:2001:db8::1, upstream IP:2001:db8:0:0:0:0:0:1",
+		"kept: an IPv6 SAN is written in Go's compressed form; both name the same address"}
 }
 
 // cornerExtExtensions are the differences in corner-ext's authorisation

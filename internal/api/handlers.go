@@ -1126,6 +1126,19 @@ func dnsAltNames(names []string) []string {
 	return out
 }
 
+// subjectAltNames renders every SAN OpenVox Server lists: the IP SANs first,
+// each prefixed "IP:", then the DNS SANs prefixed "DNS:", each group in
+// certificate order, and [] rather than null when there are none. ipAddrs is
+// in ca.IPAddressStrings' text form. Other SAN types are left out, as they are
+// upstream.
+func subjectAltNames(ipAddrs, dnsNames []string) []string {
+	out := make([]string, 0, len(ipAddrs)+len(dnsNames))
+	for _, ip := range ipAddrs {
+		out = append(out, "IP:"+ip)
+	}
+	return append(out, dnsAltNames(dnsNames)...)
+}
+
 // timeFormat returns the time layout string to use for JSON date/time fields.
 func (s *Server) timeFormat() string {
 	if s.PuppetDateTimeFormat {
@@ -1153,14 +1166,13 @@ func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt st
 	fp := fingerprint(certPEM)
 	nb := cert.NotBefore.UTC().Format(timeFmt)
 	na := cert.NotAfter.UTC().Format(timeFmt)
-	dnsNames := dnsAltNames(cert.DNSNames)
 	return CertStatusResponse{
 		Name:                    subject,
 		State:                   state,
 		Fingerprint:             fp,
 		Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
-		DNSAltNames:             dnsNames,
-		SubjectAltNames:         dnsNames,
+		DNSAltNames:             dnsAltNames(cert.DNSNames),
+		SubjectAltNames:         subjectAltNames(ca.IPAddressStrings(cert.IPAddresses), cert.DNSNames),
 		AuthorizationExtensions: authExtensions(cert.Extensions),
 		SerialNumber:            newCertSerial(cert.SerialNumber, serialFmt),
 		NotBefore:               &nb,
@@ -1214,7 +1226,6 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt Seri
 
 	nbs := nb.UTC().Format(timeFmt)
 	nas := na.UTC().Format(timeFmt)
-	dnsNames := dnsAltNames(rec.DNSAltNames)
 	authExts := rec.AuthExtensions
 	if authExts == nil {
 		authExts = map[string]string{}
@@ -1225,8 +1236,8 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt Seri
 		State:                   rec.State,
 		Fingerprint:             fp,
 		Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
-		DNSAltNames:             dnsNames,
-		SubjectAltNames:         dnsNames,
+		DNSAltNames:             dnsAltNames(rec.DNSAltNames),
+		SubjectAltNames:         subjectAltNames(rec.IPAltNames, rec.DNSAltNames),
 		AuthorizationExtensions: authExts,
 		SerialNumber:            newCertSerial(serialInt, serialFmt),
 		NotBefore:               &nbs,
@@ -1250,14 +1261,13 @@ func certStatusFromCSR(subject string, csrPEM []byte) CertStatusResponse {
 			AuthorizationExtensions: map[string]string{},
 		}
 	}
-	dnsNames := dnsAltNames(csr.DNSNames)
 	return CertStatusResponse{
 		Name:                    subject,
 		State:                   "requested",
 		Fingerprint:             fp,
 		Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
-		DNSAltNames:             dnsNames,
-		SubjectAltNames:         dnsNames,
+		DNSAltNames:             dnsAltNames(csr.DNSNames),
+		SubjectAltNames:         subjectAltNames(ca.IPAddressStrings(csr.IPAddresses), csr.DNSNames),
 		AuthorizationExtensions: authExtensions(csr.Extensions),
 	}
 }

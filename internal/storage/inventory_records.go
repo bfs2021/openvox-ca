@@ -65,11 +65,24 @@ type inventoryRecordJSON struct {
 	AuthExtensions map[string]string `json:"auth_extensions,omitempty"`
 	State          string            `json:"state,omitempty"`
 	RevokedAt      *time.Time        `json:"revoked_at,omitempty"`
+	// IPAltNames is a pointer so that an absent key and an empty list decode
+	// differently: every populated projection writes the key, [] included,
+	// and its absence beside a fingerprint marks a record written before the
+	// field existed.
+	IPAltNames *[]string `json:"ip_alt_names,omitempty"`
 }
 
 func encodeInventoryRecord(rec CertRecord) ([]byte, error) {
 	if rec.State == "" {
 		rec.State = CertStateSigned
+	}
+	var ipNames *[]string
+	if rec.Fingerprint != "" {
+		ips := rec.IPAltNames
+		if ips == nil {
+			ips = []string{}
+		}
+		ipNames = &ips
 	}
 	return json.Marshal(inventoryRecordJSON{
 		Serial:         rec.Serial,
@@ -81,6 +94,7 @@ func encodeInventoryRecord(rec CertRecord) ([]byte, error) {
 		AuthExtensions: rec.AuthExtensions,
 		State:          rec.State,
 		RevokedAt:      rec.RevokedAt,
+		IPAltNames:     ipNames,
 	})
 }
 
@@ -88,6 +102,12 @@ func encodeInventoryRecord(rec CertRecord) ([]byte, error) {
 // SQL row decoder — which can salvage the canonical columns when only the
 // projection JSON is corrupt — the whole record shares one JSON value here, so
 // an undecodable value is a hard error: there is nothing left to fall back on.
+//
+// A projection without ip_alt_names predates that field and cannot say whether
+// the certificate has IP SANs, so it decodes as no projection at all, as the
+// SQL decoder treats its NULL column. A mutation that re-encodes such a record
+// (SetRevoked, say) therefore writes it back without its stale projection,
+// which leaves it in the state the repair pass backfills.
 func decodeInventoryRecord(data []byte) (CertRecord, error) {
 	var r inventoryRecordJSON
 	if err := json.Unmarshal(data, &r); err != nil {
@@ -110,6 +130,12 @@ func decodeInventoryRecord(data []byte) (CertRecord, error) {
 	}
 	if rec.State == "" {
 		rec.State = CertStateSigned
+	}
+	switch {
+	case r.IPAltNames != nil && len(*r.IPAltNames) > 0:
+		rec.IPAltNames = *r.IPAltNames
+	case r.IPAltNames == nil && rec.Fingerprint != "":
+		rec.CertProjection = CertProjection{}
 	}
 	return rec, nil
 }

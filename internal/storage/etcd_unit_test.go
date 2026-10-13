@@ -179,6 +179,54 @@ var _ = Describe("EtcdInventoryRecordCodec", func() {
 		Expect(got.State).To(Equal(CertStateSigned))
 	})
 
+	It("round-trips IP SANs", func() {
+		rec := CertRecord{
+			InventoryEntry: InventoryEntry{Serial: "0001", NotBefore: "nb", NotAfter: "na", Subject: "node1"},
+			CertProjection: CertProjection{
+				Fingerprint: "aa:bb:cc",
+				IPAltNames:  []string{"192.0.2.10", "2001:db8::1"},
+			},
+			State: CertStateSigned,
+		}
+		data, err := encodeInventoryRecord(rec)
+		Expect(err).NotTo(HaveOccurred())
+		got, err := decodeInventoryRecord(data)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(rec))
+	})
+
+	It("writes an empty ip_alt_names for a projection with no IP SANs, which reads back as a projection", func() {
+		rec := CertRecord{
+			InventoryEntry: InventoryEntry{Serial: "0001", NotBefore: "nb", NotAfter: "na", Subject: "node1"},
+			CertProjection: CertProjection{Fingerprint: "aa:bb:cc"},
+			State:          CertStateSigned,
+		}
+		data, err := encodeInventoryRecord(rec)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(data)).To(ContainSubstring(`"ip_alt_names":[]`))
+		got, err := decodeInventoryRecord(data)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(rec), "an empty list is not an absent one")
+	})
+
+	It("reads a projection written before ip_alt_names existed as no projection", func() {
+		got, err := decodeInventoryRecord([]byte(`{"serial":"0001","subject":"node1",` +
+			`"fingerprint":"aa:bb:cc","dns_alt_names":["node1"],"state":"revoked"}`))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.CertProjection).To(Equal(CertProjection{}),
+			"it cannot say whether the certificate has IP SANs, so readers must use the PEM")
+		Expect(got.Serial).To(Equal("0001"))
+		Expect(got.State).To(Equal(CertStateRevoked), "state is not part of the projection and survives")
+	})
+
+	It("leaves ip_alt_names out of a record with no projection", func() {
+		data, err := encodeInventoryRecord(CertRecord{InventoryEntry: InventoryEntry{
+			Serial: "0001", NotBefore: "nb", NotAfter: "na", Subject: "node1",
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(data)).NotTo(ContainSubstring("ip_alt_names"))
+	})
+
 	It("rejects an undecodable record outright", func() {
 		_, err := decodeInventoryRecord([]byte("{not-json"))
 		Expect(err).To(HaveOccurred(), "corrupt records must fail loudly: the whole record is one JSON value, so there are no canonical columns to salvage")

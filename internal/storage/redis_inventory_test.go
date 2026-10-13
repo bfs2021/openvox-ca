@@ -1230,6 +1230,7 @@ var _ = Describe("RedisCertIndex", func() {
 		proj := CertProjection{
 			Fingerprint:    "aa:bb:cc",
 			DNSAltNames:    []string{"node1", "node1.example.com"},
+			IPAltNames:     []string{"192.0.2.10", "2001:db8::1"},
 			AuthExtensions: map[string]string{"pp_auth_role": "webserver"},
 		}
 		Expect(svc.SetCertProjection(ctx, "0003", proj)).To(Succeed())
@@ -1238,6 +1239,7 @@ var _ = Describe("RedisCertIndex", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(recs[0].Fingerprint).To(Equal(proj.Fingerprint))
 		Expect(recs[0].DNSAltNames).To(Equal(proj.DNSAltNames))
+		Expect(recs[0].IPAltNames).To(Equal(proj.IPAltNames))
 		Expect(recs[0].AuthExtensions).To(Equal(proj.AuthExtensions))
 	})
 

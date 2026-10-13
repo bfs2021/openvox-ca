@@ -58,6 +58,7 @@ func certIndexRoundTrip(b *SQLBackend) {
 	proj := CertProjection{
 		Fingerprint:    "aa:bb:cc",
 		DNSAltNames:    []string{"node1", "node1.example.com"},
+		IPAltNames:     []string{"192.0.2.10", "2001:db8::1"},
 		AuthExtensions: map[string]string{"pp_auth_role": "webserver"},
 	}
 	Expect(svc.AppendInventory(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
@@ -81,6 +82,7 @@ func certIndexRoundTrip(b *SQLBackend) {
 	Expect(recs[0].Serial).To(Equal("0003"), "node1's latest issuance wins")
 	Expect(recs[0].Fingerprint).To(Equal(proj.Fingerprint))
 	Expect(recs[0].DNSAltNames).To(Equal(proj.DNSAltNames))
+	Expect(recs[0].IPAltNames).To(Equal(proj.IPAltNames))
 	Expect(recs[0].AuthExtensions).To(Equal(proj.AuthExtensions))
 	Expect(recs[1].Subject).To(Equal("node2"))
 	Expect(recs[1].Fingerprint).To(BeEmpty(), "appended without a projection")
@@ -103,7 +105,19 @@ func certIndexRoundTrip(b *SQLBackend) {
 	Expect(recs).To(HaveLen(2))
 	Expect(recs[0].State).To(Equal(CertStateSigned), "ClearCertRevoked restored node1")
 	Expect(recs[0].RevokedAt).To(BeNil())
+	// A projection with no IP SANs must still read back as one: SetProjection
+	// writes "[]" to ip_alt_names, and NULL there would mark it as predating
+	// the column.
 	Expect(recs[1].Fingerprint).To(Equal("dd:ee:ff"))
+	Expect(recs[1].IPAltNames).To(BeNil())
+
+	// A backfill carrying IP SANs, through the dialect's own UPDATE.
+	Expect(svc.SetCertProjection(ctx, "0002", CertProjection{
+		Fingerprint: "dd:ee:ff", IPAltNames: []string{"198.51.100.7"},
+	})).To(Succeed())
+	recs, _, err = svc.CertStatuses(ctx, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(recs[1].IPAltNames).To(Equal([]string{"198.51.100.7"}))
 }
 
 // certIndexMigrationRollback rolls every applied migration group back and
@@ -141,7 +155,63 @@ func certIndexMigrationRollback(b *SQLBackend) {
 	_, err := migrator.Migrate(ctx)
 	Expect(err).NotTo(HaveOccurred(), "Migrate (re-apply)")
 	expectCertIndexSchema(ctx, b)
+	exists, err := columnExists(ctx, b.db, inventoryTableV1, ipAltNamesColumnName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(exists).To(BeTrue(), "the re-apply must restore %s", ipAltNamesColumnName)
 	certIndexRoundTrip(b)
+}
+
+// ipAltNamesMigrationDownUp runs the ip_alt_names migration's down and up
+// steps on their own, against a table holding a row. The full rollback above
+// cannot check them: it unwinds the migration that creates the table too, so
+// every column is gone afterwards whatever the down step did. Shared with the
+// PostgreSQL/MySQL integration suites, like the helpers above.
+func ipAltNamesMigrationDownUp(b *SQLBackend) {
+	ctx := context.Background()
+	svc := NewWithBackend(b, "")
+	Expect(svc.TouchInventory(ctx)).To(Succeed(), "TouchInventory")
+	Expect(svc.InitHMAC(ctx)).To(Succeed(), "InitHMAC")
+	proj := CertProjection{Fingerprint: "aa:bb:cc", IPAltNames: []string{"192.0.2.10"}}
+	Expect(svc.AppendInventoryRecord(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1", &proj)).
+		To(Succeed())
+
+	migrator := migrate.NewMigrator(b.db, sqlMigrations)
+	var m *migrate.Migration
+	for _, candidate := range sqlMigrations.Sorted() {
+		if candidate.Name == "20261011000000" {
+			m = &candidate
+		}
+	}
+	Expect(m).NotTo(BeNil(), "the ip_alt_names migration must be registered under its file's timestamp")
+
+	Expect(m.Down(ctx, migrator, m)).To(Succeed(), "down")
+	// Put the column back even if an assertion below fails, so a shared
+	// integration database is left as the next spec expects it. bun_migrations
+	// still records the migration as applied, so nothing else would re-add it.
+	DeferCleanup(func(ctx SpecContext) {
+		Expect(m.Up(ctx, migrator, m)).To(Succeed(), "restoring %s for the next spec", ipAltNamesColumnName)
+	})
+	exists, err := columnExists(ctx, b.db, inventoryTableV1, ipAltNamesColumnName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(exists).To(BeFalse(), "down must drop %s", ipAltNamesColumnName)
+	entries, err := b.Entries(ctx)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(entries).To(HaveLen(1), "down must leave the inventory itself alone")
+
+	Expect(m.Up(ctx, migrator, m)).To(Succeed(), "up")
+	exists, err = columnExists(ctx, b.db, inventoryTableV1, ipAltNamesColumnName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(exists).To(BeTrue(), "up must add %s", ipAltNamesColumnName)
+
+	// The row now holds a fingerprint and NULL ip_alt_names, the shape every
+	// row has when the column is first added. It must read as no projection,
+	// so that readers fall back to the PEM and repair rewrites it.
+	putCertBlob(b, "node1")
+	recs, err := b.Statuses(ctx, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(recs).To(HaveLen(1))
+	Expect(recs[0].CertProjection).To(Equal(CertProjection{}),
+		"a row projected before %s existed must read as unprojected", ipAltNamesColumnName)
 }
 
 var _ = Describe("SQLiteCertIndex", func() {
@@ -151,6 +221,10 @@ var _ = Describe("SQLiteCertIndex", func() {
 
 	It("survives a migration rollback and re-apply", func() {
 		certIndexMigrationRollback(newSQLiteBackend())
+	})
+
+	It("drops and restores ip_alt_names through that migration's own steps", func() {
+		ipAltNamesMigrationDownUp(newSQLiteBackend())
 	})
 
 	It("persists the projection at append time and serves it back from Statuses", func() {
@@ -283,6 +357,55 @@ var _ = Describe("SQLiteCertIndex", func() {
 		row.AuthExts = "{not-json"
 		rec = row.record()
 		Expect(rec.CertProjection).To(Equal(CertProjection{}))
+	})
+
+	It("degrades a projection with corrupt ip_alt_names to a missing one", func() {
+		row := sqlInventoryRow{
+			Serial: "0001", Subject: "node1",
+			NotBefore: "2024-01-01T00:00:00UTC", NotAfter: "2029-01-01T00:00:00UTC",
+			State:       CertStateSigned,
+			Fingerprint: "aa:bb:cc",
+			DNSAltNames: `["node1"]`,
+			IPAltNames:  "{not-json",
+		}
+		Expect(row.record().CertProjection).To(Equal(CertProjection{}))
+	})
+
+	It("reads a projection written before ip_alt_names existed as a missing one", func() {
+		// NULL in ip_alt_names beside a fingerprint: a row projected by code
+		// that predates the column, or by a replica still running it. It
+		// cannot say whether the certificate has IP SANs, so readers must go
+		// to the PEM, and the repair pass rewrites it.
+		row := sqlInventoryRow{
+			Serial: "0001", Subject: "node1",
+			NotBefore: "2024-01-01T00:00:00UTC", NotAfter: "2029-01-01T00:00:00UTC",
+			State:       CertStateRevoked,
+			Fingerprint: "aa:bb:cc",
+			DNSAltNames: `["node1"]`,
+		}
+		rec := row.record()
+		Expect(rec.CertProjection).To(Equal(CertProjection{}))
+		Expect(rec.State).To(Equal(CertStateRevoked), "state is not part of the projection and survives")
+	})
+
+	It("stores a projection with no IP SANs at append time so that it reads back as one", func() {
+		ctx := context.Background()
+		svc, b := newCertIndexService()
+
+		proj := CertProjection{Fingerprint: "aa:bb:cc", DNSAltNames: []string{"node1"}}
+		line := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1"
+		Expect(svc.AppendInventoryRecord(ctx, line, &proj)).To(Succeed())
+		putCertBlob(b, "node1")
+
+		var stored *string
+		Expect(b.db.NewRaw("SELECT ip_alt_names FROM puppet_ca_inventory WHERE serial = ?", "0001").
+			Scan(ctx, &stored)).To(Succeed())
+		Expect(stored).To(HaveValue(Equal("[]")), "an empty list, never NULL, beside a fingerprint")
+
+		recs, _, err := svc.CertStatuses(ctx, "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(recs).To(HaveLen(1))
+		Expect(recs[0].CertProjection).To(Equal(proj))
 	})
 
 	It("degrades gracefully on backends without the capability", func() {

@@ -269,6 +269,10 @@ var _ = Describe("MySQL CertIndex", func() {
 	It("survives a migration rollback and re-apply", func() {
 		certIndexMigrationRollback(newMySQLBackend())
 	})
+
+	It("drops and restores ip_alt_names through that migration's own steps", func() {
+		ipAltNamesMigrationDownUp(newMySQLBackend())
+	})
 })
 
 var _ = Describe("MySQL schema migrations", func() {
