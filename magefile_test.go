@@ -1803,13 +1803,98 @@ jobs:
 	It("rejects alls-green fed something other than the whole needs context", func() {
 		bad := mutate(goodImages, "jobs: ${{ toJSON(needs) }}", "jobs: ${{ toJSON(needs.build) }}")
 		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
-			ContainSubstring(`container-images.yml job "aggregate" has no re-actors/alls-green step`)))
+			ContainSubstring(`container-images.yml job "aggregate" step 1 (re-actors/alls-green) has jobs`)))
+	})
+
+	// Each of these leaves the alls-green step in place and the build red,
+	// while the check passes: the decision is skipped, or its failure is
+	// swallowed, or it is told some failures do not count.
+	Describe("whether the decision can fail the job", func() {
+		const step = "      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0\n"
+
+		DescribeTable("the step's own options",
+			func(extra, want string) {
+				src := mutate(goodCI, step, step+extra)
+				err := verifyAggregateJobsIn(sources(src, goodImages))
+				if want == "" {
+					Expect(err).NotTo(HaveOccurred())
+				} else {
+					Expect(err).To(MatchError(ContainSubstring(want)))
+				}
+			},
+			Entry("accepts if: always()", "        if: always()\n", ""),
+			Entry("accepts continue-on-error: false", "        continue-on-error: false\n", ""),
+			Entry("rejects a condition that skips it on PRs", "        if: github.event_name == 'push'\n",
+				`ci.yml job "ci" step 1 (re-actors/alls-green) has condition`),
+			Entry("rejects continue-on-error: true", "        continue-on-error: true\n",
+				`ci.yml job "ci" step 1 (re-actors/alls-green) sets continue-on-error`),
+			// An expression may evaluate true, so only a literal false is safe.
+			Entry("rejects continue-on-error as an expression",
+				"        continue-on-error: ${{ github.event_name == 'pull_request' }}\n",
+				`ci.yml job "ci" step 1 (re-actors/alls-green) sets continue-on-error`),
+		)
+
+		It("rejects continue-on-error on the aggregate job", func() {
+			src := mutate(goodCI, "    if: always()\n", "    if: always()\n    continue-on-error: true\n")
+			Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(MatchError(
+				ContainSubstring(`ci.yml job "ci" sets continue-on-error`)))
+		})
+
+		// Which spelling the runner reads is not knowable here, so the guard
+		// must not pick one and pass on it.
+		It("rejects the jobs input spelt twice", func() {
+			src := mutate(goodCI, "          jobs: ${{ toJSON(needs) }}\n",
+				"          jobs: ${{ toJSON(needs) }}\n          Jobs: ${{ toJSON(needs.check) }}\n")
+			Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(MatchError(
+				ContainSubstring(`spells input "jobs" more than once`)))
+		})
+
+		It("rejects allowed-failures", func() {
+			src := mutate(goodCI, "          jobs: ${{ toJSON(needs) }}\n",
+				"          allowed-failures: unit\n          jobs: ${{ toJSON(needs) }}\n")
+			Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(MatchError(
+				ContainSubstring(`ci.yml job "ci" step 1 (re-actors/alls-green) allows failures ("unit")`)))
+		})
+
+		It("accepts allowed-failures written as alls-green's empty default", func() {
+			src := mutate(goodCI, "          jobs: ${{ toJSON(needs) }}\n",
+				"          allowed-failures: '[]'\n          jobs: ${{ toJSON(needs) }}\n")
+			Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
+		})
+
+		DescribeTable("allowed-skips",
+			func(ci, images, want string) {
+				err := verifyAggregateJobsIn(sources(ci, images))
+				Expect(err).To(MatchError(ContainSubstring(want)))
+			},
+			Entry("rejects any on ci.yml",
+				strings.Replace(goodCI, "          jobs:", "          allowed-skips: unit\n          jobs:", 1), goodImages,
+				`ci.yml job "ci" step 1 (re-actors/alls-green) has allowed-skips "unit"`),
+			Entry("rejects merge allowed to skip unconditionally", goodCI,
+				strings.Replace(goodImages,
+					"allowed-skips: ${{ needs.setup.outputs.push != 'true' && 'merge' || '' }}", "allowed-skips: merge", 1),
+				`container-images.yml job "aggregate" step 1 (re-actors/alls-green) has allowed-skips "merge"`),
+			Entry("rejects a widened list", goodCI,
+				strings.Replace(goodImages, "&& 'merge' ||", "&& 'merge,build' ||", 1),
+				`container-images.yml job "aggregate" step 1 (re-actors/alls-green) has allowed-skips`),
+			Entry("rejects the pinned value missing", goodCI,
+				strings.Replace(goodImages,
+					"          allowed-skips: ${{ needs.setup.outputs.push != 'true' && 'merge' || '' }}\n", "", 1),
+				`container-images.yml job "aggregate" step 1 (re-actors/alls-green) has allowed-skips ""`),
+		)
 	})
 
 	It("names a job the aggregate does not need", func() {
 		bad := mutate(goodImages, "needs: [setup, build]", "needs: [setup]")
 		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
 			ContainSubstring(`container-images.yml job "aggregate" does not need job "build"`)))
+	})
+
+	// Fails closed rather than passing: a needs it cannot read is reported.
+	It("reports a needs it cannot read", func() {
+		bad := mutate(goodImages, "needs: [setup, build]", "needs: {setup: build}")
+		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
+			ContainSubstring(`container-images.yml job "aggregate": needs:`)))
 	})
 
 	It("rejects an aggregate that needs nothing", func() {
@@ -1829,6 +1914,14 @@ jobs:
 	// of it as well.
 	It("exempts jobs that depend on the aggregate, transitively", func() {
 		src := goodCI + "  notify:\n    needs: automerge\n    steps:\n      - run: \"true\"\n"
+		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
+	})
+
+	// The walk's memo is per job. Shared across jobs, the first dependant
+	// marks automerge seen and the second is then reported as missing.
+	It("exempts every dependant, not only the first one walked", func() {
+		src := goodCI + "  announce:\n    needs: automerge\n    steps:\n      - run: \"true\"\n" +
+			"  notify:\n    needs: automerge\n    steps:\n      - run: \"true\"\n"
 		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
 	})
 
@@ -1855,13 +1948,33 @@ jobs:
 			"container-images.yml filters pull_request by paths-ignore"),
 		Entry("rejects types without synchronize", "  pull_request:\n    types: [opened, reopened]\n",
 			`container-images.yml's pull_request types omit "synchronize"`),
+		Entry("reports a trigger it cannot read", "  pull_request: [main]\n",
+			"container-images.yml: on.pull_request:"),
 	)
+
+	It("reports every filter on one trigger, not only the first", func() {
+		src := mutate(goodImages, "    types: [opened, synchronize, reopened]\n",
+			"    branches: [main]\n    paths: [Dockerfile]\n")
+		err := verifyAggregateJobsIn(sources(goodCI, src))
+		Expect(err).To(MatchError(ContainSubstring("filters pull_request by branches")))
+		Expect(err).To(MatchError(ContainSubstring("filters pull_request by paths")))
+	})
+
+	// Valid GitHub, but not a form this reads; reported rather than passed.
+	It("reports an on: it cannot read", func() {
+		src := mutate(goodImages, "on:\n  push:\n    branches: [main]\n    tags: [\"v*\"]\n  pull_request:\n"+
+			"    types: [opened, synchronize, reopened]\n", "on: [push, pull_request]\n")
+		Expect(verifyAggregateJobsIn(sources(goodCI, src))).To(MatchError(
+			ContainSubstring("container-images.yml: yaml: unmarshal errors")))
+	})
 
 	It("reports every violation, not only the first", func() {
 		badCI := mutate(goodCI, "name: CI success", "name: CI")
+		badCI = mutate(badCI, "    if: always()\n", "")
 		badImages := mutate(goodImages, "needs: [setup, build]", "needs: [setup]")
 		err := verifyAggregateJobsIn(sources(badCI, badImages))
 		Expect(err).To(MatchError(ContainSubstring(`ci.yml job "ci" is named "CI"`)))
+		Expect(err).To(MatchError(ContainSubstring(`ci.yml job "ci" has condition`)))
 		Expect(err).To(MatchError(ContainSubstring(`does not need job "build"`)))
 	})
 })

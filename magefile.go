@@ -683,12 +683,17 @@ type workflowGuardDoc struct {
 	} `yaml:"jobs"`
 }
 
-// pullRequestTrigger is the decoded on.pull_request node: the two keys that
-// scope a workflow by the PR's base branch. GitHub treats them as mutually
-// exclusive, but either one narrows the same field, so both are read.
+// pullRequestTrigger is the decoded on.pull_request node. The two branch keys
+// scope a workflow by the PR's base branch; GitHub treats them as mutually
+// exclusive, but either one narrows the same field, so both are read. The path
+// keys and types are read only by verifyRequiredCheckTrigger, which holds the
+// workflows carrying a required check to more than the base-scoping guard does.
 type pullRequestTrigger struct {
 	Branches       []string `yaml:"branches"`
 	BranchesIgnore []string `yaml:"branches-ignore"`
+	Paths          []string `yaml:"paths"`
+	PathsIgnore    []string `yaml:"paths-ignore"`
+	Types          []string `yaml:"types"`
 }
 
 // nolintlintCarveOutPins are the golangci-lint versions the nolintlint
@@ -1041,7 +1046,9 @@ func verifyWorkflowBaseScopingIn(sources map[string][]byte) error {
 // written the other way. Only base filters are covered: a paths filter also
 // skips runs, but it discriminates on what the PR changed rather than on where
 // it is aimed, so it is a deliberate choice about cost rather than the silent
-// base-scoping loss this guards.
+// base-scoping loss this guards. That choice is not open to a workflow that
+// carries a required check, ci.yml included: a PR its filter skips waits for
+// the check for ever, so verifyRequiredCheckTrigger refuses path filters there.
 func verifyPullRequestUnfilteredIn(name string, src []byte) error {
 	var doc workflowGuardDoc
 	if err := yaml.Unmarshal(src, &doc); err != nil {
@@ -1323,6 +1330,11 @@ type requiredCheckAggregate struct {
 	workflow string // file name under .github/workflows
 	job      string // job ID
 	name     string // job name, which is the check name the ruleset matches
+	// allowedSkips is the exact alls-green allowed-skips value the aggregate
+	// must carry, compared with whitespace removed; empty means none. Each
+	// allowed skip is a job whose skipping cannot fail the check, so it is
+	// pinned here rather than left to the workflow.
+	allowedSkips string
 }
 
 // requiredCheckAggregates mirrors the required status checks in main's
@@ -1332,7 +1344,11 @@ type requiredCheckAggregate struct {
 // ci.yml's "CI success", which is how #454 merged with them red.
 var requiredCheckAggregates = []requiredCheckAggregate{
 	{workflow: "ci.yml", job: "ci", name: "CI success"},
-	{workflow: "container-images.yml", job: "aggregate", name: "Container images success"},
+	{
+		workflow: "container-images.yml", job: "aggregate", name: "Container images success",
+		// merge runs only when the run pushes, so it may skip only then.
+		allowedSkips: "${{ needs.setup.outputs.push != 'true' && 'merge' || '' }}",
+	},
 }
 
 // requiredPullRequestTypes are the pull_request activity types a workflow
@@ -1343,18 +1359,25 @@ var requiredPullRequestTypes = []string{"opened", "synchronize", "reopened"}
 
 // aggregateWorkflowDoc is the slice of a workflow verifyAggregateJobsIn reads.
 type aggregateWorkflowDoc struct {
-	On   map[string]yaml.Node `yaml:"on"`
-	Jobs map[string]struct {
-		Name string `yaml:"name"`
-		If   string `yaml:"if"`
-		// Needs is a node because GitHub accepts a bare string as well as a
-		// list.
-		Needs yaml.Node `yaml:"needs"`
-		Steps []struct {
-			Uses string               `yaml:"uses"`
-			With map[string]yaml.Node `yaml:"with"`
-		} `yaml:"steps"`
-	} `yaml:"jobs"`
+	On   map[string]yaml.Node    `yaml:"on"`
+	Jobs map[string]aggregateJob `yaml:"jobs"`
+}
+
+type aggregateJob struct {
+	Name string `yaml:"name"`
+	If   string `yaml:"if"`
+	// Needs is a node because GitHub accepts a bare string as well as a list.
+	Needs yaml.Node `yaml:"needs"`
+	// ContinueOnError is a node because GitHub accepts an expression too.
+	ContinueOnError yaml.Node       `yaml:"continue-on-error"`
+	Steps           []aggregateStep `yaml:"steps"`
+}
+
+type aggregateStep struct {
+	Uses            string               `yaml:"uses"`
+	If              string               `yaml:"if"`
+	ContinueOnError yaml.Node            `yaml:"continue-on-error"`
+	With            map[string]yaml.Node `yaml:"with"`
 }
 
 // verifyAggregateJobs asserts that every required-check aggregate still
@@ -1383,11 +1406,15 @@ func verifyAggregateJobs() error {
 //   - The job keeps its name, which is the ruleset's contract.
 //   - Its condition is `always()`. Without it, a failed need skips the
 //     aggregate, and a ruleset counts a skipped check as passing.
-//   - It decides through re-actors/alls-green over `toJSON(needs)`, so a
-//     failed or cancelled need fails it.
+//   - It decides through re-actors/alls-green over `toJSON(needs)`, and
+//     nothing stops that decision failing the job: see verifyAggregateDecision.
 //   - Its `needs` lists every other job in the workflow, except jobs that
 //     themselves depend on the aggregate (ci.yml's automerge). A job added
 //     later and left out would gate nothing.
+//
+// The `on:` key must be a mapping. GitHub also accepts `on: pull_request` and
+// `on: [push, pull_request]`, but neither workflow uses them, and a form this
+// cannot read is reported rather than passed.
 func verifyAggregateJobsIn(sources map[string][]byte) error {
 	var errs []error
 	for _, agg := range requiredCheckAggregates {
@@ -1414,23 +1441,11 @@ func verifyAggregateJobsIn(sources map[string][]byte) error {
 			errs = append(errs, fmt.Errorf("%s is named %q, but main's ruleset requires the check %q; "+
 				"renaming it leaves every PR waiting for a check that never reports", where, job.Name, agg.name))
 		}
-		cond := stripSpace(job.If)
-		if cond != "always()" && cond != "${{always()}}" {
+		if !isAlways(job.If) {
 			errs = append(errs, fmt.Errorf("%s has condition %q, not always(); a failed need would skip it, "+
 				"and a ruleset counts a skipped check as passing", where, job.If))
 		}
-		decides := slices.ContainsFunc(job.Steps, func(s struct {
-			Uses string               `yaml:"uses"`
-			With map[string]yaml.Node `yaml:"with"`
-		}) bool {
-			inputs, _ := foldInputs(s.With)
-			return actionPath(s.Uses) == "re-actors/alls-green" &&
-				stripSpace(inputs["jobs"].Value) == "${{toJSON(needs)}}"
-		})
-		if !decides {
-			errs = append(errs, fmt.Errorf("%s has no re-actors/alls-green step with jobs: ${{ toJSON(needs) }}, "+
-				"so nothing turns a failed need into a failed check", where))
-		}
+		errs = append(errs, verifyAggregateDecision(where, agg, job)...)
 
 		needs, err := jobNeeds(job.Needs)
 		if err != nil {
@@ -1474,39 +1489,108 @@ func verifyAggregateJobsIn(sources map[string][]byte) error {
 	return errors.Join(errs...)
 }
 
+// verifyAggregateDecision returns why an aggregate's re-actors/alls-green
+// decision might not fail the job when a need failed. Each of these passes a
+// red build while the step itself is present:
+//
+//   - continue-on-error on the job or the step, which turns a failed decision
+//     into a success;
+//   - a step `if:` other than always(), which can skip the decision;
+//   - an input spelt twice in different case, so which value the runner reads
+//     is not something this guard can know;
+//   - `jobs` other than the whole needs context;
+//   - any allowed-failures, or allowed-skips other than the aggregate's own
+//     pinned value.
+func verifyAggregateDecision(where string, agg requiredCheckAggregate, job aggregateJob) []error {
+	var errs []error
+	if mayContinue(job.ContinueOnError) {
+		errs = append(errs, fmt.Errorf("%s sets continue-on-error, so a failed decision would still pass the check",
+			where))
+	}
+	deciding := 0
+	for i, step := range job.Steps {
+		if actionPath(step.Uses) != "re-actors/alls-green" {
+			continue
+		}
+		deciding++
+		at := fmt.Sprintf("%s step %d (re-actors/alls-green)", where, i+1)
+		inputs, repeated := foldInputs(step.With)
+		for _, key := range slices.Sorted(maps.Keys(repeated)) {
+			errs = append(errs, fmt.Errorf("%s spells input %q more than once in different case; "+
+				"the runner reads one of them, and this guard cannot tell which", at, key))
+		}
+		if stripSpace(inputs["jobs"].Value) != "${{toJSON(needs)}}" {
+			errs = append(errs, fmt.Errorf("%s has jobs %q, not ${{ toJSON(needs) }}, so a need it is not given "+
+				"cannot fail the check", at, inputs["jobs"].Value))
+		}
+		if step.If != "" && !isAlways(step.If) {
+			errs = append(errs, fmt.Errorf("%s has condition %q; a skipped decision passes the check", at, step.If))
+		}
+		if mayContinue(step.ContinueOnError) {
+			errs = append(errs, fmt.Errorf("%s sets continue-on-error, so a failed decision would still pass "+
+				"the check", at))
+		}
+		if v := inputs["allowed-failures"].Value; strings.TrimSpace(v) != "" && stripSpace(v) != "[]" {
+			errs = append(errs, fmt.Errorf("%s allows failures (%q); a required aggregate must fail on any "+
+				"failed need", at, v))
+		}
+		if got := inputs["allowed-skips"].Value; stripSpace(got) != stripSpace(agg.allowedSkips) {
+			errs = append(errs, fmt.Errorf("%s has allowed-skips %q, but %s pins %q; a job allowed to skip "+
+				"cannot fail the check, so widening the list is a decision for requiredCheckAggregates",
+				at, got, agg.workflow, agg.allowedSkips))
+		}
+	}
+	if deciding == 0 {
+		errs = append(errs, fmt.Errorf("%s has no re-actors/alls-green step, so nothing turns a failed need "+
+			"into a failed check", where))
+	}
+	return errs
+}
+
+// isAlways reports whether a condition is always(), bare or in an expression.
+func isAlways(cond string) bool {
+	c := stripSpace(cond)
+	return c == "always()" || c == "${{always()}}"
+}
+
+// mayContinue reports whether a continue-on-error value could be true: any
+// value but absent or a literal false, since an expression may evaluate true.
+func mayContinue(node yaml.Node) bool {
+	return node.Kind != 0 && !(node.Kind == yaml.ScalarNode && node.Value == "false")
+}
+
 // verifyRequiredCheckTrigger returns why a workflow carrying a required check
 // might not run on some pull request: a missing pull_request trigger, any
 // branch or path filter on it, or activity types narrower than
-// requiredPullRequestTypes.
+// requiredPullRequestTypes. verifyPullRequestUnfilteredIn checks the branch
+// filters too, for a different set of workflows; the path filters it allows
+// are refused here.
 func verifyRequiredCheckTrigger(workflow string, on map[string]yaml.Node) []error {
 	node, ok := on["pull_request"]
 	if !ok {
 		return []error{fmt.Errorf("%s declares no pull_request trigger, so its required check never reports on a PR",
 			workflow)}
 	}
-	var trigger struct {
-		Branches       []string `yaml:"branches"`
-		BranchesIgnore []string `yaml:"branches-ignore"`
-		Paths          []string `yaml:"paths"`
-		PathsIgnore    []string `yaml:"paths-ignore"`
-		Types          []string `yaml:"types"`
-	}
 	// An empty trigger is the usual spelling, and decodes to the zero value.
+	var trigger pullRequestTrigger
 	if node.Kind != 0 && node.Tag != "!!null" {
 		if err := node.Decode(&trigger); err != nil {
 			return []error{fmt.Errorf("%s: on.pull_request: %w", workflow, err)}
 		}
 	}
 	var errs []error
-	for key, filter := range map[string][]string{
-		"branches":        trigger.Branches,
-		"branches-ignore": trigger.BranchesIgnore,
-		"paths":           trigger.Paths,
-		"paths-ignore":    trigger.PathsIgnore,
+	for _, filter := range []struct {
+		key    string
+		values []string
+	}{
+		{"branches", trigger.Branches},
+		{"branches-ignore", trigger.BranchesIgnore},
+		{"paths", trigger.Paths},
+		{"paths-ignore", trigger.PathsIgnore},
 	} {
-		if len(filter) > 0 {
+		if len(filter.values) > 0 {
 			errs = append(errs, fmt.Errorf("%s filters pull_request by %s; a PR it skips never gets its "+
-				"required check and waits for ever", workflow, key))
+				"required check and waits for ever", workflow, filter.key))
 		}
 	}
 	if len(trigger.Types) > 0 {
@@ -1517,7 +1601,6 @@ func verifyRequiredCheckTrigger(workflow string, on map[string]yaml.Node) []erro
 			}
 		}
 	}
-	slices.SortFunc(errs, func(a, b error) int { return strings.Compare(a.Error(), b.Error()) })
 	return errs
 }
 

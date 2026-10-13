@@ -504,7 +504,9 @@ jobs:
   # failed or cancelled one fails this check. The one legitimate skip is
   # `merge`, which runs only when the run pushes: fork PRs and unpushed
   # dispatches skip it by design. It is allowed to skip only then, so a run
-  # that should have published cannot pass without publishing. `verify-tag`
+  # that should have published cannot pass without publishing; that is also
+  # why a same-repo PR cannot merge while GHCR or Sigstore is down. The
+  # expression is pinned in requiredCheckAggregates. `verify-tag`
   # has its steps gated rather than the job, so it always reports success
   # off a tag, and a skipped `build` means one of its needs failed.
   aggregate:

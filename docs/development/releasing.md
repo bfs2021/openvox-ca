@@ -109,10 +109,13 @@ chart can never name an image that does not exist.
    $ gh run list --branch main --limit 5
    ```
 
-   The *CI success* job is the aggregate gate — that is the one that must be
-   green, and it is also what the verify gate checks for on the tagged
-   commit, so an un-green commit cannot be released by accident. Wait for it
-   before tagging.
+   Two aggregate jobs must be green: *CI success* (`ci.yml`) and *Container
+   images success* (`container-images.yml`). The verify gate checks only *CI
+   success* on the tagged commit, so an un-green commit cannot be released by
+   accident, but nothing checks the images for you: a commit whose image build
+   failed on `main` passes the gate and then fails in the tag's image build,
+   after the Release and chart workflows have published. Wait for both before
+   tagging.
 
 3. **Check the tree builds the release artefacts.** This catches
    cross-compilation breakage before the workflow does:
