@@ -642,11 +642,17 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 	// paths relative to that. Left alone, "." and "../../internal/api" are the
 	// same package under two names, and the sweep would report this very
 	// package as unguarded.
+	//
+	// No fallback when the translation fails. There was one, returning the
+	// list's own spelling, and it could not run: filepath.Rel between two
+	// relative paths does not error. Had it run, it would have produced a key
+	// in the wrong spelling, and the sweep would then have reported a listed
+	// package as unknown -- naming the wrong defect. Loud, like the rest of it.
 	modulePath := func(dir string) string {
-		if rel, err := filepath.Rel("../..", filepath.Join("../../internal/api", dir)); err == nil {
-			return filepath.Clean(rel)
-		}
-		return filepath.Clean(dir)
+		GinkgoHelper()
+		rel, err := filepath.Rel("../..", filepath.Join("../../internal/api", dir))
+		Expect(err).NotTo(HaveOccurred(), dir)
+		return filepath.Clean(rel)
 	}
 	It("has a recorded decision for every package that imports internal/ca", func() {
 		known := map[string]bool{}
@@ -668,48 +674,46 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 			"no importer of internal/ca was found at all; the sweep is not working, "+
 				"and a sweep that finds nothing agrees with every list")
 
-		// Both directions, because one of them is the gate and the other is the
-		// sweep. The loop below checks importers ⊆ known: it catches a NEW
-		// importer nobody has ruled on, which is what this gate is for. It says
-		// nothing about known ⊆ importers -- a walk that silently stopped
-		// finding a real importer would shrink the set being audited, every
-		// remaining entry would still be known, and the gate would pass while
-		// covering less. That is the failure that hides itself, so it is
-		// asserted separately.
-		//
-		// Every entry in both lists is there because it imports internal/ca, so
-		// one that the sweep no longer reports means either the walk broke or
-		// the list is stale. Both want a human, and the message says which to
-		// check first.
-		swept := map[string]bool{}
-		for _, dir := range importers {
-			if rel, err := filepath.Rel("../..", dir); err == nil {
-				swept[filepath.Clean(rel)] = true
-			}
-		}
-		for want := range known {
-			Expect(swept).To(HaveKey(want), strings.Join([]string{
-				want + " is listed in guardedPackages or exemptPackages, but the sweep no",
-				"longer reports it as importing " + caImportPath + ".",
-				"Either the walk has stopped reaching it -- in which case the set this gate",
-				"audits has shrunk and every surviving entry still looks accounted for --",
-				"or the package genuinely stopped importing internal/ca and its entry is",
-				"stale. Check the walk first: a sweep that finds less agrees with more.",
-			}, "\n"))
-		}
+		checkSweep(known, importers)
+	})
 
-		for _, dir := range importers {
-			rel, err := filepath.Rel("../..", dir)
-			Expect(err).NotTo(HaveOccurred(), dir)
-			Expect(known).To(HaveKey(filepath.Clean(rel)), strings.Join([]string{
-				dir + " imports " + caImportPath + " and is in neither guardedPackages nor exemptPackages.",
-				"That is a decision nobody has recorded, not a test to silence.",
-				"If the package offers a surface something other than an operator at a",
-				"terminal can reach, add it to guardedPackages. If it does not, add it to",
-				"exemptPackages with the reason -- which is what makes the next reader able",
-				"to check the judgement rather than inherit it.",
-			}, "\n"))
-		}
+	// The verdict, driven with sets built for each arm. Both arms were
+	// verified once by reverting the tree, which is a verification the PR
+	// description kept and the suite did not. InterceptGomegaFailures carries
+	// on past the first failure, so asserting exactly one failure per case
+	// also shows each fixture trips one arm and not the other.
+	Describe("the sweep's verdict", func() {
+		It("fails on an importer that is in neither list", func() {
+			failures := InterceptGomegaFailures(func() {
+				checkSweep(map[string]bool{"internal/api": true},
+					[]string{"../../internal/api", "../../internal/unruled"})
+			})
+			Expect(failures).To(HaveLen(1))
+			Expect(failures[0]).To(ContainSubstring("internal/unruled"))
+			Expect(failures[0]).To(ContainSubstring("in neither guardedPackages nor exemptPackages"))
+		})
+
+		It("fails on a listed package the sweep no longer reports", func() {
+			failures := InterceptGomegaFailures(func() {
+				checkSweep(map[string]bool{"internal/api": true, "internal/vanished": true},
+					[]string{"../../internal/api"})
+			})
+			Expect(failures).To(HaveLen(1))
+			Expect(failures[0]).To(ContainSubstring("internal/vanished"))
+			// One line of the message, not a phrase spanning its line breaks:
+			// "no longer reports it" straddles one and never matches.
+			Expect(failures[0]).To(ContainSubstring("is listed in guardedPackages or exemptPackages"))
+		})
+
+		// The twin both failing cases need. Without it, a checkSweep that
+		// failed on everything would satisfy the two above.
+		It("passes when every importer is listed and every listing is swept", func() {
+			failures := InterceptGomegaFailures(func() {
+				checkSweep(map[string]bool{"internal/api": true, "internal/certstore": true},
+					[]string{"../../internal/api", "../../internal/certstore"})
+			})
+			Expect(failures).To(BeEmpty())
+		})
 	})
 
 	// The skips, driven against a tree built for them. Each of these
@@ -788,8 +792,78 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 					"given, and dropping the annotation on this arm alone would "+
 					"otherwise go unnoticed")
 		})
+
+		// The walk itself, one level up. caImportersIn has the same contract
+		// for a root it cannot walk: a sweep that did not run, not a tree with
+		// no importers in it. A broken walk would also starve the main sweep
+		// spec, which would then fail on "no importer was found at all" --
+		// true, but a step removed from the cause, and silent about which root.
+		It("fails rather than reporting a root it cannot walk as empty", func() {
+			absent := filepath.Join(GinkgoT().TempDir(), "no-such-root")
+
+			failures := InterceptGomegaFailures(func() { caImportersIn(absent) })
+
+			Expect(failures).NotTo(BeEmpty(),
+				"a root that cannot be walked must fail the sweep, not read as a module "+
+					"with no importers")
+			Expect(strings.Join(failures, "\n")).To(ContainSubstring("no-such-root"),
+				"the failure must name the root it was given")
+		})
 	})
 })
+
+// checkSweep is the sweep's verdict apart from the walk that feeds it. known
+// holds the recorded decisions, already in module-relative spelling; importers
+// is what a walk rooted at the module root ("../..") reports. Separated so that
+// each arm can be driven with sets built for it.
+//
+// Both directions, because one of them is the gate and the other is the
+// sweep. importers ⊆ known catches a NEW importer nobody has ruled on, which
+// is what this gate is for. known ⊆ importers catches the other failure, the
+// one that hides itself: a walk that silently stopped finding a real importer
+// shrinks the set being audited, every remaining entry is still known, and the
+// gate passes while covering less.
+//
+// Translation failures are fatal in both loops. The first used to skip a path
+// it could not translate, which is the same silent-fallback shape modulePath
+// had: an importer quietly dropped from swept would then surface as a listed
+// package the sweep "no longer reports" -- the wrong defect, named confidently.
+func checkSweep(known map[string]bool, importers []string) {
+	GinkgoHelper()
+	swept := map[string]bool{}
+	for _, dir := range importers {
+		rel, err := filepath.Rel("../..", dir)
+		Expect(err).NotTo(HaveOccurred(), dir)
+		swept[filepath.Clean(rel)] = true
+	}
+
+	// Every entry in both lists is there because it imports internal/ca, so one
+	// that the sweep no longer reports means either the walk broke or the list
+	// is stale. Both want a human, and the message says which to check first.
+	for want := range known {
+		Expect(swept).To(HaveKey(want), strings.Join([]string{
+			want + " is listed in guardedPackages or exemptPackages, but the sweep no",
+			"longer reports it as importing " + caImportPath + ".",
+			"Either the walk has stopped reaching it -- in which case the set this gate",
+			"audits has shrunk and every surviving entry still looks accounted for --",
+			"or the package genuinely stopped importing internal/ca and its entry is",
+			"stale. Check the walk first: a sweep that finds less agrees with more.",
+		}, "\n"))
+	}
+
+	for _, dir := range importers {
+		rel, err := filepath.Rel("../..", dir)
+		Expect(err).NotTo(HaveOccurred(), dir)
+		Expect(known).To(HaveKey(filepath.Clean(rel)), strings.Join([]string{
+			dir + " imports " + caImportPath + " and is in neither guardedPackages nor exemptPackages.",
+			"That is a decision nobody has recorded, not a test to silence.",
+			"If the package offers a surface something other than an operator at a",
+			"terminal can reach, add it to guardedPackages. If it does not, add it to",
+			"exemptPackages with the reason -- which is what makes the next reader able",
+			"to check the judgement rather than inherit it.",
+		}, "\n"))
+	}
+}
 
 // writeImporter creates dir and puts one non-test Go file in it that imports
 // internal/ca, which is the only property caImportersIn tests for.
