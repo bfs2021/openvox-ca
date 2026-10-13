@@ -114,9 +114,8 @@ var _ = Describe("The CA's own serving certificate", func() {
 			// having enabled TLS.
 			//
 			// No count here, deliberately: cfg.tlsEnabled's own doc comment
-			// gives the reason, and servingcert_wiring_test.go holds the sites
-			// to their measured number so that the number lives in one place
-			// that fails when it moves.
+			// gives the reason, and servingcert_serve_test.go holds the gates
+			// to their behaviour rather than to a number of sites.
 			Expect(cfgWith(filesEntry()).tlsEnabled()).To(BeTrue())
 		})
 

@@ -65,10 +65,10 @@ import (
 // that MAIN.GO wires that holder up. The handshake spec builds its own
 // tls.Config, so it would pass unchanged if the serve command stopped calling
 // buildServingCert, stopped provisioning, or pointed GetCertificate at the
-// operator-supplied reloader instead. Nothing anywhere starts the serve command
-// end to end with serving_cert and checks that an admin endpoint still refuses
-// a client with no certificate -- that gap is real and is recorded in the
-// disposition rather than papered over here.
+// operator-supplied reloader instead. That main.go's gates then behave --
+// that a self-provisioned CA refuses an admin route to a client with no
+// certificate, and is not refused for want of TLS on a real interface -- is
+// servingcert_serve_test.go's, which starts the serve command end to end.
 var _ = Describe("the serve command's serving-certificate wiring", func() {
 	var file *ast.File
 
@@ -303,15 +303,21 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 	// The predicate's call sites, which servingcert_test.go's own spec cannot
 	// reach: it asserts what tlsEnabled returns, not that anything reads it.
 	//
-	// The mTLS site is why this is a spec rather than a comment: a residual
-	// `cfg.TLSCert != "" && cfg.TLSKey != ""` there leaves a self-provisioned
-	// CA serving HTTPS with no client authentication, which is a security
-	// regression that nothing else in the suite notices.
+	// What the gates DO is servingcert_serve_test.go's job, which starts the
+	// serve command with a serving_cert and judges it from a client: the mTLS
+	// middleware, the listener's TLS config, ServeTLS and the plain-HTTP
+	// refusal each fail a spec there if they stop seeing serving_cert, whatever
+	// the spelling. This spec is the cheap structural half -- it names the
+	// commonest regression, an open-coded tls_cert/tls_key pair, in its own
+	// words rather than as a refused handshake.
 	//
-	// The number of sites is asserted below and stated nowhere else. It was
-	// written into this comment as "five" while the assertion said eight and
-	// cfg.tlsEnabled's doc enumerated five decisions -- three numbers for one
-	// fact, which is the drift that doc comment explicitly declines to invite.
+	// It used to hold main.go to a count of reads of the predicate's local as
+	// well. The count fails on a refactor that keeps behaviour, and passes when
+	// a deleted gate is masked by any unrelated read, so the behavioural specs
+	// replaced it. Three reads are now pinned by neither: the puppet_server
+	// warning, srv.PlainHTTP and the status line. None of them opens anything
+	// -- srv.PlainHTTP only withholds /generate's private keys, so losing its
+	// read fails closed -- which is why they were not worth the count.
 	It("reads the TLS predicate rather than tls_cert/tls_key directly", func() {
 		var predicateReads, rawReads int
 		ast.Inspect(file, func(n ast.Node) bool {
@@ -340,32 +346,6 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 			"main.go never calls cfg.tlsEnabled(), so nothing in the serve command "+
 				"knows a self-provisioned CA serves TLS")
 
-		// The predicate is called once and its result read through a local at
-		// every gate, so counting calls proves one assignment and nothing else
-		// -- which is weaker than this spec's own claim. Count the reads of
-		// that local instead, and hold them to the number of gates
-		// cfg.tlsEnabled's doc comment enumerates: the plain-HTTP refusal, the
-		// mTLS config, the listener's TLS config, ServeTLS, and the status
-		// line. Deleting a gate now fails here rather than only its raw-pair
-		// spelling.
-		var gateReads int
-		ast.Inspect(file, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok && id.Name == "tlsConfigured" {
-				gateReads++
-			}
-			return true
-		})
-		// Eight, measured: the assignment, the plain-HTTP refusal and its
-		// puppet_server warning, srv.PlainHTTP, the mTLS middleware, the
-		// listener's TLS config, the status line, and ServeTLS. The floor is
-		// the measured count rather than a round number below it -- set one
-		// lower, a mutation that replaced a single gate with an open-coded
-		// equivalent still passed.
-		Expect(gateReads).To(BeNumerically(">=", 8),
-			"main.go reads the TLS predicate at fewer sites than it did: a gate has "+
-				"been deleted or open-coded, and cfg.tlsEnabled's doc comment enumerates "+
-				"which ones must read it -- the plain-HTTP refusal, the mTLS middleware, "+
-				"the listener's TLS config, ServeTLS and the status line")
 		Expect(rawReads).To(Equal(0),
 			"main.go still tests cfg.TLSCert and cfg.TLSKey together instead of "+
 				"cfg.tlsEnabled(); a self-provisioned CA satisfies tlsEnabled but not "+
