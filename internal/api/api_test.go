@@ -1682,6 +1682,18 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(Equal(fmt.Sprintf(withoutCSR, "cleaned-node")))
 		})
 
+		It("answers 409 when the request carries a cert_ttl", func() {
+			// A cert_ttl sends the handler through SignWithTTL rather than
+			// Sign, a separate call whose error reaches the same answer.
+			issue(mux, "ttl-node")
+			ttl := 3600
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed", CertTTL: &ttl})
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_status/ttl-node", bytes.NewReader(body)))
+			Expect(rr.Code).To(Equal(http.StatusConflict))
+			Expect(rr.Body.String()).To(Equal(fmt.Sprintf(withoutCSR, "ttl-node")))
+		})
+
 		Context("when storage cannot say", func() {
 			// 503 rather than either answer, since each would assert a state
 			// nothing has read.
