@@ -110,6 +110,14 @@ type CA struct {
 	// precedence over this value.
 	LeafValidityDays int
 
+	// IssueClock, when non-nil, is the clock issuance reads instead of the
+	// wall clock: a new leaf's validity starts from it, and it decides whether
+	// the CA certificate has expired. Nothing else in the CA reads it. The API
+	// contract spec pins it to the moment its recorded store was captured, so
+	// the replay answers the same whatever today's date. Set it before the CA
+	// issues anything.
+	IssueClock func() time.Time
+
 	// OCSPURLs, when non-nil, causes newly issued certs to embed an AIA
 	// extension pointing at the OCSP responder. Set before calling Init().
 	OCSPURLs []string

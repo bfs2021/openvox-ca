@@ -652,6 +652,14 @@ func defaultLeafExtKeyUsage() []x509.ExtKeyUsage {
 	return []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
 }
 
+// issueNow is the time issuance reads: IssueClock if set, else the wall clock.
+func (c *CA) issueNow() time.Time {
+	if c.IssueClock != nil {
+		return c.IssueClock()
+	}
+	return time.Now()
+}
+
 // issueLeafLocked builds, signs, and persists a leaf certificate for subject
 // from the given public key, SANs, extended key usages, and extra extensions
 // (Puppet OIDs from the signing path; every carried extension of the original
@@ -713,7 +721,7 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 	}
 	serialStr := serialHexStr(serialInt)
 
-	now := time.Now().UTC()
+	now := c.issueNow().UTC()
 
 	validity := certValidity
 	if ttl > 0 {
@@ -725,7 +733,7 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 	// Cap validity to the CA certificate's remaining lifetime.
 	// A leaf cert must never outlive the CA that signed it; if it did, the cert
 	// would appear valid after the CA cert expired, breaking chain verification.
-	caRemaining := time.Until(c.CACert.NotAfter)
+	caRemaining := c.CACert.NotAfter.Sub(now)
 	if caRemaining <= 0 {
 		return nil, fmt.Errorf("ca certificate has expired")
 	}

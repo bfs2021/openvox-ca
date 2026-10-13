@@ -429,15 +429,23 @@ changes. Review the diff for changed shapes rather than values, and expect
 exceptions to need their `$[name=…]` paths revisited only when a fixture is
 added or renamed.
 
-Re-record when the pin moves to a new OpenVox Server release. Nothing in CI
-forces it: a fixture records the image it came from as provenance only, so a
-Renovate bump, digest or tag, never fails the suite on its own. The fixtures
+Nothing ever forces a re-record. The contract is what OpenVox Server answered
+on the date and image each fixture names, and the suite keeps checking against
+that: a fixture records the image it came from as provenance only, so a
+Renovate bump, digest or tag, never fails the suite on its own, and the passing
+of time does not either (see below). Re-record when a maintainer chooses to
+follow a change upstream. The fixtures
 cite the upstream source lines behind each response, checked against one
 release, `citedTag` in the recorder, which refuses an image built from any
 other. Moving to a new release therefore means rechecking each line range in
 `cases()` against its tag, then moving `citedTag`, then re-recording.
 
-One spec does force a re-record: every certificate and CRL in `cadir/` must
-stay valid for another 180 days. The recording's CA and certificates last five
-years, so this fires about four and a half years after the last recording,
-while their status is still what the fixtures say.
+The recording's CA and certificates expire, and openvox-ca refuses to issue
+from a CA past its expiry. So each spec pins the CA's issuance clock
+(`ca.CA.IssueClock`) to the moment the snapshot's CRL was issued, and the
+replay answers the same whatever today's date. Nothing else on the replay
+path reads the clock in a way the contract compares: re-signing a CRL works
+from an expired CA, and the replay bypasses the TLS client checks, which do
+read it. A twin spec moves the
+clock past the CA's expiry and requires a recorded signing to stop matching,
+so the pin cannot quietly stop mattering.

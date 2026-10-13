@@ -26,10 +26,11 @@
 // certificate-derived values exactly.
 //
 // CI never runs this; it reads the committed fixtures, and nothing in CI
-// notices when the image test/compose-migration.yml pins moves. Re-record when
-// that pin moves to a new OpenVox Server release, after rechecking the line
-// ranges cases() cites and moving citedTag, or when the contract spec reports
-// that the recorded CA is within 180 days of expiry:
+// notices when the image test/compose-migration.yml pins moves. Nothing ever
+// forces a re-record: the contract is what OpenVox Server answered on the date
+// and image each fixture names. Re-record when a maintainer chooses to follow
+// a change upstream, after rechecking the line ranges cases() cites and moving
+// citedTag:
 //
 //	go run ./test/contract/record
 //

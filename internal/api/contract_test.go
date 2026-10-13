@@ -26,9 +26,9 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io/fs"
 	"math/big"
 	"mime"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -599,12 +599,27 @@ func seedContractStore(store *storage.StorageService) *api.Server {
 	}
 
 	myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet")
+	// The replay runs at the moment the store was recorded, not today: the
+	// recording's CA expires, and a CA past its expiry refuses to issue.
+	snapshotAt := contractSnapshotTime()
+	myCA.IssueClock = func() time.Time { return snapshotAt }
 	Expect(myCA.Init(ctx)).To(Succeed())
 	srv := api.New(myCA)
 	// Upstream's date layout is openvox-ca's opt-in; see docs/api.md's
 	// "Differences from OpenVox Server".
 	srv.PuppetDateTimeFormat = true
 	return srv
+}
+
+// contractSnapshotTime is when the recorded store's CRL was issued: a moment
+// during the recording, when the recording's CA was valid.
+func contractSnapshotTime() time.Time {
+	crlPEM, err := os.ReadFile(filepath.Join(contractDir, "cadir", "ca_crl.pem"))
+	Expect(err).NotTo(HaveOccurred())
+	chain, err := ca.DecodeCRLChain(crlPEM)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(chain).NotTo(BeEmpty())
+	return chain[0].ThisUpdate
 }
 
 // certSerialAndValidity reads a certificate's serial and validity straight
@@ -685,50 +700,30 @@ var _ = Describe("Puppet CA API contract", func() {
 		}
 	})
 
-	// The fixtures are a snapshot of a live CA, and certificate status
-	// changes when its certificates expire. Fail well before that, so the
-	// re-record is a chore rather than an outage.
-	It("holds certificates and CRLs that stay valid for another 180 days", func() {
-		horizon := time.Now().AddDate(0, 0, 180)
-		var expiring []string
-		root, err := os.OpenRoot(filepath.Join(contractDir, "cadir"))
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(root.Close)
-		Expect(fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || path == "ca_key.pem" {
-				return err
+	// The recording's CA expires, and a CA past its expiry refuses to issue,
+	// so seedContractStore pins the replay's issuance clock to the recording.
+	// This twin shows the pin is what keeps the signing cases passing: the
+	// same request on the same store, with only the clock moved past the CA's
+	// expiry, no longer answers as OpenVox Server did.
+	It("answers a recorded signing as upstream did only on the recording's clock", func() {
+		var sign contractFixture
+		for _, f := range loadContractFixtures() {
+			if f.Name == "status-put-sign" {
+				sign = f
 			}
-			rest, err := fs.ReadFile(root.FS(), path)
-			if err != nil {
-				return err
-			}
-			for {
-				var block *pem.Block
-				block, rest = pem.Decode(rest)
-				if block == nil {
-					return nil
-				}
-				switch block.Type {
-				case "CERTIFICATE":
-					_, _, notAfter, err := certSerialAndValidity(block.Bytes)
-					if err != nil {
-						return err
-					}
-					if notAfter.Before(horizon) {
-						expiring = append(expiring, fmt.Sprintf("%s: a certificate expires %s", path, notAfter))
-					}
-				case "X509 CRL":
-					crl, err := x509.ParseRevocationList(block.Bytes)
-					if err != nil {
-						return err
-					}
-					if crl.NextUpdate.Before(horizon) {
-						expiring = append(expiring, fmt.Sprintf("%s: CRL from %s is due %s", path, crl.Issuer, crl.NextUpdate))
-					}
-				}
-			}
-		})).To(Succeed())
-		Expect(expiring).To(BeEmpty(), "re-record the contract: go run ./test/contract/record")
+		}
+		Expect(sign.Name).To(Equal("status-put-sign"))
+
+		pinned := seedContractCA(GinkgoT().TempDir())
+		rr := serveContract(pinned, sign)
+		Expect(checkContract(sign, rr.Code, rr.Header().Get("Content-Type"), rr.Body.Bytes())).To(BeEmpty())
+
+		late := seedContractCA(GinkgoT().TempDir())
+		expired := late.CA.CACert.NotAfter.Add(time.Hour)
+		late.CA.IssueClock = func() time.Time { return expired }
+		rr = serveContract(late, sign)
+		Expect(checkContract(sign, rr.Code, rr.Header().Get("Content-Type"), rr.Body.Bytes())).To(
+			Equal([]string{fmt.Sprintf("status: %d, upstream %d", http.StatusConflict, sign.Response.Status)}))
 	})
 })
 
