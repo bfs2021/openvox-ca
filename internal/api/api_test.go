@@ -1488,6 +1488,14 @@ var _ = Describe("API Workflow", func() {
 			csrPath := filepath.Join(myCA.Storage.CSRDir(), subject+".pem")
 			Expect(os.MkdirAll(csrPath, 0o755)).To(Succeed())
 
+			// Captured at Info, below the record's own level, so that a
+			// downgrade is still captured and then fails the level assertion
+			// rather than vanishing from the buffer.
+			var logBuf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			DeferCleanup(func() { slog.SetDefault(orig) })
+
 			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
 			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
 			rr := httptest.NewRecorder()
@@ -1499,8 +1507,30 @@ var _ = Describe("API Workflow", func() {
 				"a read that failed is not a subject the inventory does not list")
 			Expect(rr.Body.String()).NotTo(ContainSubstring("unsigned csr"),
 				"nor is it a queued request; that is the thing we could not determine")
-			// The cause names a storage path, so it must stay in the log.
-			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir))
+
+			// The body defers to the server log, so the log must carry what the
+			// body withholds: the read failure itself, which names a storage
+			// path. Both halves are asserted against the same value -- present
+			// in the record, absent from the body -- so the leak guard is
+			// checked against a path known to have been produced, rather than
+			// against a body that is a fixed literal and could not contain it
+			// anyway.
+			var record string
+			for _, line := range strings.Split(logBuf.String(), "\n") {
+				if strings.Contains(line, "could not determine whether a certificate request exists") {
+					record = line
+				}
+			}
+			Expect(record).NotTo(BeEmpty(),
+				"the body sends the operator to the server log, so the log must have the record")
+			Expect(record).To(ContainSubstring("level=WARN"))
+			Expect(record).To(ContainSubstring("subject=" + subject))
+			Expect(record).To(ContainSubstring(csrPath),
+				"the cause names the path, and the log is where it belongs")
+			// tmpDir rather than csrPath: it is a prefix of csrPath, so this is
+			// the broader of the two and also refuses a partial path.
+			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir),
+				"the same path must not reach the client")
 		})
 
 		// No pair-comparison spec here, deliberately. One existed and was
