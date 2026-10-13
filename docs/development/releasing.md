@@ -46,17 +46,16 @@ Each tarball contains both binaries, `openvox-ca` and `openvox-ca-ctl` (mode
 0755), and the systemd unit `openvox-ca.service` (mode 0644) — see [running
 under systemd](../systemd.md). Only Linux is built: there are no macOS or
 Windows release artefacts. To build the same four tarballs (plus a
-tarballs-only `checksums.txt`) locally in one go, run `mage build:dist`. Once
-[#282](https://github.com/voxpupuli/openvox-ca/pull/282) merges,
-`mage build:packages` will build the packages from those tarballs the same way
-— it is an ordinary local target, not a workflow-only step. The SBOMs and the
-provenance bundle are the two things that will still not build locally: they
-are produced by the release workflow only.
+tarballs-only `checksums.txt`) locally in one go, run `mage build:dist`;
+`mage build:packages` then builds the packages from those tarballs the same
+way — it is an ordinary local target, not a workflow-only step. The SBOMs and
+the provenance bundle are the two things that do not build locally: they are
+produced by the release workflow only.
 
 ### Packages
 
 The `.deb` and `.rpm` are built from the tarballs, not from a separate compile:
-the binaries inside `openvox-ca_X.Y.Z_amd64.deb` are byte-for-byte the ones
+the binaries inside `openvox-ca_X.Y.Z-1_amd64.deb` are byte-for-byte the ones
 inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. What follows from that:
 
 - **No package-specific SBOM.** The variant's existing SPDX and CycloneDX pair
@@ -69,19 +68,22 @@ inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. What follows from that:
 - **The packages are attested with no extra step.** They are listed in
   `checksums.txt`, and the attestation's subjects are exactly that file's
   lines, so they acquire the same SLSA provenance the tarballs have.
-- **The exact filenames are nfpm's, and #250 fixes them.** The shapes above are
-  the conventional ones each format uses, but the rpm `release` field (the
-  `-1`) and any epoch are nfpm configuration, so treat the worked examples here
-  as illustrative until #282 has merged. Nothing in the repository checks them:
+- **The exact filenames are nfpm's.** Each is that format's conventional shape,
+  built from `packaging/nfpm.yaml`. The `-1` in both is its `release` field,
+  which nfpm appends to the deb's version and gives the rpm as a field of its
+  own. There is no epoch; setting one, or changing the release, changes every
+  filename above. Nothing in the repository checks the examples in this file:
   `verifyDistVariants` reads the workflows, not this file, and even there it
   matches only globbed extensions by design — so a filename written in prose
   cannot satisfy a guard by being written down.
-- **`packageFormats` in `magefile.go` is the list of formats, and #250 must
-  build from it.** `verifyDistVariants` holds `release.yml`'s package counts
-  and globs to that variable, but it cannot see the packaging code, so nothing
-  stops an implementation of `mage build:packages` carrying a second list of
-  its own — which is the drift the `packaged` field was made a field to avoid.
-  Whoever implements #250 should read the formats from `packageFormats`.
+- **`packageFormats` in `magefile.go` is the list of formats, and
+  `mage build:packages` builds from it.** `verifyDistVariants` holds
+  `release.yml`'s package counts and globs to that variable, and the packaging
+  code iterates the same variable rather than a list of its own — which is the
+  drift the `packaged` field was made a field to avoid. `verifyDistVariants`
+  cannot see the packaging code, though, so it is not what keeps the two
+  together: a change giving the packaging code a second list must not be
+  waved through on the strength of that check passing.
 - **The FIPS variants are not packaged.** An operator under a FIPS obligation
   installs into a controlled estate rather than from a repository, so
   `linux_amd64_fips` and `linux_arm64_fips` ship as tarballs only. This is
@@ -298,7 +300,7 @@ Three things worth knowing that belong here rather than there:
   inside the package to verify. The `.deb` is in the same position for a
   different reason: `apt` verifies a repository's `InRelease` index rather than
   individual `.deb` files, and these packages are **release assets, not a
-  repository** — so `apt install ./openvox-ca_X_amd64.deb` or `dpkg -i` does no
+  repository** — so `apt install ./openvox-ca_X-1_amd64.deb` or `dpkg -i` does no
   signature check at all. Index verification starts applying only once these
   packages are served from a signed apt repository, which does not exist yet —
   publishing them anywhere is
