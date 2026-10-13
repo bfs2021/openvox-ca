@@ -4035,8 +4035,8 @@ config:
 			// this also pins that a postgres scheme is set aside first.
 			name:       "a postgres sql_dsn without a password stays in config",
 			sets:       []string{tls},
-			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db:5432/ca?sslmode=require'\n",
-			wants:      []string{"sql_dsn: postgres://ca@db:5432/ca?sslmode=require"},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db:5432/ca?sslmode=verify-full'\n",
+			wants:      []string{"sql_dsn: postgres://ca@db:5432/ca?sslmode=verify-full"},
 		},
 		{
 			// The same for the other spellings pgdriver accepts: net/url
@@ -4050,16 +4050,16 @@ config:
 			// No user part at all, and no @: the port's colon is not a password.
 			name:       "a postgres sql_dsn with no user part stays in config",
 			sets:       []string{tls},
-			valuesYAML: "config:\n  sql_dsn: 'postgres://db:5432/ca?sslmode=require'\n",
-			wants:      []string{"sql_dsn: postgres://db:5432/ca?sslmode=require"},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://db:5432/ca?sslmode=verify-full'\n",
+			wants:      []string{"sql_dsn: postgres://db:5432/ca?sslmode=verify-full"},
 		},
 		{
 			// An empty password= parameter is no secret, as an empty userinfo
 			// password is not.
 			name:       "a sql_dsn with an empty password= parameter stays in config",
 			sets:       []string{tls},
-			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?password=&sslmode=require'\n",
-			wants:      []string{"sql_dsn: postgres://ca@db/ca?password=&sslmode=require"},
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?password=&sslmode=verify-full'\n",
+			wants:      []string{"sql_dsn: postgres://ca@db/ca?password=&sslmode=verify-full"},
 		},
 		{
 			// pgdriver's socket form, where the host part names the database.
@@ -4688,7 +4688,7 @@ config:
 		{
 			name:       "a postgres sql_dsn carrying a password",
 			sets:       []string{tls},
-			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PGSECRET@db:5432/ca?sslmode=require'\n",
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PGSECRET@db:5432/ca?sslmode=verify-full'\n",
 			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
 			notWants:   []string{"PGSECRET"},
 		},
@@ -4802,7 +4802,7 @@ config:
 			// cutting there, as go-sql-driver would, finds no @.
 			name:       "a pathless postgres sql_dsn whose password contains an unescaped slash",
 			sets:       []string{tls},
-			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG/SECRET@db?sslmode=require'\n",
+			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG/SECRET@db?sslmode=verify-full'\n",
 			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
 			notWants:   []string{"PG/SECRET"},
 		},
