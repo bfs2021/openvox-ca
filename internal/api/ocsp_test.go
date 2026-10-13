@@ -35,6 +35,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -85,6 +86,25 @@ func signCert(myCA *ca.CA, subject string) *x509.Certificate {
 	cert, err := x509.ParseCertificate(block.Bytes)
 	Expect(err).NotTo(HaveOccurred())
 	return cert
+}
+
+// lockedBuffer is a bytes.Buffer safe to share between slog's writer and the
+// spec reading it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // ocspReqDER builds a basic OCSP request DER for cert issued by issuer.
@@ -256,9 +276,11 @@ var _ = Describe("OCSP HTTP Handler", func() {
 		cert := signCert(myCA, "foreign-issuer-log-node")
 		reqDER := foreignIssuerRequest(cert)
 
-		var buf bytes.Buffer
+		// slog's default is process-global, so a goroutine a previous spec
+		// left running can log into this buffer while the spec reads it.
+		buf := &lockedBuffer{}
 		orig := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		DeferCleanup(func() { slog.SetDefault(orig) })
 
 		req := httptest.NewRequest(http.MethodPost, "/ocsp", bytes.NewReader(reqDER))
@@ -271,7 +293,9 @@ var _ = Describe("OCSP HTTP Handler", func() {
 		// httptest.NewRequest's RemoteAddr is 192.0.2.1:1234.
 		Expect(out).To(ContainSubstring("client_ip=192.0.2.1"))
 		Expect(out).To(ContainSubstring(strings.ToUpper(cert.SerialNumber.Text(16))))
-		Expect(out).NotTo(ContainSubstring("level=WARN"))
+		// The specific line the default branch would write, rather than any
+		// WARN, which an unrelated straggler could also produce.
+		Expect(out).NotTo(ContainSubstring(`msg="OCSP request error"`))
 	})
 
 	// --- Bad request ---
