@@ -2313,6 +2313,8 @@ See [the status response](api.md#certificate-status) for the exact rendering.
 ```text
 <cadir>/
   ca_crt.pem          CA certificate
+  ca_key.pem          CA private key (mode 0600; encrypted PEM when --encrypt-ca-key;
+                      private/ca_key.pem instead where an existing cadir keeps it there)
   ca_pub.pem          CA public key
   ca_crl.pem          Certificate Revocation List
   inventory.txt       Signed certificate log (hex serial, dates, subject per line)
@@ -2323,13 +2325,13 @@ See [the status response](api.md#certificate-status) for the exact rendering.
   locks/              Same-host lock files (mode 0600; empty but for the store-wide
                       instance lock, which records its holder) — see below
   private/
-    ca_key.pem              CA private key (mode 0600; encrypted PEM when --encrypt-ca-key)
     {subject}_key.pem       Server-side generated private keys (mode 0600)
 ```
 
-> **Note:** Serial numbers are cryptographically random (128-bit). The `serial`
-> file used by older Puppet CAs for sequential serial tracking is no longer
-> written or read by this server.
+> **Note:** Serial numbers are cryptographically random (128-bit). openvox-ca
+> never reads the `serial` file older Puppet CAs track sequential serials in.
+> It writes `0001` there when the file is absent and otherwise leaves it alone,
+> because OpenVox Server issues from it if the cadir is handed back.
 
 The full on-disk layout, including the inventory HMAC files, is documented in
 [storage backends](storage-backends.md#filesystem-backend-default). Other backends
@@ -2341,11 +2343,10 @@ store the same logical state elsewhere.
 | --- | --- |
 | Directories | `0750` |
 | Private keys | `0600` |
-| CRL file | `0600` |
+| Inventory and its integrity value | `0600` |
 | Pending-supersession list | `0600` |
 | Lock files under `locks/` | `0600` |
-| Public data (certs, CSRs) | `0644` |
-| Inventory | `0600` |
+| Public data (certs, CSRs, CA certificate, CRL) | `0644` |
 
 Blob modes — the private keys, the CRL, the supersession list, the inventory
 and the public data — are set on each file as it is created and your umask

@@ -195,13 +195,13 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ```text
 <cadir>/
 ├── ca_crt.pem              CA certificate
+├── ca_key.pem              CA private key (see note)          0600
 ├── ca_pub.pem              CA public key
 ├── ca_crl.pem              Certificate Revocation List (see note)
-├── inventory.txt           Issued/revoked certificate log
+├── inventory.txt           Issued certificate log, in OpenVox Server's format
 ├── superseded.json         Certificates awaiting delayed
 │                           revocation (see note)              0600
 ├── private/
-│   ├── ca_key.pem          CA private key                    0600
 │   └── <subject>_key.pem   server-generated private keys     0600
 ├── requests/
 │   └── <subject>.pem       pending CSRs
@@ -211,6 +211,13 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
     └── <hash>.lock         same-host lock files              0600
 ```
 
+> **`ca_key.pem` is where OpenVox Server keeps its CA key**, so a cadir either
+> implementation has used has the key where the other looks. If the key is in
+> `private/ca_key.pem` instead, openvox-ca reads and writes it there. If both
+> files exist with different contents, openvox-ca refuses to start and names
+> both: either could be the key this CA signs with, and only you can say which.
+> Remove the other one.
+>
 > **`superseded.json` is absent until the first supersession.** It appears only
 > where [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession)
 > grants renewals an overlap window, and it holds the serials — with their
@@ -227,26 +234,33 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 > [storage internals](development/storage-internals.md).
 
 (The directory also holds small internal integrity files; leave them in place.)
-File permissions are fixed: `0600` for anything under `private/`, for the CRL,
-for the pending-supersession list, for the inventory and for the lock files
-under `locks/`; `0644` for the public data — issued certificates and CSRs. The
-blob modes are set on each file as it is created and your umask cannot widen
-them; the lock files and the directories are created at these modes and a
-tighter umask narrows them further.
+File permissions are fixed: `0600` for `ca_key.pem`, `inventory.txt`, the
+integrity files and `superseded.json`, for anything under `private/` and for
+the lock files under `locks/`; `0644` for certificates, CSRs, `ca_crt.pem`,
+`ca_pub.pem`, `ca_crl.pem` and `serial`. The CRL is world-readable because it is
+public: it is served without authentication, and OpenVox Server writes it
+`0644` too. The inventory is not, because it names every subject this CA has
+signed. A file openvox-ca rewrites gets its mode, so a cleanup that drops
+expired lines from an `inventory.txt` OpenVox Server created leaves it `0600`
+where it was `0640`. The blob modes are set on each file as it is created and
+your umask cannot widen them; the lock files and the directories are created at
+these modes and a tighter umask narrows them further.
 
 `openvox-ca` never changes the mode of a file it did not create, so anything
 already on disk is left as you have it — but it does check its key material at
-startup. That is every file under `private/` — the CA key, the per-subject
+startup. That is `ca_key.pem`, every file under `private/` — the per-subject
 `*_key.pem` keys and the inventory-integrity key alike, because that directory
-holds secrets by construction — plus a `ca_key_passphrase_file` you point it
-at. A file readable by every local account
+holds secrets by construction — and a `ca_key_passphrase_file` you point it at.
+A cadir that keeps its CA key in `private/ca_key.pem` has it checked there. A
+file readable by every local account
 makes it **refuse to start**, naming the file and the `chmod` that fixes it; one
 readable only by its group is reported at `Info` and does not stop the CA.
 
-Group access here is not something `openvox-ca` created. Everything it writes
-under `private/` on this backend is `0600`, so a group-readable key in a
-filesystem cadir came from the deployment — a Kubernetes `fsGroup` ORing group
-access into the mounted volume at every mount, or somebody's `chmod`. It is
+Group access here is not something `openvox-ca` created. Every key it writes on
+this backend is `0600`, so a group-readable key in a filesystem cadir came from
+outside it — a Kubernetes `fsGroup` ORing group access into the mounted volume
+at every mount, somebody's `chmod`, or the OpenVox Server that created the
+cadir. It is
 tolerated rather than expected, because those are legitimate deployments and the
 CA cannot tell from the inside whether that group has members other than itself.
 (On the SQLite backend the store genuinely is created group-accessible; that is
@@ -293,6 +307,64 @@ Default. Nothing to set.
 storage_backend: filesystem   # optional; this is the default
 cadir: /etc/puppetlabs/puppet/ssl/ca
 ```
+
+### Sharing the cadir with OpenVox Server
+
+A cadir works with either openvox-ca or OpenVox Server's own CA, as it stands.
+openvox-ca keeps the CA key where OpenVox Server does, and writes each
+`inventory.txt` line in OpenVox Server's format: a `0x` serial zero-padded to
+four hex digits, and `/CN=<certname>`. It reads every line in that format and in
+the one it used before (`<serial> ... /<certname>`), in the same file, and never
+rewrites a line except to drop an expired one during cleanup.
+
+That covers a cadir OpenVox Server created and one this version of openvox-ca
+created. A cadir an earlier openvox-ca created keeps its key in
+`private/ca_key.pem`, where openvox-ca goes on reading and writing it; OpenVox
+Server looks for the key at the top of the cadir, so it cannot take that
+directory as it stands.
+
+- **To start openvox-ca on OpenVox Server's cadir**, stop OpenVox Server's CA
+  and point `cadir` at the directory. There is no import step.
+- **To go back to OpenVox Server**, stop openvox-ca (and disable its unit, or
+  it starts again at the next boot) and start OpenVox Server's CA on the same
+  directory. Nothing in it needs changing first. Keep a copy of `inventory.txt`
+  somewhere outside it if you may come back: it is what lets you check, before
+  returning, that OpenVox Server only appended. One thing does
+  not carry over: a [delayed revocation](configuration.md#delayed-supersession)
+  still pending in `superseded.json`. OpenVox Server ignores that file, so a
+  certificate openvox-ca replaced within the last
+  `superseded_cert_revoke_after_sec` stays valid until it expires, or until
+  openvox-ca takes the directory back and its sweep resumes. To have those
+  revocations in force under OpenVox Server, retire them first with
+  `openvox-ca-ctl revoke --serial <hex>`, or let the sweep empty the file.
+- **To return to openvox-ca after OpenVox Server has signed anything**, rebuild
+  the inventory integrity value first. OpenVox Server appends to
+  `inventory.txt` without updating `.inventory.hmac`, so openvox-ca will not
+  start until you do; see
+  [`rebuild-inventory-hmac`](operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity).
+  That is the only preparation.
+
+Two conditions apply, and neither is about the directory's contents.
+
+1. **Both must run as the same user.** OpenVox Server runs as `puppet`, and the
+   shipped systemd unit runs openvox-ca as `puppet-ca`. openvox-ca cannot read a
+   key OpenVox Server created group-readable for `puppet`, and the files
+   openvox-ca creates are private to its own user, so OpenVox Server could not
+   read them. Run openvox-ca as `puppet` with a systemd drop-in (`User=puppet`,
+   `Group=puppet`, `SupplementaryGroups=puppet-ca`) for as long as the two
+   share a cadir, and add `puppet` to the `puppet-ca` group
+   (`usermod -a -G puppet-ca puppet`) so that `sudo -u puppet openvox-ca …`
+   can read the `0640 root:puppet-ca` configuration too. That gives up the dedicated-user isolation [the shipped unit's
+   hardening](systemd.md#hardening) describes: OpenVox Server, still running as
+   `puppet`, can read openvox-ca's `private/` files, including the inventory
+   integrity key.
+2. **The CA key must be a plain PEM file in the cadir**, because that is the
+   only kind OpenVox Server can use. With `encrypt_ca_key`, `ca_key_file`
+   pointing elsewhere, or the [OpenBao Transit](openbao-transit.md) key
+   provider, the cadir does not hold a key OpenVox Server can sign with.
+
+The other backends do not share a format with OpenVox Server. Moving to one is a
+conversion, done by [`openvox-ca-ctl migrate`](#migrating-between-backends).
 
 ---
 
@@ -1054,7 +1126,7 @@ the logical key `ca_key`:
 
 | Backend | Where the key is | How to remove it |
 | --- | --- | --- |
-| `filesystem` (default) | `private/ca_key.pem` under the cadir | `rm` the file |
+| `filesystem` (default) | `ca_key.pem` under the cadir (or `private/ca_key.pem`, if that is where it is) | `rm` the file |
 | `ca_key_file` overlay | the configured path | `rm` the file |
 | `sqlite`, `postgres`, `mysql` | table `puppet_ca_blobs`, column `blob_key`, value `ca_key` | `DELETE FROM puppet_ca_blobs WHERE blob_key = 'ca_key';` |
 | `etcd` | `<prefix>/ca/key` | `etcdctl del <prefix>/ca/key` |
@@ -1133,7 +1205,12 @@ The migration copies the whole CA — certificate, keys, CRL, serial, the
 inventory (its integrity value is recomputed under the destination's own
 scheme, so tamper detection continues to work there — but a mismatch present
 before the copy does not survive it), every pending CSR and every
-signed certificate. Per-subject generated private keys are **not** copied: they
+signed certificate. The inventory's lines are converted when exactly one end is
+the filesystem backend: into a database they are read in either form and stored
+in the canonical one, and onto the filesystem they are written in OpenVox
+Server's format, so the result can be [shared with OpenVox
+Server](#sharing-the-cadir-with-openvox-server). Between two backends of the
+same kind they are copied unchanged. Per-subject generated private keys are **not** copied: they
 always live on the local filesystem under `cadir`, so on a remote backend they
 stay put across a migration. The `ca_cert_file` / `ca_key_file` overrides are
 honoured on both ends.
@@ -1178,7 +1255,7 @@ Notes:
 > merely the better way to keep ancestor CRLs current, it is the only one that
 > does not require stopping the CA. On a non-`filesystem` backend there is a
 > `migrate` round trip if you cannot deliver a file to the pod — see
-> [re-importing a chain](migrating-from-puppet-server.md#step-3-import-the-ca)
+> [re-importing a chain](migrating-from-puppet-server.md#refreshing-ancestor-crls)
 > for it, and for the limits. Under `encrypt_ca_key` or
 > `ca_key_provider: openbao` there is **no** fallback: `import` cannot parse an
 > encrypted key, feeding it the plaintext one silently replaces your encrypted

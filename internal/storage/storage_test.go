@@ -54,7 +54,7 @@ var _ = Describe("StorageService", func() {
 		It("returns paths rooted in baseDir", func() {
 			Expect(store.CADir()).To(Equal(tmpDir))
 			Expect(store.CACertPath()).To(Equal(filepath.Join(tmpDir, "ca_crt.pem")))
-			Expect(store.CAKeyPath()).To(Equal(filepath.Join(tmpDir, "private", "ca_key.pem")))
+			Expect(store.CAKeyPath()).To(Equal(filepath.Join(tmpDir, "ca_key.pem")))
 			Expect(store.CAPubKeyPath()).To(Equal(filepath.Join(tmpDir, "ca_pub.pem")))
 			Expect(store.CRLPath()).To(Equal(filepath.Join(tmpDir, "ca_crl.pem")))
 			Expect(store.InventoryPath()).To(Equal(filepath.Join(tmpDir, "inventory.txt")))
@@ -110,8 +110,8 @@ var _ = Describe("StorageService", func() {
 
 			data, err := store.ReadInventory(context.Background())
 			Expect(err).NotTo(HaveOccurred())
-			Expect(string(data)).To(ContainSubstring("/node1"))
-			Expect(string(data)).To(ContainSubstring("/node2"))
+			Expect(string(data)).To(ContainSubstring("/CN=node1"))
+			Expect(string(data)).To(ContainSubstring("/CN=node2"))
 		})
 
 		It("ReadInventory returns an error when inventory file is missing", func() {
@@ -473,8 +473,8 @@ var _ = Describe("StorageService", func() {
 
 				data, err := store.ReadInventory(context.Background())
 				Expect(err).NotTo(HaveOccurred())
-				Expect(string(data)).To(ContainSubstring("/node1"))
-				Expect(string(data)).To(ContainSubstring("/node2"))
+				Expect(string(data)).To(ContainSubstring("/CN=node1"))
+				Expect(string(data)).To(ContainSubstring("/CN=node2"))
 			})
 		})
 
@@ -510,6 +510,34 @@ var _ = Describe("StorageService", func() {
 			info, err := os.Stat(store.InventoryPath())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0600)))
+		})
+	})
+
+	// The CRL is served without authentication, and OpenVox Server writes it
+	// world-readable, so a process reading it from a shared cadir must not
+	// find it narrowed by a re-sign here.
+	Describe("CRL file permissions", func() {
+		BeforeEach(func() {
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		})
+
+		It("UpdateCRL creates the CRL world-readable", func() {
+			Expect(store.UpdateCRL(context.Background(), []byte("crl-pem"))).To(Succeed())
+
+			info, err := os.Stat(store.CRLPath())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0644)))
+		})
+
+		It("UpdateCRL leaves a replaced owner-only CRL world-readable", func() {
+			Expect(os.WriteFile(store.CRLPath(), []byte("old-crl"), 0600)).To(Succeed())
+			Expect(os.Chmod(store.CRLPath(), 0600)).To(Succeed())
+
+			Expect(store.UpdateCRL(context.Background(), []byte("crl-pem"))).To(Succeed())
+
+			info, err := os.Stat(store.CRLPath())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0644)))
 		})
 	})
 
