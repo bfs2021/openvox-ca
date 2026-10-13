@@ -225,6 +225,42 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 		Entry("the frontend, which never does", "frontend", false),
 	)
 
+	// What the preflight does when the store opened but cannot then say whether
+	// it holds a CA key, or cannot hand it over. It falls back to the setting,
+	// deliberately and as documented on refuseOnMissingPassphrase: the store
+	// opened a moment earlier, so a read failing now is a transient fault rather
+	// than a missing passphrase, and refusing startup on it would invent an
+	// outage. CA.Init then reaches the same blob and reports the real error.
+	//
+	// Pinned rather than merely described, because the trade has a cost the
+	// table makes visible: with encrypt_ca_key off and a read failing, an
+	// encrypted stored key is invisible here, so this check passes and the
+	// passphrase refusal -- if the read recovers -- is raised by Init past the
+	// fork. Whether to propagate the read error instead is a code change and is
+	// recorded as an open question on #371, not settled here. Either way, a
+	// change to this behaviour should have to change a spec.
+	DescribeTable("falls back to the setting when the store cannot be read",
+		func(failOn string, encrypt, wantRefusal bool) {
+			dir := GinkgoT().TempDir()
+			base := storage.NewFilesystemBackend(dir)
+			rt := &caRuntime{Store: storage.NewWithBackend(&failingKeyReads{Backend: base, failOn: failOn}, dir)}
+
+			err := refuseOnMissingPassphrase(context.Background(), rt, &serverConfig{CADir: dir, EncryptCAKey: encrypt})
+
+			if wantRefusal {
+				Expect(err).To(MatchError(ContainSubstring("no passphrase source is configured")),
+					"the setting says a passphrase is needed, and the store could not say otherwise")
+				return
+			}
+			Expect(err).NotTo(HaveOccurred(),
+				"a read failure is not taken as evidence that a passphrase is needed")
+		},
+		Entry("Exists fails, encrypt_ca_key on", "exists", true, true),
+		Entry("Exists fails, encrypt_ca_key off", "exists", false, false),
+		Entry("Get fails, encrypt_ca_key on", "get", true, true),
+		Entry("Get fails, encrypt_ca_key off", "get", false, false),
+	)
+
 	// Without --daemon the refusal always had somewhere to go, so this spec is
 	// not about delivery; it is the one that would still fail if the refusal
 	// were moved back behind the fork for the non-daemon path too.
@@ -277,3 +313,32 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 		Expect(*forked).To(BeTrue(), "the named remedy has to let the CA start")
 	})
 })
+
+// failingKeyReads wraps a backend and fails the CA key reads the passphrase
+// preflight makes: Exists, which HasCAKey reaches, or Get, which GetCAKey does.
+// For "get", Exists reports the key present so that the read actually happens.
+// Every other key passes through, so the store is otherwise healthy -- the state
+// the fallback is about is a store that opened and then could not answer.
+type failingKeyReads struct {
+	storage.Backend
+	failOn string
+}
+
+var errStubbedRead = errors.New("stubbed store read failure")
+
+func (f *failingKeyReads) Exists(ctx context.Context, key string) (bool, error) {
+	if key == storage.KeyCAKey {
+		if f.failOn == "exists" {
+			return false, errStubbedRead
+		}
+		return true, nil
+	}
+	return f.Backend.Exists(ctx, key)
+}
+
+func (f *failingKeyReads) Get(ctx context.Context, key string) ([]byte, error) {
+	if key == storage.KeyCAKey && f.failOn == "get" {
+		return nil, errStubbedRead
+	}
+	return f.Backend.Get(ctx, key)
+}

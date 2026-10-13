@@ -134,6 +134,14 @@ var _ = Describe("Key encryption", func() {
 		var tmpDir string
 
 		BeforeEach(func() {
+			// Every refusal here relies on there being no passphrase in the
+			// environment, which is exactly what an operator of this tool is
+			// likely to have exported in their own shell. Left ambient, those
+			// specs fail on the very assertion meant to prove the refusal, for a
+			// reason that has nothing to do with the code. Empty counts as unset
+			// to the resolver, and GinkgoT restores the original afterwards.
+			GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "")
+
 			var err error
 			tmpDir, err = os.MkdirTemp("", "keyenc-test-*")
 			Expect(err).NotTo(HaveOccurred())
@@ -257,6 +265,32 @@ var _ = Describe("Key encryption", func() {
 			Expect(err.Error()).To(ContainSubstring(autoPath), "and still names the file")
 		})
 
+		// The contract the comments now state, pinned so that a well-meaning
+		// strings.TrimSpace cannot slip in: "first line" means up to the first
+		// CR or LF, and nothing else is removed. Trimming would stop an existing
+		// CA decrypting if its passphrase legitimately ends in a space, which is
+		// a compatibility break nobody would notice until a restart -- every
+		// other spec here writes a passphrase with no trailing whitespace, so
+		// all of them would stay green while it happened.
+		DescribeTable("takes the first line verbatim, removing nothing else",
+			func(contents, want string) {
+				ppFile := filepath.Join(tmpDir, "pp.txt")
+				Expect(os.WriteFile(ppFile, []byte(contents), 0600)).To(Succeed())
+
+				pp, err := resolvePassphrase(KeyPassphraseConfig{PassphraseFile: ppFile},
+					tmpDir, needEncryptConfigured)
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(pp)).To(Equal(want))
+			},
+			Entry("a trailing space survives", "pp \n", "pp "),
+			Entry("a leading space survives", " pp\n", " pp"),
+			Entry("CRLF is cut at the CR", "pp\r\n", "pp"),
+			Entry("a bare CR ends the line", "pp\rrest", "pp"),
+			Entry("a second line is dropped", "pp\nsecond", "pp"),
+			Entry("no terminator at all", "pp", "pp"),
+		)
+
 		It("errors on empty passphrase file", func() {
 			ppFile := filepath.Join(tmpDir, "empty.txt")
 			Expect(os.WriteFile(ppFile, []byte(""), 0600)).To(Succeed())
@@ -285,6 +319,10 @@ var _ = Describe("Key encryption", func() {
 		var tmpDir string
 
 		BeforeEach(func() {
+			// As for resolvePassphrase: CheckKeyPassphrase's refusal below needs
+			// the environment empty, not merely assumed empty.
+			GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "")
+
 			var err error
 			tmpDir, err = os.MkdirTemp("", "openvox-ca-need-test")
 			Expect(err).NotTo(HaveOccurred())
@@ -351,6 +389,16 @@ var _ = Describe("Key encryption", func() {
 				Expect(CheckKeyPassphrase(KeyPassphraseConfig{}, tmpDir, true, plaintextPEM())).To(Succeed())
 			})
 
+			// The environment is the source the pre-fork preflight exists to
+			// protect: it is the one a launcher can strip from a child, and the
+			// file-source spec below would stay green if CheckKeyPassphrase
+			// stopped consulting it.
+			It("passes when the only source is the environment", func() {
+				GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "env-secret")
+
+				Expect(CheckKeyPassphrase(KeyPassphraseConfig{}, tmpDir, true, nil)).To(Succeed())
+			})
+
 			It("passes when one is needed and a source is configured", func() {
 				ppFile := filepath.Join(tmpDir, "pp")
 				Expect(os.WriteFile(ppFile, []byte("pp\n"), 0600)).To(Succeed())
@@ -376,6 +424,60 @@ var _ = Describe("Key encryption", func() {
 })
 
 var _ = Describe("CA encrypted key integration", func() {
+	BeforeEach(func() {
+		// The two refusal specs below depend on there being no passphrase in the
+		// environment; the bootstrap-and-reload spec does not care either way.
+		GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "")
+	})
+
+	// The resolver's refusal is pinned directly above, and the pre-fork
+	// preflight is pinned in cmd/openvox-ca. Neither drives CA.Init, which is
+	// where the refusal actually runs on both of its paths -- so nothing showed
+	// that Init surfaces it, that the bootstrap path writes nothing on the way
+	// to refusing, or that the load path passes the reason it really has.
+	It("refuses to bootstrap with encryption and no passphrase source", func() {
+		tmpDir := GinkgoT().TempDir()
+
+		store := storage.New(tmpDir)
+		myCA := New(store, AutosignConfig{Mode: "off"}, "puppet-enc-test")
+		myCA.EncryptCAKey = true
+
+		err := myCA.Init(context.Background())
+
+		Expect(err).To(MatchError(ContainSubstring("resolving CA key passphrase")))
+		Expect(err).To(MatchError(ContainSubstring("encrypt_ca_key is set")),
+			"bootstrap needs one because encryption is configured, so that is the reason")
+
+		// Nothing was written in the process of refusing -- in particular not
+		// a plaintext key, which is what a refusal raised after the save would
+		// have left behind.
+		has, herr := store.HasCAKey(context.Background())
+		Expect(herr).NotTo(HaveOccurred())
+		Expect(has).To(BeFalse(), "no CA key of any kind may be stored on the way to refusing")
+	})
+
+	It("refuses to load an encrypted key with no source, naming the stored key", func() {
+		tmpDir := GinkgoT().TempDir()
+		ppFile := filepath.Join(tmpDir, "passphrase")
+		Expect(os.WriteFile(ppFile, []byte("integration-passphrase\n"), 0o600)).To(Succeed())
+
+		first := New(storage.New(tmpDir), AutosignConfig{Mode: "off"}, "puppet-enc-test")
+		first.EncryptCAKey = true
+		first.KeyPassphrase = KeyPassphraseConfig{PassphraseFile: ppFile}
+		Expect(first.Init(context.Background())).To(Succeed(), "bootstrap an encrypted CA")
+
+		// Reload with encryption *off* and no source. The key on disk is still
+		// encrypted, so the load path needs a passphrase anyway -- and the
+		// refusal has to say so, rather than blame a setting that is not set.
+		second := New(storage.New(tmpDir), AutosignConfig{Mode: "off"}, "puppet-enc-test")
+		err := second.Init(context.Background())
+
+		Expect(err).To(MatchError(ContainSubstring("resolving CA key passphrase")))
+		Expect(err).To(MatchError(ContainSubstring("the CA key in the store is encrypted")))
+		Expect(err).NotTo(MatchError(ContainSubstring("encrypt_ca_key is set")),
+			"encrypt_ca_key is not set on this load, so naming it would be false")
+	})
+
 	It("bootstraps with encrypted key and reloads successfully", func() {
 		tmpDir, err := os.MkdirTemp("", "openvox-ca-keyenc-*")
 		Expect(err).NotTo(HaveOccurred())
