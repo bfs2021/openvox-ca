@@ -201,6 +201,9 @@ Environment variables mirror the CLI flags:
 
 The full `--openbao-*` flag/environment-variable reference (TLS, AppRole, token-file, and
 Kubernetes auth settings) is in [OpenBao Transit-engine CA key](openbao-transit.md#configuration).
+The OpenBao client also reads its own `BAO_*` and `VAULT_*` environment variables, some of which
+override the `openbao` settings; see
+[OpenBao client environment variables](openbao-transit.md#openbao-client-environment-variables).
 Storage-backend environment variables are documented per backend in
 [storage backends](storage-backends.md).
 
