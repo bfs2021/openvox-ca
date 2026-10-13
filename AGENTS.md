@@ -426,7 +426,7 @@ not** be rebranded:
 - HTTP route prefix `/puppet-ca/v1`
 - Environment-variable prefix `PUPPET_CA_` (and `PUPPET_CA_CTL_` for the CLI)
 - Prometheus metric namespace `puppetca_`
-- Storage key prefixes / default paths (`puppet-ca`, `/etc/puppet-ca`, `/var/lib/puppet-ca`)
+- Storage key prefixes and the config-file location (`puppet-ca`, `/etc/puppet-ca`)
 
 ## Helm chart
 
