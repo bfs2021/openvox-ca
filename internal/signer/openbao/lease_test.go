@@ -740,7 +740,7 @@ var _ = Describe("OpenBao token lifecycle", func() {
 			Expect(tm.Close()).To(Succeed())
 			openbao.ExpireReauthThrottleForTest(tm)
 
-			Expect(tm.Reauth(context.Background(), minted)).NotTo(Succeed())
+			Expect(tm.Reauth(context.Background(), minted)).To(MatchError(openbao.ErrTokenManagerClosedForTest))
 
 			Expect(fake.loginCount()).To(Equal(1))
 		})

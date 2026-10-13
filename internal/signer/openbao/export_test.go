@@ -31,3 +31,7 @@ func ExpireReauthThrottleForTest(tm *TokenManager) {
 	defer tm.mu.Unlock()
 	tm.lastLogin = time.Now().Add(-minReauthInterval - time.Second)
 }
+
+// ErrTokenManagerClosedForTest exposes the error Reauth returns after Close,
+// so a spec can tell that refusal apart from any other way Reauth can fail.
+var ErrTokenManagerClosedForTest = errTokenManagerClosed
