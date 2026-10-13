@@ -21,9 +21,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"syscall"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -35,6 +40,42 @@ import (
 // errStubbedFork is what the stubbed fork returns, so that "the command got as
 // far as forking" is distinguishable from "the command was refused".
 var errStubbedFork = errors.New("stubbed fork")
+
+// realServerChild is the pskChildEnv role under which every process in the
+// tree -- the launcher this spec starts and the signer and frontend it
+// re-executes -- runs the real root command, rather than one of the fd-contract
+// or environment-dumping stand-ins the other launcher specs use. Those can
+// show what a child is handed; only real children can show what it then does.
+const realServerChild = "real-server"
+
+// runRealServerChild runs the server exactly as an operator would, with no
+// arguments: spawnChild re-executes with os.Args[1:], which is empty here, so
+// the whole configuration travels as PUPPET_CA_* in the environment, the way an
+// environment-configured deployment supplies it -- and through frontendEnv for
+// the frontend, which is the point.
+//
+// The guard mirrors launcher-env's. A process with no role is the launcher, and
+// one that finds a launcher already above it refuses instead of starting a
+// second, each of which would re-execute this test binary in turn.
+func runRealServerChild() int {
+	if os.Getenv("PUPPET_CA_ROLE") == "" {
+		if os.Getenv(launcherStartedEnv) != "" {
+			fmt.Fprintln(os.Stderr, "real-server child: a launcher is already running above this process")
+			return 2
+		}
+		if err := os.Setenv(launcherStartedEnv, "1"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
 
 // A missing passphrase source refuses startup. These specs are about *where*
 // that refusal is raised, which is the whole of its value: raised inside
@@ -384,3 +425,94 @@ func (f *failingKeyReads) Get(ctx context.Context, key string) ([]byte, error) {
 	}
 	return f.Backend.Get(ctx, key)
 }
+
+// The cross-PR defect between #371 and #477, driven end to end. #477 withholds
+// the passphrase from the frontend child; the pre-fork passphrase check runs in
+// every role. Before the role gate, an encrypted CA whose passphrase came only
+// from the environment therefore had a frontend that refused to start, and the
+// launcher took the whole CA down behind it. Every unit spec passed throughout:
+// the role table drives preflightKeyMaterial directly, and #477's launcher
+// spec forks stand-in children that report their environment rather than run.
+// The integration build found it by running the server.
+//
+// So this runs the real launcher with a real signer and a real frontend, and
+// asserts the one thing the defect broke: the frontend comes up.
+var _ = Describe("the real launcher, with the passphrase only in the environment", func() {
+	It("brings the frontend up when only the signer receives the passphrase", func() {
+		dir := GinkgoT().TempDir()
+		cadir := filepath.Join(dir, "cadir")
+		Expect(os.MkdirAll(cadir, 0o750)).To(Succeed())
+		emptyConfig := filepath.Join(dir, "empty.yaml")
+		Expect(os.WriteFile(emptyConfig, []byte("{}\n"), 0o600)).To(Succeed())
+
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		Expect(err).NotTo(HaveOccurred())
+		port := l.Addr().(*net.TCPAddr).Port
+		Expect(l.Close()).To(Succeed())
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		DeferCleanup(cancel)
+
+		var out bytes.Buffer
+		cmd := exec.CommandContext(ctx, os.Args[0])
+		// The parent's environment, less anything that would make the launcher
+		// think it was already a role, already under a launcher, or configured
+		// from a file on this host.
+		cmd.Env = append(filterEnv(os.Environ(), append(append([]string{}, internalEnvKeys...),
+			launcherStartedEnv, ca.DefaultPassphraseEnvVar, "PUPPET_CA_CONFIG", "PUPPET_CA_KEY_PASSPHRASE_FILE")...),
+			pskChildEnv+"="+realServerChild,
+			"PUPPET_CA_CONFIG="+emptyConfig,
+			"PUPPET_CA_CADIR="+cadir,
+			"PUPPET_CA_HOST=127.0.0.1",
+			"PUPPET_CA_PORT="+strconv.Itoa(port),
+			"PUPPET_CA_ENCRYPT_CA_KEY=true",
+			// The only passphrase source. #477 strips it from the frontend.
+			ca.DefaultPassphraseEnvVar+"=end-to-end-passphrase",
+		)
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		// Its own process group, so cleanup reaches the children even if the
+		// launcher dies before stopping them.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		Expect(cmd.Start()).To(Succeed())
+
+		done := make(chan struct{})
+		var waitErr error
+		go func() { waitErr = cmd.Wait(); close(done) }()
+		DeferCleanup(func() {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			select {
+			case <-done:
+			case <-time.After(30 * time.Second):
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				<-done
+			}
+		})
+
+		// Up means the frontend's listener accepts. The launcher exiting first
+		// is the defect, and ends the wait at once with what it printed rather
+		// than running out the clock.
+		Eventually(func() error {
+			select {
+			case <-done:
+				return StopTrying(fmt.Sprintf(
+					"the launcher exited (%v) before the frontend came up; output:\n%s", waitErr, out.String()))
+			default:
+			}
+			c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), 500*time.Millisecond)
+			if err != nil {
+				return err
+			}
+			return c.Close()
+		}, 90*time.Second, 250*time.Millisecond).Should(Succeed(),
+			"the frontend never started listening; launcher output:\n%s", &out)
+
+		// And the signer really did use the passphrase from the environment:
+		// the key it bootstrapped is encrypted. Without this a server that had
+		// silently started without encryption would pass the check above.
+		keyPEM, err := os.ReadFile(caKeyPathIn(cadir))
+		Expect(err).NotTo(HaveOccurred(), "the signer must have bootstrapped a CA key")
+		Expect(string(keyPEM)).To(ContainSubstring("ENCRYPTED PRIVATE KEY"),
+			"the key the signer wrote must be encrypted with the environment's passphrase")
+	})
+})

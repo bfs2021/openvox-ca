@@ -144,6 +144,9 @@ func runPSKChild(role string) int {
 		}
 		fmt.Println("ALIVE")
 		return 0
+	case realServerChild:
+		// Every level runs the real root command; see keypassphrase_test.go.
+		return runRealServerChild()
 	case "launcher-env":
 		// The launcher and both of its children all land here: spawnChild
 		// re-execs this test binary, and the children inherit pskChildEnv.
