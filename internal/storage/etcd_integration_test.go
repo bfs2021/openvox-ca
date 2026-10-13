@@ -798,8 +798,15 @@ var _ = Describe("EtcdBackendLockSessionLifetime", func() {
 			done := make(chan error, 1)
 			go func() { done <- a.Close() }()
 			// Far short of the 10s TTL the revoke would otherwise wait out.
-			Eventually(done).WithTimeout(3*time.Second).Should(Receive(),
+			Eventually(done).WithTimeout(3*time.Second).Should(Receive(&err),
 				"Close waited on the unreachable server for the lease TTL")
+			// A revoke that cannot reach etcd is not Close's failure: the
+			// lease lapses on its TTL instead. Close still finishes closing.
+			// (A name this spec has not taken: crl's process-local lock is
+			// still held above, and waiting on it would hang, not fail.)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = a.AcquireLock(context.Background(), "subject:after-close")
+			Expect(err).To(MatchError(errEtcdBackendClosed))
 		})
 
 		It("refuses to start a new session", func() {
