@@ -28,6 +28,20 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
+// skipAsRoot skips a spec that root cannot exercise: root reads, removes and
+// searches whatever the modes say. On CI, where these specs are expected to
+// run, it fails instead. A skip is quiet, and among them is the only check
+// that the frontend never reads the CA key.
+func skipAsRoot(why string) {
+	if os.Geteuid() != 0 {
+		return
+	}
+	if os.Getenv("CI") != "" {
+		Fail("running as root on CI would skip this spec: " + why)
+	}
+	Skip(why)
+}
+
 // The filesystem backend keeps the CA key where OpenVox Server does, at the top
 // of the cadir, so a cadir handed back to OpenVox Server has it where it looks.
 // A cadir that has it only in private/, where this backend kept it before, is
@@ -128,9 +142,7 @@ var _ = Describe("Filesystem CA key location", func() {
 		It("changes nothing when the private/ copy cannot be removed", func() {
 			// The old copy goes first, so a failure there leaves the pair
 			// as it was rather than a new key beside an old one.
-			if os.Geteuid() == 0 {
-				Skip("root removes a file whatever the directory's mode")
-			}
+			skipAsRoot("root removes a file whatever the directory's mode")
 			privDir := filepath.Dir(legacy)
 			Expect(os.Chmod(privDir, 0o500)).To(Succeed())
 			DeferCleanup(os.Chmod, privDir, os.FileMode(0o750))
@@ -184,9 +196,7 @@ var _ = Describe("Filesystem CA key location", func() {
 
 	Context("when a key file cannot be read", func() {
 		BeforeEach(func() {
-			if os.Geteuid() == 0 {
-				Skip("root reads a file whatever its mode")
-			}
+			skipAsRoot("root reads a file whatever its mode")
 		})
 
 		// Unreadable is not absent. Read as absent, an unreadable ca_key.pem
@@ -224,9 +234,7 @@ var _ = Describe("Filesystem CA key location", func() {
 	// permission error and report nothing, or refuse.
 	Context("answering without reading the key", func() {
 		BeforeEach(func() {
-			if os.Geteuid() == 0 {
-				Skip("root reads a file whatever its mode")
-			}
+			skipAsRoot("root reads a file whatever its mode")
 			Expect(os.WriteFile(top, []byte("one-key"), 0o600)).To(Succeed())
 			Expect(os.WriteFile(legacy, []byte("another-key"), 0o600)).To(Succeed())
 			Expect(os.Chmod(top, 0o044)).To(Succeed())
@@ -312,9 +320,7 @@ var _ = Describe("Filesystem CA key location", func() {
 	It("refuses when it cannot tell whether private/ca_key.pem is there", func() {
 		// Not knowing is not "absent": resolving to the top-level path would
 		// give a fresh key's location to a cadir that may already have one.
-		if os.Geteuid() == 0 {
-			Skip("root searches a directory whatever its mode")
-		}
+		skipAsRoot("root searches a directory whatever its mode")
 		Expect(os.WriteFile(legacy, []byte("old-key"), 0o600)).To(Succeed())
 		privDir := filepath.Dir(legacy)
 		Expect(os.Chmod(privDir, 0o600)).To(Succeed())
