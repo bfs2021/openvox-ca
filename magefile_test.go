@@ -1917,6 +1917,15 @@ jobs:
 		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
 	})
 
+	// GitHub refuses a cyclic graph, but the guard reads whatever the file
+	// says; without its bound this spec never returns.
+	It("terminates on a cyclic needs graph", func() {
+		src := goodCI + "  x:\n    needs: y\n    steps:\n      - run: \"true\"\n" +
+			"  y:\n    needs: x\n    steps:\n      - run: \"true\"\n"
+		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(MatchError(
+			ContainSubstring(`ci.yml job "ci" does not need job "x"`)))
+	})
+
 	// The walk's memo is per job. Shared across jobs, the first dependant
 	// marks automerge seen and the second is then reported as missing.
 	It("exempts every dependant, not only the first one walked", func() {
@@ -1946,8 +1955,12 @@ jobs:
 			"container-images.yml filters pull_request by paths"),
 		Entry("rejects a paths-ignore filter", "  pull_request:\n    paths-ignore: [docs/**]\n",
 			"container-images.yml filters pull_request by paths-ignore"),
+		Entry("rejects types without opened", "  pull_request:\n    types: [synchronize, reopened]\n",
+			`container-images.yml's pull_request types omit "opened"`),
 		Entry("rejects types without synchronize", "  pull_request:\n    types: [opened, reopened]\n",
 			`container-images.yml's pull_request types omit "synchronize"`),
+		Entry("rejects types without reopened", "  pull_request:\n    types: [opened, synchronize]\n",
+			`container-images.yml's pull_request types omit "reopened"`),
 		Entry("reports a trigger it cannot read", "  pull_request: [main]\n",
 			"container-images.yml: on.pull_request:"),
 	)
@@ -1966,6 +1979,31 @@ jobs:
 			"    types: [opened, synchronize, reopened]\n", "on: [push, pull_request]\n")
 		Expect(verifyAggregateJobsIn(sources(goodCI, src))).To(MatchError(
 			ContainSubstring("container-images.yml: yaml: unmarshal errors")))
+	})
+
+	Describe("the required names", func() {
+		// The needs rule exempts a dependant of the aggregate, so a copied
+		// block there is exactly where a duplicate name would go unnoticed.
+		It("rejects a dependant that reuses the aggregate's name", func() {
+			src := goodCI + "  notify:\n    name: CI success\n    needs: ci\n    steps:\n      - run: \"true\"\n"
+			Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(MatchError(
+				ContainSubstring(`ci.yml job "notify" is also named "CI success"`)))
+		})
+
+		// A third workflow, unparseable by the aggregate rules (list-form
+		// on:), still has its job names read.
+		It("rejects the name reused in another workflow", func() {
+			srcs := sources(goodCI, goodImages)
+			srcs["other.yml"] = []byte("on: [push, pull_request]\njobs:\n  images:\n    name: Container images success\n")
+			Expect(verifyAggregateJobsIn(srcs)).To(MatchError(
+				ContainSubstring(`other.yml job "images" is also named "Container images success"`)))
+		})
+
+		It("ignores a workflow that names neither check", func() {
+			srcs := sources(goodCI, goodImages)
+			srcs["other.yml"] = []byte("on: push\njobs:\n  lint:\n    name: Lint\n")
+			Expect(verifyAggregateJobsIn(srcs)).To(Succeed())
+		})
 	})
 
 	It("reports every violation, not only the first", func() {

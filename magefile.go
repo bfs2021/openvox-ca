@@ -1382,15 +1382,12 @@ type aggregateStep struct {
 
 // verifyAggregateJobs asserts that every required-check aggregate still
 // reports, and still fails when it should. See verifyAggregateJobsIn for the
-// rules.
+// rules. Every workflow is read, not only the aggregates' own, because a job
+// anywhere that reuses a required name posts a check the ruleset matches.
 func verifyAggregateJobs() error {
-	sources := make(map[string][]byte, len(requiredCheckAggregates))
-	for _, agg := range requiredCheckAggregates {
-		src, err := os.ReadFile(filepath.Join(".github", "workflows", agg.workflow))
-		if err != nil {
-			return err
-		}
-		sources[agg.workflow] = src
+	sources, err := readWorkflowSources(filepath.Join(".github", "workflows"))
+	if err != nil {
+		return err
 	}
 	return verifyAggregateJobsIn(sources)
 }
@@ -1411,6 +1408,10 @@ func verifyAggregateJobs() error {
 //   - Its `needs` lists every other job in the workflow, except jobs that
 //     themselves depend on the aggregate (ci.yml's automerge). A job added
 //     later and left out would gate nothing.
+//   - No other job in any workflow carries its name. The ruleset matches a
+//     check by name alone, so a second job of that name -- a copied block
+//     downstream of the aggregate, say, which the needs rule exempts -- makes
+//     the gate depend on which of two check runs GitHub reads.
 //
 // The `on:` key must be a mapping. GitHub also accepts `on: pull_request` and
 // `on: [push, pull_request]`, but neither workflow uses them, and a form this
@@ -1486,7 +1487,37 @@ func verifyAggregateJobsIn(sources map[string][]byte) error {
 			}
 		}
 	}
+	errs = append(errs, verifyRequiredNamesUnique(sources)...)
 	return errors.Join(errs...)
+}
+
+// verifyRequiredNamesUnique returns every job, in any of sources, that
+// carries a required check's name without being that check's aggregate. Only
+// the job names are read, so a workflow the aggregate rules cannot parse is
+// still searched; one that is not YAML at all is skipped here, since GitHub
+// would not run it.
+func verifyRequiredNamesUnique(sources map[string][]byte) []error {
+	var errs []error
+	for _, file := range slices.Sorted(maps.Keys(sources)) {
+		var doc struct {
+			Jobs map[string]struct {
+				Name string `yaml:"name"`
+			} `yaml:"jobs"`
+		}
+		if yaml.Unmarshal(sources[file], &doc) != nil {
+			continue
+		}
+		for _, id := range slices.Sorted(maps.Keys(doc.Jobs)) {
+			for _, agg := range requiredCheckAggregates {
+				if doc.Jobs[id].Name == agg.name && (file != agg.workflow || id != agg.job) {
+					errs = append(errs, fmt.Errorf("%s job %q is also named %q, the check main's ruleset requires "+
+						"from %s job %q; with two check runs of that name, the gate depends on which one GitHub reads",
+						file, id, agg.name, agg.workflow, agg.job))
+				}
+			}
+		}
+	}
+	return errs
 }
 
 // verifyAggregateDecision returns why an aggregate's re-actors/alls-green

@@ -503,10 +503,15 @@ jobs:
   # Every other job is in `needs` (verifyAggregateJobs enforces it), so a
   # failed or cancelled one fails this check. The one legitimate skip is
   # `merge`, which runs only when the run pushes: fork PRs and unpushed
-  # dispatches skip it by design. It is allowed to skip only then, so a run
-  # that should have published cannot pass without publishing; that is also
-  # why a same-repo PR cannot merge while GHCR or Sigstore is down. The
-  # expression is pinned in requiredCheckAggregates. `verify-tag`
+  # dispatches skip it by design. It is allowed to skip only then, so a
+  # pull_request run that should have published cannot pass without
+  # publishing; that is also why a same-repo PR's own run stays red while GHCR
+  # or Sigstore is down. The expression is pinned in requiredCheckAggregates.
+  # It binds per run, not per commit: a maintainer who dispatches this
+  # workflow on a PR's branch with push unticked gets a run that skips merge
+  # and reports success on the same head commit. That needs write access and
+  # still builds and smoke-tests every leg, so it is left as the way past an
+  # outage rather than refused. `verify-tag`
   # has its steps gated rather than the job, so it always reports success
   # off a tag, and a skipped `build` means one of its needs failed.
   aggregate:

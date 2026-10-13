@@ -100,7 +100,7 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
   base — but only pull requests targeting `main` are gated by the repository
   ruleset, so on a stacked one read the results rather than relying on a
   merge block.
-- The ruleset requires two checks, both aggregates: *CI success* (the jobs in
+- The ruleset requires two status checks, both aggregates: *CI success* (the jobs in
   `ci.yml`) and *Container images success* (the image builds in
   `container-images.yml`, which `ci.yml` cannot see). `mage dev:check` keeps
   each one's `needs` covering its whole workflow, so a job you add to either

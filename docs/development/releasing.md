@@ -111,11 +111,12 @@ chart can never name an image that does not exist.
 
    Two aggregate jobs must be green: *CI success* (`ci.yml`) and *Container
    images success* (`container-images.yml`). The verify gate checks only *CI
-   success* on the tagged commit, so an un-green commit cannot be released by
-   accident, but nothing checks the images for you: a commit whose image build
-   failed on `main` passes the gate and then fails in the tag's image build,
-   after the Release and chart workflows have published. Wait for both before
-   tagging.
+   success* on the tagged commit, so a commit without it cannot be released by
+   accident, but nothing checks the images for you. A commit whose image build
+   failed on `main` passes the gate and fails again in the tag's image build:
+   the Release workflow has published by then, and the Helm chart workflow
+   waits 30 minutes for the Alpine image and fails without publishing, until
+   it is re-run once the images exist. Wait for both before tagging.
 
 3. **Check the tree builds the release artefacts.** This catches
    cross-compilation breakage before the workflow does:
