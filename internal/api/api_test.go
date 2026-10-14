@@ -1434,6 +1434,55 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("found extensions"))
 			Expect(rr.Body.String()).To(ContainSubstring("2.5.29.19"))
 		})
+
+		It("should return 400 when an autosigned CSR asks for CA:TRUE", func() {
+			// The refusal fires inside the autosign path, so this needs the
+			// same autosigning fixture as the SAN-refusal context above: with
+			// autosign off the CSR is only stored and never reaches signing.
+			dir := GinkgoT().TempDir()
+			autoStore := storage.New(dir)
+			autoCA := ca.New(autoStore, ca.AutosignConfig{Mode: "true"}, "puppet.test")
+
+			ctx := context.Background()
+			Expect(autoStore.EnsureDirs(ctx)).To(Succeed())
+			Expect(autoStore.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+			Expect(autoStore.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+			Expect(autoStore.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+			Expect(autoStore.WriteSerial(ctx, "0001")).To(Succeed())
+			Expect(autoStore.TouchInventory(ctx)).To(Succeed())
+			Expect(autoCA.Init(ctx)).To(Succeed())
+			autoMux := api.New(autoCA).Routes()
+
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			Expect(err).NotTo(HaveOccurred())
+
+			bcVal, err := asn1.Marshal(struct {
+				IsCA bool `asn1:"optional"`
+			}{IsCA: true})
+			Expect(err).NotTo(HaveOccurred())
+
+			csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+				Subject: pkix.Name{CommonName: "evil-ca-auto"},
+				ExtraExtensions: []pkix.Extension{{
+					Id:       asn1.ObjectIdentifier{2, 5, 29, 19},
+					Critical: true,
+					Value:    bcVal,
+				}},
+			}, key)
+			Expect(err).NotTo(HaveOccurred())
+
+			csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
+			req := httptest.NewRequest("PUT", "/certificate_request/evil-ca-auto", bytes.NewReader(csrPEM))
+			rr := httptest.NewRecorder()
+			autoMux.ServeHTTP(rr, req)
+
+			// 400 rather than 500: the CSR is well-formed and its proof of
+			// possession holds, but policy refuses it — a bad request, not a
+			// server fault. Same fixed policy text the manual path answers 409
+			// with, and no paths or subjects beyond the caller's own.
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+			Expect(rr.Body.String()).To(ContainSubstring("found extensions that disallow signing"))
+		})
 	})
 
 	Context("POST /generate/{subject}", func() {
@@ -1467,6 +1516,17 @@ var _ = Describe("API Workflow", func() {
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+		})
+
+		It("should return 400 for a malformed ?dns= alt name", func() {
+			req := httptest.NewRequest("POST", "/generate/gen-bad-dns?dns=../../x", nil)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+			// The offending entry is the caller's own input, so naming it back
+			// is safe; a 500 would report the caller's mistake as a CA fault.
+			Expect(rr.Body.String()).To(ContainSubstring("invalid DNS alt name"))
 		})
 	})
 
