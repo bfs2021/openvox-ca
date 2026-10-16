@@ -99,6 +99,26 @@ var _ = Describe("API Workflow", func() {
 		os.RemoveAll(tmpDir)
 	})
 
+	// autosignFixture builds a CA that autosigns everything submitted, for the
+	// specs whose refusal only fires in the signing path. It returns the routes
+	// and the store, so a spec can also assert what was not issued.
+	autosignFixture := func() (http.Handler, *storage.StorageService) {
+		GinkgoHelper()
+		dir := GinkgoT().TempDir()
+		store := storage.New(dir)
+		autoCA := ca.New(store, ca.AutosignConfig{Mode: "true"}, "puppet.test")
+
+		ctx := context.Background()
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+		Expect(autoCA.Init(ctx)).To(Succeed())
+		return api.New(autoCA).Routes(), store
+	}
+
 	Context("CRL reissue endpoint", func() {
 		parseCRL := func(pemBytes []byte) *x509.RevocationList {
 			block, _ := pem.Decode(pemBytes)
@@ -1437,21 +1457,10 @@ var _ = Describe("API Workflow", func() {
 
 		It("should return 400 when an autosigned CSR asks for CA:TRUE", func() {
 			// The refusal fires inside the autosign path, so this needs the
-			// same autosigning fixture as the SAN-refusal context above: with
-			// autosign off the CSR is only stored and never reaches signing.
-			dir := GinkgoT().TempDir()
-			autoStore := storage.New(dir)
-			autoCA := ca.New(autoStore, ca.AutosignConfig{Mode: "true"}, "puppet.test")
-
+			// shared autosigning fixture: with autosign off the CSR is only
+			// stored and never reaches signing.
 			ctx := context.Background()
-			Expect(autoStore.EnsureDirs(ctx)).To(Succeed())
-			Expect(autoStore.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
-			Expect(autoStore.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
-			Expect(autoStore.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
-			Expect(autoStore.WriteSerial(ctx, "0001")).To(Succeed())
-			Expect(autoStore.TouchInventory(ctx)).To(Succeed())
-			Expect(autoCA.Init(ctx)).To(Succeed())
-			autoMux := api.New(autoCA).Routes()
+			autoMux, autoStore := autosignFixture()
 
 			key, err := rsa.GenerateKey(rand.Reader, 2048)
 			Expect(err).NotTo(HaveOccurred())
@@ -1482,6 +1491,8 @@ var _ = Describe("API Workflow", func() {
 			// with, and no paths or subjects beyond the caller's own.
 			Expect(rr.Code).To(Equal(http.StatusBadRequest))
 			Expect(rr.Body.String()).To(ContainSubstring("found extensions that disallow signing"))
+			Expect(autoStore.HasCert(ctx, "evil-ca-auto")).To(BeFalse(),
+				"a refused CSR must be turned away before anything is issued")
 		})
 	})
 
@@ -1728,35 +1739,20 @@ var _ = Describe("API Workflow", func() {
 	})
 
 	Context("CSR requesting disallowed subject alternative names", func() {
-		// The branch only fires where SaveRequest itself signs, so this needs an
-		// autosigning CA rather than the suite's manual-signing fixture. That is
-		// also the configuration the refusal exists for: with autosign off an
-		// operator sees the CSR before it becomes a certificate.
-		autosignMux := func() http.Handler {
-			GinkgoHelper()
-			dir := GinkgoT().TempDir()
-			autoStore := storage.New(dir)
-			autoCA := ca.New(autoStore, ca.AutosignConfig{Mode: "true"}, "puppet.test")
-
-			ctx := context.Background()
-			Expect(autoStore.EnsureDirs(ctx)).To(Succeed())
-			Expect(autoStore.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
-			Expect(autoStore.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
-			Expect(autoStore.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
-			Expect(autoStore.WriteSerial(ctx, "0001")).To(Succeed())
-			Expect(autoStore.TouchInventory(ctx)).To(Succeed())
-			Expect(autoCA.Init(ctx)).To(Succeed())
-			return api.New(autoCA).Routes()
-		}
+		// The branch only fires where SaveRequest itself signs, so this needs the
+		// shared autosigning fixture rather than the suite's manual-signing one.
+		// That is also the configuration the refusal exists for: with autosign off
+		// an operator sees the CSR before it becomes a certificate.
 
 		It("should return 400 without echoing the refused name back", func() {
 			// 400 rather than 500: the CSR is well-formed and the request can
 			// never succeed, so the agent should stop rather than retry.
 			csrPEM := generateCSRWithSANs("san-refused-node", []string{"puppet.example.com"})
 
+			autoMux, _ := autosignFixture()
 			req := httptest.NewRequest("PUT", "/certificate_request/san-refused-node", bytes.NewReader(csrPEM))
 			rr := httptest.NewRecorder()
-			autosignMux().ServeHTTP(rr, req)
+			autoMux.ServeHTTP(rr, req)
 
 			Expect(rr.Code).To(Equal(http.StatusBadRequest))
 			// Generic by design: this endpoint is unauthenticated, so a refusal

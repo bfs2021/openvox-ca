@@ -386,8 +386,7 @@ var ErrDisallowedSubjectAltNames = errors.New("CSR requests subject alternative 
 // CA refuses to sign — today BasicConstraints CA:TRUE (OID 2.5.29.19), the
 // subordinate-CA escalation the sign-path check exists to stop. A sentinel so
 // every path that signs a CSR can answer a policy refusal as a client error
-// rather than a server fault; the wrapped message text is unchanged, so the
-// manual signing path's existing string match keeps working.
+// rather than a server fault.
 var ErrDisallowedExtensions = errors.New("found extensions that disallow signing")
 
 // assertOwnCertificate proves that cert was issued by this CA, and is the

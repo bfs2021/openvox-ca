@@ -191,19 +191,23 @@ whether it was autosigned immediately or queued for manual signing. It answers
 does not verify, or whose Common Name does not match the subject in the path,
 and for a subject that already holds a CSR or a certificate — see [duplicate
 certificate requests](#duplicate-certificate-requests) below. Those are refused
-whatever the autosign policy, because they are decided before it. One more is
-not: a CSR requesting subject alternative names it may not have, which
+whatever the autosign policy, because they are decided before it. Two more are
+not, and both are signing-policy refusals: a CSR requesting subject alternative
+names it may not have, which
 [`allow_subject_alt_names`](configuration.md#subject-alternative-names-requested-by-a-csr)
-governs, is refused here with `400` **only when the submission is autosigned**,
-since that is the only case in which this endpoint signs anything. With manual
-signing the CSR is accepted (`200`) and queued as usual, and the refusal
-surfaces later — at `PUT /certificate_status` as a `409`, or in `POST /sign`'s
-signing-errors list. An operator testing the setting with autosign off should
-expect the `200`. That last refusal is deliberately generic — it names no entries, so a
-caller on this unauthenticated endpoint cannot use it to discover which names
-the CA would issue; the refused entries go to the CA's log at `WARN`. Anything
-else is a `500`, whose message is withheld for the same reason — except a submission
-refused by [`csr_rate_limit`](configuration.md), which answers `429 Too Many Requests` before the CSR is read at all.
+governs, and a CSR asking for extensions that disallow signing, today Basic
+Constraints `CA:TRUE`. Each is refused here with `400` **only when the
+submission is autosigned**, since that is the only case in which this endpoint
+signs anything. With manual signing the CSR is accepted (`200`) and queued as
+usual, and the refusal surfaces later — at `PUT /certificate_status` as a `409`,
+or in `POST /sign`'s signing-errors list. An operator testing a setting with
+autosign off should expect the `200`. The SAN refusal is deliberately generic —
+it names no entries, so a caller on this unauthenticated endpoint cannot use it
+to discover which names the CA would issue; the refused entries go to the CA's
+log at `WARN`. Anything else is a `500`, whose message is withheld for the same
+reason — except a submission refused by
+[`csr_rate_limit`](configuration.md), which answers `429 Too Many Requests`
+before the CSR is read at all.
 
 `DELETE /certificate_request/{subject}` is an operator rejecting a request
 rather than signing it, and it takes the same per-subject lock that `POST
@@ -402,7 +406,9 @@ Response:
 ```
 
 This route serialises on the same per-subject lock as signing, so it can block
-while another replica holds that lock.
+while another replica holds that lock. It answers `400 Bad Request` for an
+invalid subject or a bad `?dns=` value, and `409 Conflict` when the subject
+already has a certificate.
 
 It cannot issue a certificate carrying `pp_cli_auth` — see
 [authorization tiers](#authorization-tiers) — and it needs a running server.

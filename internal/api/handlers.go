@@ -325,7 +325,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 				// bare "conflict" sends them to the logs of whichever replica
 				// served them.
 				http.Error(w, ca.ErrDisallowedSubjectAltNames.Error(), http.StatusConflict)
-			} else if strings.Contains(err.Error(), "found extensions that disallow signing") {
+			} else if errors.Is(err, ca.ErrDisallowedExtensions) {
 				// Signing-policy rejection: the message lists only disallowed
 				// OIDs (no filesystem paths), so it is safe to surface and is a
 				// useful operator signal.
@@ -979,7 +979,7 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 			// Client-actionable validation failure: a malformed ?dns= value is
 			// a bad request, not a CA fault. The wrapped detail names only the
 			// caller's own entry and the reason, so it is safe to echo.
-			slog.Warn("Generate refused: invalid DNS alt name", "subject", subject)
+			slog.Warn("Generate refused: invalid DNS alt name", "subject", subject, "error", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		} else {
 			slog.Error("Generate failed", "subject", subject, "error", err)
