@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -37,18 +38,24 @@ const maxDNSNameLen = 253
 // dnsNameRegex matches valid DNS hostnames (RFC 952 / RFC 1123).
 var dnsNameRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 
+// ErrInvalidDNSAltName reports a client-supplied DNS alt name that failed
+// validation. A sentinel so the HTTP layer can answer 400 rather than 500:
+// the wrapped detail names only the caller's own entry and the reason, so it
+// is safe to return verbatim.
+var ErrInvalidDNSAltName = errors.New("invalid DNS alt name")
+
 // validateDNSAltNames checks that DNS alt names are well-formed hostnames
 // within reasonable bounds.
 func validateDNSAltNames(names []string) error {
 	if len(names) > maxDNSAltNames {
-		return fmt.Errorf("too many DNS alt names (%d > %d)", len(names), maxDNSAltNames)
+		return fmt.Errorf("%w: too many DNS alt names (%d > %d)", ErrInvalidDNSAltName, len(names), maxDNSAltNames)
 	}
 	for _, name := range names {
 		if len(name) > maxDNSNameLen {
-			return fmt.Errorf("DNS alt name %q exceeds maximum length (%d > %d)", name, len(name), maxDNSNameLen)
+			return fmt.Errorf("%w: %q exceeds maximum length (%d > %d)", ErrInvalidDNSAltName, name, len(name), maxDNSNameLen)
 		}
 		if !dnsNameRegex.MatchString(name) {
-			return fmt.Errorf("invalid DNS alt name %q: must be a valid hostname", name)
+			return fmt.Errorf("%w: %q: must be a valid hostname", ErrInvalidDNSAltName, name)
 		}
 	}
 	return nil

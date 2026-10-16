@@ -417,7 +417,7 @@ var _ = Describe("A managed-certificate spec", func() {
 	It("refuses a DNS name that is not a hostname", func() {
 		spec.DNSNames = []string{"not a hostname"}
 		Expect(spec.Validate()).To(MatchError(ContainSubstring(
-			`invalid DNS alt name "not a hostname"`)))
+			`invalid DNS alt name: "not a hostname"`)))
 		Expect(spec.Validate()).To(MatchError(ContainSubstring("must be a valid hostname")))
 	})
 

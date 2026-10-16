@@ -325,7 +325,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 				// bare "conflict" sends them to the logs of whichever replica
 				// served them.
 				http.Error(w, ca.ErrDisallowedSubjectAltNames.Error(), http.StatusConflict)
-			} else if strings.Contains(err.Error(), "found extensions that disallow signing") {
+			} else if errors.Is(err, ca.ErrDisallowedExtensions) {
 				// Signing-policy rejection: the message lists only disallowed
 				// OIDs (no filesystem paths), so it is safe to surface and is a
 				// useful operator signal.
@@ -874,6 +874,15 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 			// CA's log.
 			slog.Warn("SaveRequest refused: disallowed subject alternative names", "subject", subject)
 			http.Error(w, ca.ErrDisallowedSubjectAltNames.Error(), http.StatusBadRequest)
+		} else if errors.Is(err, ca.ErrDisallowedExtensions) {
+			// The CSR asks to be a CA. Policy refusal, not a fault: like the
+			// ErrDisallowedSubjectAltNames branch, a 400 keeps the agent
+			// waiting for an operator instead of ending its run. 400 rather
+			// than the manual path's 409 because this endpoint's contract with
+			// the agent's SSL state machine is "any non-2xx other than 400 is
+			// fatal". The wrapped message is the fixed policy text — no paths.
+			slog.Warn("SaveRequest refused: CSR requests CA capabilities", "subject", subject)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 		} else if csrValidationError(err) {
 			// Client-actionable validation failure (malformed or mis-signed CSR,
 			// or CN/subject mismatch). The message is path-free and useful to the
@@ -966,6 +975,12 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ca.ErrCertExists) {
 			slog.Warn("Generate conflict", "subject", subject, "error", err)
 			http.Error(w, "certificate already exists", http.StatusConflict)
+		} else if errors.Is(err, ca.ErrInvalidDNSAltName) {
+			// Client-actionable validation failure: a malformed ?dns= value is
+			// a bad request, not a CA fault. The wrapped detail names only the
+			// caller's own entry and the reason, so it is safe to echo.
+			slog.Warn("Generate refused: invalid DNS alt name", "subject", subject, "error", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 		} else {
 			slog.Error("Generate failed", "subject", subject, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)

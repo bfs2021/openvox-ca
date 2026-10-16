@@ -686,6 +686,7 @@ var _ = Describe("CA GenerateWithOptions", func() {
 					DNSAltNames: names,
 				})
 				Expect(err).To(MatchError(ContainSubstring(wants)))
+				Expect(err).To(MatchError(ca.ErrInvalidDNSAltName))
 				Expect(store.HasCert(ctx, "dns-node")).To(BeFalse())
 			},
 			Entry("not a hostname", []string{"not a hostname"}, "invalid DNS alt name"),

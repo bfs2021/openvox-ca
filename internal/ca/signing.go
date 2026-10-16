@@ -382,6 +382,13 @@ var ErrRenewalSubjectMismatch = errors.New("presented certificate is for a diffe
 // issue, on an endpoint reachable before any certificate has been granted.
 var ErrDisallowedSubjectAltNames = errors.New("CSR requests subject alternative names that are not allowed; set allow_subject_alt_names to permit them")
 
+// ErrDisallowedExtensions reports a submitted CSR asking for extensions this
+// CA refuses to sign — today BasicConstraints CA:TRUE (OID 2.5.29.19), the
+// subordinate-CA escalation the sign-path check exists to stop. A sentinel so
+// every path that signs a CSR can answer a policy refusal as a client error
+// rather than a server fault.
+var ErrDisallowedExtensions = errors.New("found extensions that disallow signing")
+
 // assertOwnCertificate proves that cert was issued by this CA, and is the
 // issuer half of the gate on both renewal paths. The revocation half is
 // refuseIfRevoked, which runs immediately after it and re-reads the CRL from
@@ -678,7 +685,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 				IsCA bool `asn1:"optional"`
 			}
 			if _, err := asn1.Unmarshal(ext.Value, &bc); err == nil && bc.IsCA {
-				return nil, fmt.Errorf("found extensions that disallow signing: [2.5.29.19]")
+				return nil, fmt.Errorf("%w: [2.5.29.19]", ErrDisallowedExtensions)
 			}
 		}
 	}
